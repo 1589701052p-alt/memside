@@ -15,7 +15,9 @@ export interface CaptureEvent {
 
 export interface InjectInput {
   cwd: string
-  memorySet: InjectableMemorySet
+  /** Optional pre-loaded memory set. Adapters that own their db (claude-code)
+   *  load approved memories themselves from `cwd` and ignore this field. */
+  memorySet?: InjectableMemorySet
 }
 
 export interface RuntimeAdapter {
