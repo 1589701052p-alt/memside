@@ -86,3 +86,24 @@ test('installHooks creates ~/.claude dir when missing', () => {
   installHooks({ port: 9999 })
   expect(existsSync(join(fakeHome, '.claude', 'settings.json'))).toBe(true)
 })
+
+// Regression test for the Task 17 cmd.exe-safe marker fix: the idempotency
+// marker must NOT be a `#` shell comment (invalid in cmd.exe on Windows - `#`
+// and `memside-managed` become stray curl args). Instead it must be an HTTP
+// header (`-H "x-memside-tag: memside-managed"`) which curl parses safely
+// on all shells and the collector ignores (it reads only the JSON body).
+test('hook command uses a curl header marker, not a shell comment (cmd.exe-safe)', () => {
+  installHooks({ port: 7777 })
+  const raw = JSON.parse(readFileSync(join(fakeHome, '.claude', 'settings.json'), 'utf-8'))
+  const cmds = (['SessionStart', 'Stop', 'PostToolUse', 'SubagentStop'] as const).flatMap((ev) =>
+    raw.hooks[ev].flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command as string)),
+  )
+  for (const cmd of cmds) {
+    // the header form is present
+    expect(cmd).toContain(`x-memside-tag: ${MEMSIDE_TAG}`)
+    // the `#` shell-comment form is absent (would break cmd.exe)
+    expect(cmd).not.toContain(`# ${MEMSIDE_TAG}`)
+    // --max-time 2 guard is preserved (collector must not block the hook)
+    expect(cmd).toContain('--max-time 2')
+  }
+})

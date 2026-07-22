@@ -7,8 +7,16 @@ import { homedir } from 'node:os'
  *
  * - Lets `installHooks` find and replace its own prior entries on re-run
  *   (idempotent merge) without touching user-authored hooks.
- * - Surfaces in `~/.claude/settings.json` as a shell comment (`# memside-managed`)
- *   so a human inspecting the file can see which hooks memside owns.
+ * - Surfaced in `~/.claude/settings.json` as a curl request header
+ *   (`-H "x-memside-tag: memside-managed"`) so a human inspecting the file can
+ *   see which hooks memside owns. The collector ignores request headers (it
+ *   reads only the JSON body), so the header is safe noise.
+ *
+ * Why a header and not a shell comment: on Windows the hook command runs under
+ * cmd.exe, where `#` is not a comment token - `# memside-managed` would be
+ * passed to curl as extra arguments, breaking the POST. An HTTP header is
+ * ignored by curl's argument parser (it's a `-H` value) and by the collector
+ * (it reads only the JSON body), so it is the portable idempotency marker.
  */
 export const MEMSIDE_TAG = 'memside-managed'
 
@@ -53,8 +61,13 @@ function resolveHome(): string {
  *
  * Shape (per task-14 plan): claude code pipes the hook JSON payload to stdin;
  * `curl -d @-` reads that stdin and forwards it verbatim as the JSON request
- * body to the collector. The trailing `# ${MEMSIDE_TAG}` is a shell comment
- * that (a) is invisible to curl and (b) is the grep-able idempotency marker.
+ * body to the collector. The trailing `-H "x-memside-tag: ${MEMSIDE_TAG}"`
+ * is the grep-able idempotency marker: it is an HTTP header (invisible to
+ * curl's argument parser and ignored by the collector, which reads only the
+ * JSON body) so it is safe on both POSIX shells and Windows cmd.exe.
+ *
+ * A `#` shell comment was originally used but is invalid in cmd.exe (Task 17
+ * fix): `# memside-managed` becomes stray curl arguments on Windows.
  *
  * Verification debt (see task-14-report.md): the `SessionStart` hook in
  * claude code can return `hookSpecificOutput.additionalContext` to inject
@@ -67,7 +80,7 @@ function resolveHome(): string {
  */
 function hookCommand(port: number, event: HookEvent): string {
   const url = `http://127.0.0.1:${port}/hooks/claude/${event}`
-  return `curl -s --max-time 2 -X POST ${url} -H "content-type: application/json" -d @- # ${MEMSIDE_TAG}`
+  return `curl -s --max-time 2 -X POST ${url} -H "content-type: application/json" -H "x-memside-tag: ${MEMSIDE_TAG}" -d @-`
 }
 
 /**
