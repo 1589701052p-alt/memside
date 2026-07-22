@@ -58,3 +58,20 @@ export async function patchMemory(
   const data = await res.json()
   return data.memory as MemoryItem
 }
+
+export interface MemsideStatus {
+  events: number
+  jobs: Record<string, number>
+  memories: Record<string, number>
+  lastError: { error: string } | null
+}
+
+/**
+ * GET /api/status - daemon background activity for the status bar: how many
+ * capture events, distill-job state counts (pending/running/done/failed),
+ * memory counts by status, and the most recent distill error (if any).
+ */
+export async function getStatus(fetchFn: FetchLike = fetch): Promise<MemsideStatus> {
+  const res = await fetchFn('/api/status')
+  return (await res.json()) as MemsideStatus
+}
