@@ -2,7 +2,7 @@
 
 ## MVP build: COMPLETE
 
-All 17 tasks are implemented. The full test suite is green (`bun test` -> 85 pass,
+All 17 tasks are implemented. The full test suite is green (`bun test` -> 100 pass,
 0 fail) and `tsc --noEmit` is clean.
 
 ### Task summary
@@ -53,39 +53,46 @@ bun run typecheck
 
 Port is `MEMSIDE_PORT` env (default 7777).
 
-## Verification debt (manual, pre-MVP-ship)
+## Verification status (post final-fix1..4 + daemon-layer live smoke)
 
-These four items cannot be automated in CI and must be confirmed by hand on the
-target machine before declaring the MVP shipped:
+The MVP's capture -> distill -> approve -> inject loop is verified end-to-end at
+the daemon layer via `smoke-live.ts` (real Ark LLM, real HTTP, no mocks): a real
+transcript -> candidate `[category:invariant] Refunds allowed only within 14 days
+of shipment` -> approved -> SessionStart returns the `hookSpecificOutput`
+additionalContext envelope with the `## Learned context` block. Test suite:
+`bun test` -> 100 pass / 0 fail, `tsc --noEmit` clean.
 
-1. **Claude code credential file shape** (Task 12): the `loadClaudeCreds`
-   loader reads `~/.claude/.credentials.json` and looks for
-   `claudeApiKey` / `apiKey`. Confirm the actual file shape and key name on the
-   target machine. If claude code stores the key differently (e.g. in a
-   keychain, or under a different JSON field), update `src/creds.ts`.
+### Resolved by final-fix passes (live-verified)
+1. **Credential loading** (final-fix4, `0a25a1a`): `src/creds.ts` now reads
+   `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` + `ANTHROPIC_DEFAULT_HAIKU_MODEL`
+   from `~/.claude/settings.json` env (process env first, then the settings
+   file), supporting the Volcengine Ark proxy the target user actually uses
+   (`https://ark.cn-beijing.volces.com/api/plan` + `deepseek-v4-flash`). Live
+   smoke confirmed the distiller calls the Ark model and gets a valid candidate.
+3. **Model reachability** (final-fix4): the distiller no longer hardcodes
+   `claude-haiku-4-5-20251001`; it uses `creds.model ?? DISTILL_MODEL`, so the
+   user's configured haiku-tier model wins. Live-verified.
+2. **C2/C3 capture+inject** (final-fix3, `ac73ce4`): capture reads
+   `transcript_path` via `src/claude/transcript.ts` `parseTranscriptFile`
+   (verified against the 2.1.217 binary + a real local transcript); SessionStart
+   returns the `hookSpecificOutput` additionalContext envelope (envelope shape
+   verified against the binary's own error string). Daemon-layer live smoke
+   passed the full loop.
 
-2. **C2/C3 capture+inject loops - implemented, live smoke pending** (final-fix3,
-   commit `ac73ce4`): the capture loop now reads `transcript_path` (claude code's
-   JSONL file path, verified against the 2.1.217 binary + a real local
-   transcript) via `src/claude/transcript.ts` `parseTranscriptFile`, not the
-   inline `transcript` array the original collector assumed (which was always
-   undefined in production). The inject loop now returns the
-   `hookSpecificOutput.additionalContext` envelope from the SessionStart
-   collector branch (envelope shape verified against the binary's own error
-   string). The remaining verification is a live end-to-end smoke: run
-   `bun run src/cli.ts start-and-install`, use claude code in a repo for a turn
-   (a `Stop` hook should fire), confirm a candidate appears at the web UI,
-   approve it, start a NEW claude code session in the same cwd, and confirm the
-   `## Learned context (auto-injected, advisory)` block is prepended to the
-   session. This live contract is not locked by automated tests.
+### Still requiring a live claude-code session (cannot be automated)
+4. **SessionStart additionalContext actually reaches a new session**: the daemon
+   returns the correct envelope (shape verified against the binary + daemon-layer
+   smoke), but confirming claude code prepends the block to a NEW session needs a
+   real session. Run `bun run src/cli.ts start-and-install`, use claude code in a
+   repo for a turn (a `Stop` hook fires), approve the candidate at the web UI,
+   start a NEW claude code session in the same cwd, and confirm the
+   `## Learned context (auto-injected, advisory)` block appears in the session
+   context. Record the result here: [ ] pending.
 
-3. **Anthropic model id reachability** (Task 8/16): the distiller calls the
-   Anthropic API with model `claude-haiku-4-5-20251001`. Confirm this model id
-   is reachable with the user's API key. If the id is wrong or the model is
-   deprecated, update `src/anthropic.ts`.
-
-4. **Live end-to-end against a real claude code session** (Task 17 step 6):
-   run `bun run src/cli.ts start-and-install`, start `bun run dev:web`, use
-   claude code in a repo for a turn, stop it, and verify a candidate appears
-   at the web UI. Approve it, start a new claude code session, and confirm
-   the memory block appears in the session context. Record the result here.
+### Live smoke harness
+`bun run smoke-live.ts` (repo root) runs the full loop against a tmp DB + tmp
+transcript + the real Ark LLM. In proxy environments, set
+`NO_PROXY=127.0.0.1,localhost` so local HTTP fetches bypass the system proxy:
+`NO_PROXY=127.0.0.1,localhost bun run smoke-live.ts` (the Ark call still goes
+through `HTTPS_PROXY`). Distill takes ~15-30s (async fire-and-forget, does not
+block the hook ack).
