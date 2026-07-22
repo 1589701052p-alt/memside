@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { desc } from 'drizzle-orm'
 import type { DbClient } from '@/db/client'
-import { memories } from '@/db/schema'
+import { memories, memoryDistillEvents } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
@@ -48,17 +48,35 @@ export function createApp(deps: AppDeps) {
     const cwd: string = body.cwd ?? ''
     const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
     const debounceKey = `${cwd}:${event}`
+    const sourceKind = event === 'PostToolUse' ? 'error' : 'conversation'
     deps.adapter.pushCapture({
       sourceEventId,
       runtime: 'claude-code',
       cwd,
       debounceKey,
       turns,
-      sourceKind: event === 'PostToolUse' ? 'error' : 'conversation',
+      sourceKind,
     })
-    // enqueue async, do not await in the hot path (<50ms ack contract)
-    void deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey })
-      .catch((e) => deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) }))
+    // Persist the transcript turns into memory_distill_events keyed by the
+    // distill job, then enqueue. Fire-and-forget so the route still returns
+    // 202 synchronously (<50ms ack contract); bun:sqlite writes are sync/sub-ms
+    // and the 5s debounce gives the tick plenty of time to read the events.
+    // Without this the daemon's makeLoadTranscript always sees an empty table
+    // and no candidate memories are ever produced from real hook callbacks.
+    void (async () => {
+      try {
+        const { jobId } = await deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey })
+        await deps.db.insert(memoryDistillEvents).values({
+          distillJobId: jobId,
+          attemptIndex: 0,
+          ts: Date.now(),
+          kind: sourceKind === 'error' ? 'error' : 'conversation',
+          payload: JSON.stringify(turns),
+        })
+      } catch (e) {
+        deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) })
+      }
+    })()
     deps.broadcast({ type: 'memory.capture', sourceEventId })
     return c.json({ ok: true }, 202)
   })

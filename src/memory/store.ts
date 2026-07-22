@@ -142,7 +142,8 @@ export async function promoteCandidate(db: DbClient, id: string, body: PromoteAc
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
     const cand = rows[0]!
-    if (cand.status !== 'candidate') {
+    const targetStatus = body.action === 'reject' ? 'rejected' : 'approved'
+    if (!canTransition(cand.status, targetStatus)) {
       throw new MemoryConflictError(`memory ${id} is '${cand.status}', not 'candidate'`)
     }
     if (body.action === 'reject') {
@@ -188,6 +189,10 @@ export async function patchMemory(
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
     const row = rows[0]!
+    // Editability guard (not a transition): terminal statuses (superseded,
+    // rejected) have no outgoing transitions in the state machine and cannot be
+    // edited. This is intentionally a "can this row be mutated at all" check,
+    // not a specific from->to transition - see canTransition in pure.ts.
     if (row.status === 'superseded' || row.status === 'rejected') {
       throw new MemoryConflictError(`memory ${id} is terminal ('${row.status}')`)
     }
@@ -221,7 +226,7 @@ export async function archiveMemory(db: DbClient, id: string): Promise<Memory> {
   return db.transaction((tx) => {
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
-    if (rows[0]!.status !== 'approved') {
+    if (!canTransition(rows[0]!.status, 'archived')) {
       throw new MemoryConflictError(`memory ${id} is '${rows[0]!.status}', not 'approved'`)
     }
     tx.update(memories).set({ status: 'archived' }).where(eq(memories.id, id)).run()
@@ -233,7 +238,7 @@ export async function unarchiveMemory(db: DbClient, id: string): Promise<Memory>
   return db.transaction((tx) => {
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
-    if (rows[0]!.status !== 'archived') {
+    if (!canTransition(rows[0]!.status, 'approved')) {
       throw new MemoryConflictError(`memory ${id} is '${rows[0]!.status}', not 'archived'`)
     }
     tx.update(memories).set({ status: 'approved' }).where(eq(memories.id, id)).run()

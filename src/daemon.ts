@@ -25,7 +25,7 @@ export interface DaemonOpts {
  * for a job in ts order and parses each `payload` as a JSON array of
  * `TranscriptTurn`. Non-JSON / non-array payloads are silently skipped.
  */
-function makeLoadTranscript(db: DbClient): TickDeps['loadTranscript'] {
+export function makeLoadTranscript(db: DbClient): TickDeps['loadTranscript'] {
   return async (job) => {
     const rows = await db.select().from(memoryDistillEvents)
       .where(eq(memoryDistillEvents.distillJobId, job.id))
@@ -110,7 +110,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   const adapter = new ClaudeCodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
   const app = createApp({ db, adapter, enqueueDistillJob, broadcast })
-  const server = Bun.serve({ port, fetch: app.fetch })
+  const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),

@@ -7,20 +7,26 @@ import { createApp } from '@/server'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { enqueueDistillJob, tick } from '@/scheduler'
 import { createCandidate } from '@/memory/store'
-import { memoryDistillEvents, memoryDistillJobs, memories } from '@/db/schema'
+import { makeLoadTranscript } from '@/daemon'
+import { memoryDistillJobs, memories } from '@/db/schema'
 
 /**
  * End-to-end smoke test for the memside MVP loop.
  *
- * Locks in the full pipeline contract from Task 17:
- *   claude code Stop hook -> distill enqueue -> distill tick (mocked Anthropic)
- *   -> candidate memory -> approve via API -> inject block contains the memory.
+ * Locks in the full pipeline contract from Task 17 - now exercising the REAL
+ * capture -> distill data flow (C1 fix):
+ *   claude code Stop hook -> collector persists turns to memory_distill_events
+ *   -> distill tick reads them via the REAL makeLoadTranscript -> candidate
+ *   memory -> approve via API -> inject block contains the memory.
  *
- * This is the single integration test that proves all 16 prior tasks compose
- * into the product vision. Every layer is real (Hono app, bun:sqlite DB, real
- * `enqueueDistillJob`, real `tick`, real `createCandidate`, real `promoteCandidate`,
- * real `listApprovedByScope`, real `formatMemoryBlock`); only the Anthropic LLM
- * call is mocked, since a live API key is not available in CI.
+ * Every layer is real (Hono app, bun:sqlite DB, real `enqueueDistillJob`,
+ * real collector HTTP route that writes memory_distill_events, real `tick`,
+ * real `makeLoadTranscript` reading the events table, real `createCandidate`,
+ * real `promoteCandidate`, real `listApprovedByScope`, real
+ * `formatMemoryBlock`); only the Anthropic LLM call is mocked, since a live
+ * API key is not available in CI. This is the proof that C1's data-flow fix
+ * works: the collector's fire-and-forget IIFE writes the turns, and the
+ * daemon's loader reads them back.
  *
  * EBUSY-safe pattern (same as server.test.ts / scheduler.test.ts): wipe `root`
  * once in beforeAll, give each test its own fresh subdir, and close the raw
@@ -51,9 +57,9 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   const app = createApp({ db, adapter, enqueueDistillJob, broadcast: () => {} })
 
   // 1. claude code Stop hook fires with a transcript containing a business rule.
-  //    The collector acks 202 and fire-and-forget-enqueues a distill job. The
-  //    drizzle/bun-sqlite INSERT executes synchronously inside the async
-  //    enqueueDistillJob call, so the job row is in the DB before we read it.
+  //    The collector acks 202 and fire-and-forget-enqueues a distill job AND
+  //    persists the transcript turns into memory_distill_events (C1 fix). No
+  //    manual event insert - the real collector HTTP route writes the row.
   const hookRes = await app.fetch(new Request('http://x/hooks/claude/Stop', {
     method: 'POST',
     body: JSON.stringify({
@@ -65,23 +71,26 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   }))
   expect(hookRes.status).toBe(202)
 
-  // 2. Seed the distill event payload. In production the collector persists the
-  //    transcript turns into memory_distill_events; here we insert them
-  //    directly, then force the job due (nextRunAt=0) so tick picks it up.
+  // 2. Wait briefly for the fire-and-forget collector IIFE to write the
+  //    memory_distill_events row. The IIFE runs async after the 202 response;
+  //    bun:sqlite writes are sync/sub-ms so 50ms is ample headroom.
+  await new Promise((r) => setTimeout(r, 50))
+
+  // 3. The real enqueueDistillJob inserted a pending job (nextRunAt = now +
+  //    5s debounce). Force it due so tick picks it up immediately.
   const jobs = await db.select().from(memoryDistillJobs)
   expect(jobs.length).toBe(1)
   const jobId = jobs[0]!.id
-  await db.insert(memoryDistillEvents).values({
-    distillJobId: jobId, attemptIndex: 0, ts: 1, kind: 'conversation',
-    payload: JSON.stringify([{ role: 'user', content: 'refunds within 14 days' }]),
-  })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
 
-  // 3. Distill tick with a mocked Anthropic. The mock returns one candidate
-  //    with a [category:invariant] title (required by the distiller's parse
-  //    guard) and scope='project' so scopeId resolves to the job's cwd.
+  // 4. Distill tick with the REAL makeLoadTranscript (reads
+  //    memory_distill_events by jobId, parses JSON payload into turns) and a
+  //    mocked Anthropic. The mock returns one candidate with a
+  //    [category:invariant] title (required by the distiller's parse guard)
+  //    and scope='project' so scopeId resolves to the job's cwd. The ONLY mock
+  //    is callAnthropic - everything else is the real production path.
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'refunds within 14 days' }],
+    loadTranscript: makeLoadTranscript(db),
     callAnthropic: async () => JSON.stringify({
       candidates: [{
         title: '[category:invariant] refund window 14 days',
@@ -94,12 +103,13 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
     createCandidate,
   })
 
-  // 4. Candidate exists in the DB.
+  // 5. Candidate exists in the DB - proving the REAL loadTranscript read the
+  //    turns that the REAL collector wrote.
   const cands = await db.select().from(memories).where(eq(memories.status, 'candidate'))
   expect(cands.length).toBe(1)
   const candId = cands[0]!.id
 
-  // 5. Approve via the web API promote endpoint.
+  // 6. Approve via the web API promote endpoint.
   const promoRes = await app.fetch(new Request(`http://x/api/memories/${candId}/promote`, {
     method: 'POST',
     body: JSON.stringify({ action: 'approve' }),
@@ -107,7 +117,7 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   }))
   expect(promoRes.status).toBe(200)
 
-  // 6. Inject returns the memory block for the same cwd. The candidate was
+  // 7. Inject returns the memory block for the same cwd. The candidate was
   //    scopeId='/repo' (from the hook's cwd), runtime=null (passes the
   //    claude-code runtime filter), so it appears in the injected block.
   const injRes = await app.fetch(new Request('http://x/inject', {
