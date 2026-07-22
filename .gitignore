@@ -3,4 +3,5 @@ node_modules/
 .superpowers/
 *.db
 *.db-*
+tests/.tmp-*/
 dist/
