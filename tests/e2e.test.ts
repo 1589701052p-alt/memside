@@ -89,19 +89,33 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   //    [category:invariant] title (required by the distiller's parse guard)
   //    and scope='project' so scopeId resolves to the job's cwd. The ONLY mock
   //    is callAnthropic - everything else is the real production path.
+  //
+  //    C1 lock: we capture the `userPrompt` arg passed to callAnthropic and
+  //    assert it contains a substring of the hook's transcript turn. If the
+  //    data path broke (turns never reached the distiller), the mock would
+  //    still return a candidate and the rest of the test would pass - but
+  //    capturedUserPrompt would be empty. This assertion is the proof that
+  //    turns flowed collector -> events -> makeLoadTranscript -> distiller.
+  let capturedUserPrompt = ''
   await tick(db, {
     loadTranscript: makeLoadTranscript(db),
-    callAnthropic: async () => JSON.stringify({
-      candidates: [{
-        title: '[category:invariant] refund window 14 days',
-        bodyMd: 'Refunds allowed within 14 days of shipment.',
-        scope: 'project',
-        runtime: null,
-        distillAction: 'new',
-      }],
-    }),
+    callAnthropic: async (_system: string, user: string) => {
+      capturedUserPrompt = user
+      return JSON.stringify({
+        candidates: [{
+          title: '[category:invariant] refund window 14 days',
+          bodyMd: 'Refunds allowed within 14 days of shipment.',
+          scope: 'project',
+          runtime: null,
+          distillAction: 'new',
+        }],
+      })
+    },
     createCandidate,
   })
+  // C1 lock: the transcript turn content ('we only issue refunds within 14 days
+  // of shipment') must appear in the userPrompt that reached the distiller.
+  expect(capturedUserPrompt).toContain('refunds within 14 days')
 
   // 5. Candidate exists in the DB - proving the REAL loadTranscript read the
   //    turns that the REAL collector wrote.

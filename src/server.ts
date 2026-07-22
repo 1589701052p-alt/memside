@@ -20,9 +20,10 @@ export interface AppDeps {
  * Three concerns, three route groups:
  *
  * 1. Collector (`POST /hooks/claude/:event`) - claude code hook callback. The
- *    <50ms ack contract: only `adapter.pushCapture` (in-memory push) + a
- *    fire-and-forget `void enqueueDistillJob(...)` (never awaited in the hot
- *    path). No file reads, no LLM, no DB writes on the critical path. Returns
+ *    <50ms ack contract: the handler returns 202 synchronously while a
+ *    fire-and-forget IIFE (never awaited in the hot path) enqueues a distill
+ *    job and persists the transcript turns into `memory_distill_events`. No
+ *    file reads, no LLM, no awaited DB writes on the critical path. Returns
  *    202 Accepted. `sourceKind` is `'error'` for `PostToolUse` (error-signal
  *    transcript path) and `'conversation'` for everything else.
  *
@@ -49,14 +50,11 @@ export function createApp(deps: AppDeps) {
     const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
     const debounceKey = `${cwd}:${event}`
     const sourceKind = event === 'PostToolUse' ? 'error' : 'conversation'
-    deps.adapter.pushCapture({
-      sourceEventId,
-      runtime: 'claude-code',
-      cwd,
-      debounceKey,
-      turns,
-      sourceKind,
-    })
+    // The in-memory adapter.pushCapture queue is intentionally NOT fed here:
+    // the real data path is the memory_distill_events DB row written by the
+    // fire-and-forget IIFE below (C1 fix). pushCapture/capture stay on the
+    // adapter for unit tests / future adapters, but buffering every hook's full
+    // transcript in an unbounded in-memory queue was a leak with no consumer.
     // Persist the transcript turns into memory_distill_events keyed by the
     // distill job, then enqueue. Fire-and-forget so the route still returns
     // 202 synchronously (<50ms ack contract); bun:sqlite writes are sync/sub-ms
@@ -70,7 +68,7 @@ export function createApp(deps: AppDeps) {
           distillJobId: jobId,
           attemptIndex: 0,
           ts: Date.now(),
-          kind: sourceKind === 'error' ? 'error' : 'conversation',
+          kind: sourceKind,
           payload: JSON.stringify(turns),
         })
       } catch (e) {

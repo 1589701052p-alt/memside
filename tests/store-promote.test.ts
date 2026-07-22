@@ -2,7 +2,7 @@ import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
-import { createCandidate, promoteCandidate, patchMemory } from '@/memory/store'
+import { createCandidate, promoteCandidate, patchMemory, archiveMemory, unarchiveMemory } from '@/memory/store'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
@@ -67,4 +67,44 @@ test('promote non-candidate throws', async () => {
   const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
   await promoteCandidate(db, c.id, { action: 'approve' })
   await expect(promoteCandidate(db, c.id, { action: 'approve' })).rejects.toThrow()
+})
+
+// --- Archive / unarchive edge tests (closes Task 7 ledger: archive/unarchive
+// were untested). These also lock in the I3 regression fix: the store's write
+// paths use SPECIFIC source-status checks (promote must come from 'candidate',
+// archive from 'approved', unarchive from 'archived') rather than the general
+// canTransition(), because canTransition('archived','approved') is true and a
+// general check would silently re-approve an archived memory (resetting
+// version to 1, overwriting approvedAt).
+
+test('promote on archived throws (I3: archived must not re-approve)', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await promoteCandidate(db, c.id, { action: 'approve' })
+  await archiveMemory(db, c.id)
+  // canTransition('archived','approved') is true, but promote must only accept
+  // 'candidate'. A general check would re-approve the archived memory, resetting
+  // version to 1 - this is the I3 regression. Lock the specific source status.
+  await expect(promoteCandidate(db, c.id, { action: 'approve' })).rejects.toThrow()
+})
+
+test('archive on non-approved throws', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  // candidate -> archive is not allowed; archive requires status === 'approved'
+  await expect(archiveMemory(db, c.id)).rejects.toThrow()
+})
+
+test('unarchive on non-archived throws', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  // candidate -> unarchive is not allowed; unarchive requires status === 'archived'.
+  // canTransition('candidate','approved') is true, so a general check would
+  // silently approve a candidate (bypassing the promote flow).
+  await expect(unarchiveMemory(db, c.id)).rejects.toThrow()
+})
+
+test('unarchive on archived returns approved', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await promoteCandidate(db, c.id, { action: 'approve' })
+  await archiveMemory(db, c.id)
+  const u = await unarchiveMemory(db, c.id)
+  expect(u.status).toBe('approved')
 })

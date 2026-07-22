@@ -115,7 +115,12 @@ export async function listApprovedByScope(
   }
 }
 
-// re-export for downstream tasks
+// canTransition (defined in pure.ts) is the authoritative state-machine
+// definition. The store's write paths use SPECIFIC source-status checks above
+// (promote must come from 'candidate', archive from 'approved', unarchive from
+// 'archived') because each function's semantics require a specific source, not
+// just any legal transition - see I3 regression. canTransition is re-exported
+// here for downstream tasks and stays covered by pure-statemachine.test.ts.
 export { canTransition }
 
 // ---------------------------------------------------------------------------
@@ -142,8 +147,11 @@ export async function promoteCandidate(db: DbClient, id: string, body: PromoteAc
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
     const cand = rows[0]!
-    const targetStatus = body.action === 'reject' ? 'rejected' : 'approved'
-    if (!canTransition(cand.status, targetStatus)) {
+    // Specific-source guard (I3): promoteCandidate must only accept
+    // status === 'candidate'. The general canTransition('archived','approved')
+    // is also true, so a general check would silently promote an ARCHIVED memory
+    // (resetting version to 1, overwriting approvedAt) instead of throwing.
+    if (cand.status !== 'candidate') {
       throw new MemoryConflictError(`memory ${id} is '${cand.status}', not 'candidate'`)
     }
     if (body.action === 'reject') {
@@ -226,7 +234,10 @@ export async function archiveMemory(db: DbClient, id: string): Promise<Memory> {
   return db.transaction((tx) => {
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
-    if (!canTransition(rows[0]!.status, 'archived')) {
+    // Specific-source guard (I3): archive must only accept status === 'approved'.
+    // canTransition(status,'archived') happens to only be true for approved, but
+    // keep the specific check for consistency with promote/unarchive semantics.
+    if (rows[0]!.status !== 'approved') {
       throw new MemoryConflictError(`memory ${id} is '${rows[0]!.status}', not 'approved'`)
     }
     tx.update(memories).set({ status: 'archived' }).where(eq(memories.id, id)).run()
@@ -238,7 +249,10 @@ export async function unarchiveMemory(db: DbClient, id: string): Promise<Memory>
   return db.transaction((tx) => {
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
-    if (!canTransition(rows[0]!.status, 'approved')) {
+    // Specific-source guard (I3): unarchive must only accept status === 'archived'.
+    // canTransition('candidate','approved') is true, so a general check would
+    // silently approve a CANDIDATE (bypassing the promote flow). Lock the source.
+    if (rows[0]!.status !== 'archived') {
       throw new MemoryConflictError(`memory ${id} is '${rows[0]!.status}', not 'archived'`)
     }
     tx.update(memories).set({ status: 'approved' }).where(eq(memories.id, id)).run()

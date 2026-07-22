@@ -5,6 +5,7 @@ import { openDb } from '@/db/client'
 import { createCandidate, promoteCandidate } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
+import { memoryDistillEvents } from '@/db/schema'
 
 // EBUSY-safe pattern (same as store-promote.test.ts / adapter-claude.test.ts):
 // wipe `root` once in beforeAll, give each test its own fresh subdir, and
@@ -59,13 +60,9 @@ test('collector hook accepts event and acks 202', async () => {
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
-  // Brief's baseline assertion (fixed: field is `queue`, not `_queue`).
-  // This is weak by itself - the enqueue assertion below is the real check.
-  expect((adapter as any).queue.length).toBe(1)
-  // Stronger than the brief's baseline: verify the fire-and-forget enqueue was
-  // actually called with the hook's payload. The mock records calls synchronously
-  // at call-time (before the async return), so this is deterministic even though
-  // the handler does `void` (not `await`) on enqueue - the <50ms ack contract.
+  // The fire-and-forget enqueue mock records calls synchronously at call-time
+  // (before the async return), so this is deterministic even though the handler
+  // does `void` (not `await`) on enqueue - the <50ms ack contract.
   expect(enqueueCalls.length).toBe(1)
   expect(enqueueCalls[0]).toMatchObject({
     sourceEventId: 'e1',
@@ -73,6 +70,14 @@ test('collector hook accepts event and acks 202', async () => {
     cwd: '/r',
     debounceKey: '/r:Stop',
   })
+  // C1 fix: the collector's fire-and-forget IIFE persists turns to
+  // memory_distill_events (not the vestigial adapter.pushCapture queue).
+  // Wait briefly for the IIFE to complete the DB write.
+  await new Promise((res) => setTimeout(res, 50))
+  const events = await db.select().from(memoryDistillEvents)
+  expect(events.length).toBe(1)
+  expect(events[0]!.kind).toBe('conversation')
+  expect(events[0]!.payload).toContain('hi')
   // collector broadcasts a capture event for WS subscribers
   expect(broadcastCalls.length).toBeGreaterThanOrEqual(1)
 })
@@ -105,8 +110,12 @@ test('collector PostToolUse marks sourceKind error', async () => {
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
-  const queued = (adapter as any).queue as Array<{ sourceKind: string }>
-  expect(queued[0].sourceKind).toBe('error')
+  // C1 fix: sourceKind is persisted as `kind` on the memory_distill_events row
+  // (previously asserted on the vestigial adapter.pushCapture queue).
+  await new Promise((res) => setTimeout(res, 50))
+  const events = await db.select().from(memoryDistillEvents)
+  expect(events.length).toBe(1)
+  expect(events[0]!.kind).toBe('error')
 })
 
 test('inject returns null block when no memories', async () => {
