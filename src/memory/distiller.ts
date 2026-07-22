@@ -21,7 +21,7 @@ Write a matching category as a "[category:xxx]" prefix on each candidate title:
 Cross-cutting properties:
 - atomic and generalizable; survives outside the event that produced it.
 - names a clear binding scope: "project" (specific to this codebase) or "global" (any project).
-- written in plain English, post-incident framing (NOT "today the user said X" - instead "X is the rule").
+- title 和 bodyMd 用简体中文撰写（[category:xxx] 前缀保持英文不变）；用事后总结的口吻（不要写"今天用户说了 X"，而是"X 是规则"）。
 - includes the *why* whenever rationale appears in the event.
 - bodyMd at most ~400 characters; title <= 120 chars including the prefix.
 
