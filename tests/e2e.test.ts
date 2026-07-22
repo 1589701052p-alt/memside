@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
-import { rmSync, mkdirSync } from 'node:fs'
+import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
@@ -14,19 +14,20 @@ import { memoryDistillJobs, memories } from '@/db/schema'
  * End-to-end smoke test for the memside MVP loop.
  *
  * Locks in the full pipeline contract from Task 17 - now exercising the REAL
- * capture -> distill data flow (C1 fix):
- *   claude code Stop hook -> collector persists turns to memory_distill_events
- *   -> distill tick reads them via the REAL makeLoadTranscript -> candidate
- *   memory -> approve via API -> inject block contains the memory.
+ * capture -> distill data flow (C1 + C3 fix):
+ *   claude code Stop hook -> collector parses a REAL JSONL transcript file
+ *   (transcript_path, not an inline mock array) via parseTranscriptFile ->
+ *   persists turns to memory_distill_events -> distill tick reads them via the
+ *   REAL makeLoadTranscript -> candidate memory -> approve via API -> inject.
  *
  * Every layer is real (Hono app, bun:sqlite DB, real `enqueueDistillJob`,
- * real collector HTTP route that writes memory_distill_events, real `tick`,
- * real `makeLoadTranscript` reading the events table, real `createCandidate`,
- * real `promoteCandidate`, real `listApprovedByScope`, real
- * `formatMemoryBlock`); only the Anthropic LLM call is mocked, since a live
- * API key is not available in CI. This is the proof that C1's data-flow fix
- * works: the collector's fire-and-forget IIFE writes the turns, and the
- * daemon's loader reads them back.
+ * real collector HTTP route that calls parseTranscriptFile and writes
+ * memory_distill_events, real `tick`, real `makeLoadTranscript` reading the
+ * events table, real `createCandidate`, real `promoteCandidate`, real
+ * `listApprovedByScope`, real `formatMemoryBlock`); only the Anthropic LLM
+ * call is mocked, since a live API key is not available in CI. This is the
+ * proof that C3's transcript_path fix works: a real JSONL file is parsed into
+ * turns that flow collector -> events -> makeLoadTranscript -> distiller.
  *
  * EBUSY-safe pattern (same as server.test.ts / scheduler.test.ts): wipe `root`
  * once in beforeAll, give each test its own fresh subdir, and close the raw
@@ -56,16 +57,27 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   const adapter = new ClaudeCodeAdapter(db)
   const app = createApp({ db, adapter, enqueueDistillJob, broadcast: () => {} })
 
-  // 1. claude code Stop hook fires with a transcript containing a business rule.
-  //    The collector acks 202 and fire-and-forget-enqueues a distill job AND
-  //    persists the transcript turns into memory_distill_events (C1 fix). No
-  //    manual event insert - the real collector HTTP route writes the row.
+  // 1. claude code Stop hook fires with a transcript_path pointing at a REAL
+  //    JSONL file containing a business rule. The collector acks 202 and
+  //    fire-and-forget calls parseTranscriptFile(path) to turn the JSONL into
+  //    TranscriptTurn[], persists them into memory_distill_events (C1+C3 fix),
+  //    and enqueues a distill job. No inline mock transcript - this exercises
+  //    the real parseTranscriptFile -> DB -> makeLoadTranscript -> distiller
+  //    path. Only callAnthropic is mocked (no live API key in CI).
+  const fixturePath = join(dir, 'transcript.jsonl')
+  writeFileSync(
+    fixturePath,
+    JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: 'we only issue refunds within 14 days of shipment' },
+    }) + '\n',
+  )
   const hookRes = await app.fetch(new Request('http://x/hooks/claude/Stop', {
     method: 'POST',
     body: JSON.stringify({
       sourceEventId: 'e1',
       cwd: '/repo',
-      transcript: [{ role: 'user', content: 'we only issue refunds within 14 days of shipment' }],
+      transcript_path: fixturePath,
     }),
     headers: { 'content-type': 'application/json' },
   }))
@@ -90,12 +102,13 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   //    and scope='project' so scopeId resolves to the job's cwd. The ONLY mock
   //    is callAnthropic - everything else is the real production path.
   //
-  //    C1 lock: we capture the `userPrompt` arg passed to callAnthropic and
+  //    C1+C3 lock: we capture the `userPrompt` arg passed to callAnthropic and
   //    assert it contains a substring of the hook's transcript turn. If the
-  //    data path broke (turns never reached the distiller), the mock would
-  //    still return a candidate and the rest of the test would pass - but
-  //    capturedUserPrompt would be empty. This assertion is the proof that
-  //    turns flowed collector -> events -> makeLoadTranscript -> distiller.
+  //    data path broke (parseTranscriptFile returned [], or turns never reached
+  //    the distiller), the mock would still return a candidate and the rest of
+  //    the test would pass - but capturedUserPrompt would be empty. This
+  //    assertion is the proof that turns flowed JSONL file -> parseTranscriptFile
+  //    -> collector -> events -> makeLoadTranscript -> distiller.
   let capturedUserPrompt = ''
   await tick(db, {
     loadTranscript: makeLoadTranscript(db),

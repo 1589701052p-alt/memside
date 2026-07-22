@@ -4,7 +4,7 @@ import type { DbClient } from '@/db/client'
 import { memories, memoryDistillEvents } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById } from '@/memory/store'
-import type { TranscriptTurn } from '@/memory/pure'
+import { parseTranscriptFile } from '@/claude/transcript'
 import type { EnqueueInput } from '@/scheduler'
 
 export interface AppDeps {
@@ -19,18 +19,31 @@ export interface AppDeps {
  *
  * Three concerns, three route groups:
  *
- * 1. Collector (`POST /hooks/claude/:event`) - claude code hook callback. The
- *    <50ms ack contract: the handler returns 202 synchronously while a
- *    fire-and-forget IIFE (never awaited in the hot path) enqueues a distill
- *    job and persists the transcript turns into `memory_distill_events`. No
- *    file reads, no LLM, no awaited DB writes on the critical path. Returns
- *    202 Accepted. `sourceKind` is `'error'` for `PostToolUse` (error-signal
- *    transcript path) and `'conversation'` for everything else.
+ * 1. Collector (`POST /hooks/claude/:event`) - claude code hook callback.
+ *    claude code pipes a JSON stdin payload whose `transcript_path` is a path
+ *    to a JSONL transcript file (NOT an inline array - verified against claude
+ *    code 2.1.217's bundle). Two branches by event:
+ *    - `SessionStart`: does NOT capture/enqueue. Calls `adapter.inject({cwd})`
+ *      and, when there is an approved-memory block, returns the
+ *      `{hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:<block>}}`
+ *      envelope claude code reads from the hook's stdout to prepend context to
+ *      the new session (C2 fix). When there is nothing to inject, returns
+ *      `{ok:true}`. This is synchronous-ish (a DB read + formatMemoryBlock,
+ *      ~ms) and returns directly - NOT fire-and-forget - because the hook's
+ *      stdout IS the response body claude code reads. SessionStart is
+ *      low-frequency so a few ms is fine.
+ *    - `Stop` / `SubagentStop` / `PostToolUse`: the <50ms ack contract holds -
+ *      the handler returns 202 synchronously while a fire-and-forget IIFE
+ *      (never awaited in the hot path) reads the JSONL file via
+ *      `parseTranscriptFile`, persists the turns into `memory_distill_events`,
+ *      and enqueues a distill job. `sourceKind` is `'error'` for `PostToolUse`
+ *      (error-signal transcript path) and `'conversation'` otherwise.
  *
- * 2. Injector (`POST /inject`) - SessionStart hook calls this to get the memory
- *    block prepended to the session. Delegates to `adapter.inject({cwd})`;
- *    returns `{ block }` where block may be null (no approved memories). The
- *    adapter swallows store errors so injection never throws to the caller.
+ * 2. Injector (`POST /inject`) - programmatic seam (the SessionStart hook
+ *    itself goes through the collector branch above). Delegates to
+ *    `adapter.inject({cwd})`; returns `{ block }` where block may be null (no
+ *    approved memories). The adapter swallows store errors so injection never
+ *    throws to the caller.
  *
  * 3. Memory API (`/api/memories...`) - CRUD for the web UI. List (createdAt
  *    DESC), get (404 on miss), create manual candidate (201), promote
@@ -44,9 +57,39 @@ export function createApp(deps: AppDeps) {
   // --- Collector ----------------------------------------------------------
   app.post('/hooks/claude/:event', async (c) => {
     const event = c.req.param('event')
-    const body = await c.req.json().catch(() => ({}) as { transcript?: unknown; cwd?: string; sourceEventId?: string })
-    const turns: TranscriptTurn[] = Array.isArray(body.transcript) ? body.transcript : []
+    const body = await c.req.json().catch(() => ({}) as { transcript_path?: string; cwd?: string; sourceEventId?: string })
     const cwd: string = body.cwd ?? ''
+
+    // SessionStart (C2 fix): inject approved memories into the new session.
+    // claude code honors ONLY the `hookSpecificOutput.additionalContext`
+    // envelope on a SessionStart hook's stdout (bundle error string: "Did you
+    // mean hookSpecificOutput.additionalContext (with a hookEventName)?").
+    // A plain `{ok:true}` contributes no context. We do NOT capture/enqueue
+    // here - SessionStart has no transcript to distill. The inject path is a
+    // DB read + formatMemoryBlock (~ms); SessionStart is low-frequency so a
+    // few ms synchronous is fine, and crucially this must NOT be
+    // fire-and-forget because the hook's stdout IS the response body claude
+    // code reads.
+    if (event === 'SessionStart') {
+      const block = await deps.adapter.inject({ cwd })
+      if (block) {
+        return c.json({
+          hookSpecificOutput: {
+            hookEventName: 'SessionStart',
+            additionalContext: block,
+          },
+        })
+      }
+      return c.json({ ok: true })
+    }
+
+    // Stop / SubagentStop / PostToolUse (C3 fix): claude code pipes
+    // `transcript_path` (a JSONL file path, NOT an inline array). The old code
+    // read `body.transcript` (inline) which is always undefined in production
+    // -> turns=[] -> empty payload stored -> distiller got nothing. Tests
+    // passed only because e2e mocked the transcript inline. Now we parse the
+    // real JSONL file into TranscriptTurn[].
+    const transcriptPath: string = body.transcript_path ?? ''
     const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
     const debounceKey = `${cwd}:${event}`
     const sourceKind = event === 'PostToolUse' ? 'error' : 'conversation'
@@ -61,8 +104,15 @@ export function createApp(deps: AppDeps) {
     // and the 5s debounce gives the tick plenty of time to read the events.
     // Without this the daemon's makeLoadTranscript always sees an empty table
     // and no candidate memories are ever produced from real hook callbacks.
+    //
+    // When transcript_path is empty/missing or the file yields no turns, we
+    // still enqueue (the distiller can decide) and store `[]` as the payload.
+    // This preserves the capture signal for WS subscribers and lets a later
+    // retry pick up a transcript file that was still being written when the
+    // hook fired; dropping the job would lose the event entirely.
     void (async () => {
       try {
+        const turns = transcriptPath ? parseTranscriptFile(transcriptPath) : []
         const { jobId } = await deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey })
         await deps.db.insert(memoryDistillEvents).values({
           distillJobId: jobId,
