@@ -109,3 +109,17 @@ export function detectErrorSignals(turns: readonly TranscriptTurn[]): ErrorSigna
     hasSignal: toolFailures + userNegations + retries + blameMarkers > 0,
   }
 }
+
+export type MemoryStatus = 'candidate' | 'approved' | 'archived' | 'superseded' | 'rejected'
+
+const TRANSITIONS: Record<MemoryStatus, MemoryStatus[]> = {
+  candidate: ['approved', 'rejected'],
+  approved: ['archived', 'superseded'],
+  archived: ['approved'],
+  superseded: [],
+  rejected: [],
+}
+
+export function canTransition(from: MemoryStatus, to: MemoryStatus): boolean {
+  return TRANSITIONS[from].includes(to)
+}
