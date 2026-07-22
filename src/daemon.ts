@@ -8,7 +8,7 @@ import { tick, startMemoryDistillLoop, enqueueDistillJob, type TickDeps } from '
 import { createCandidate } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 import { makeCallAnthropic } from '@/anthropic'
-import { loadClaudeCreds } from './creds'
+import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
 import { installHooks } from './install'
@@ -53,7 +53,7 @@ export function makeLoadTranscript(db: DbClient): TickDeps['loadTranscript'] {
 export async function runDistillOnce(
   db: DbClient,
   deps: {
-    loadClaudeCreds?: () => { apiKey: string | null; source: string }
+    loadClaudeCreds?: () => ClaudeCreds
     callAnthropic?: (systemPrompt: string, userPrompt: string) => Promise<string>
   } = {},
 ): Promise<number> {

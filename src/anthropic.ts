@@ -1,13 +1,22 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { loadClaudeCreds } from './creds'
+import { loadClaudeCreds, type ClaudeCreds } from './creds'
 
 export interface AnthropicDeps {
   /** Injectable for tests; production uses the real `loadClaudeCreds`. */
-  loadClaudeCreds?: () => { apiKey: string | null; source: string }
+  loadClaudeCreds?: () => ClaudeCreds
 }
 
 /**
  * Model id for distill calls.
+ *
+ * This is the **fallback** used when the user has not configured a haiku model.
+ * The user's `ANTHROPIC_DEFAULT_HAIKU_MODEL` (or `ANTHROPIC_MODEL`) env var /
+ * `~/.claude/settings.json` `env` value takes precedence via `loadClaudeCreds`
+ * and is passed straight through to `messages.create`; `DISTILL_MODEL` only
+ * applies when no such override is present (e.g. the official
+ * `ANTHROPIC_API_KEY` path with no model env). When routing through a proxy
+ * (Volcengine Ark) the resolved model is typically a non-Anthropic id like
+ * `deepseek-v4-flash[1m]`, so honoring it is required for the call to land.
  *
  * Verification debt (Task 17 live-smoke): the reachability of this exact id
  * with the user's credential is not locked by these tests (they mock the SDK).
@@ -23,6 +32,13 @@ export const DISTILL_MODEL = 'claude-haiku-4-5-20251001'
  * `loadClaudeCreds`; tests inject a mock `loadClaudeCreds` (or the daemon /
  * distill tests inject `callAnthropic` directly, bypassing this entirely).
  *
+ * The resolved credentials drive three SDK inputs:
+ *   - `apiKey`: the auth key (official `ANTHROPIC_API_KEY` or a proxy
+ *     `ANTHROPIC_AUTH_TOKEN`).
+ *   - `baseURL`: forwarded only when present, so a proxy (Ark) endpoint is used
+ *     while the official API keeps its default.
+ *   - `model`: the creds model when configured, otherwise `DISTILL_MODEL`.
+ *
  * Throws if no credential is resolvable - the distiller's top-level try/catch
  * degrades that to "no candidates this round" and records `lastError` on the
  * job, so a misconfigured daemon never crashes the loop.
@@ -32,11 +48,14 @@ export function makeCallAnthropic(deps: AnthropicDeps = {}) {
   return async function callAnthropic(systemPrompt: string, userPrompt: string): Promise<string> {
     const creds = load()
     if (!creds.apiKey) {
-      throw new Error('no claude credentials; run memside with ANTHROPIC_API_KEY or log in to claude code')
+      throw new Error('no claude credentials; run memside with ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (+ ANTHROPIC_BASE_URL), or log in to claude code')
     }
-    const client = new Anthropic({ apiKey: creds.apiKey })
+    const client = new Anthropic({
+      apiKey: creds.apiKey,
+      ...(creds.baseURL ? { baseURL: creds.baseURL } : {}),
+    })
     const msg = await client.messages.create({
-      model: DISTILL_MODEL,
+      model: creds.model ?? DISTILL_MODEL,
       max_tokens: 2048,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
