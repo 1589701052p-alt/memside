@@ -58,6 +58,7 @@ export function createApp(deps: AppDeps) {
     })
     // enqueue async, do not await in the hot path (<50ms ack contract)
     void deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey })
+      .catch((e) => deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) }))
     deps.broadcast({ type: 'memory.capture', sourceEventId })
     return c.json({ ok: true }, 202)
   })
