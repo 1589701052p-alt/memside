@@ -26,8 +26,13 @@ test('clipByBudget drops oldest rows that overflow', () => {
     row({ id: 'c', createdAt: 1, bodyMd: 'b' }),
   ]
   const clipped = clipByBudget(rows, 12) // 2 fit (10 tokens), oldest (c) overflows
-  expect(clipped.length).toBeLessThanOrEqual(3)
-  expect(clipped[0]!.id).toBe('a') // newest first preserved
+  expect(clipped.length).toBe(2)
+  expect(clipped.map((r) => r.id)).toEqual(['a', 'b']) // kept set + order locked
+})
+
+test('clipByBudget with budget <= 0 returns empty array', () => {
+  const rows = [row({ id: 'a' })]
+  expect(clipByBudget(rows, 0)).toEqual([])
 })
 
 test('formatMemoryBlock returns null when all scopes empty', () => {
