@@ -77,6 +77,25 @@ test('collector hook accepts event and acks 202', async () => {
   expect(broadcastCalls.length).toBeGreaterThanOrEqual(1)
 })
 
+test('collector acks 202 even when enqueue rejects, and broadcasts memory.enqueue.failed', async () => {
+  const bc: unknown[] = []
+  app = createApp({
+    db,
+    adapter,
+    enqueueDistillJob: async () => { throw new Error('SQLITE_BUSY') },
+    broadcast: (m: unknown) => { bc.push(m) },
+  })
+  const r = await req('/hooks/claude/Stop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e-reject', cwd: '/r', transcript: [] }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  // the .catch handler runs async after the 202 response; wait briefly for it
+  await new Promise((res) => setTimeout(res, 50))
+  expect(bc.some((m: any) => m.type === 'memory.enqueue.failed' && m.sourceEventId === 'e-reject')).toBe(true)
+})
+
 test('collector PostToolUse marks sourceKind error', async () => {
   // PostToolUse events carry error signals; the collector must tag them
   // sourceKind='error' so the distiller routes to the error-signal prompt path.
