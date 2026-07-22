@@ -71,3 +71,41 @@ export function formatMemoryBlock(
   lines.push('--- END INJECTED MEMORY ---')
   return lines.join('\n')
 }
+
+export interface TranscriptTurn {
+  role: 'user' | 'assistant' | 'tool' | 'system'
+  content: string
+  isError?: boolean
+}
+
+export interface ErrorSignals {
+  toolFailures: number
+  userNegations: number
+  retries: number
+  blameMarkers: number
+  hasSignal: boolean
+}
+
+const NEGATION_RE = /(^|\s)(不对|错了|错了|撤销|revert|wrong|incorrect|no,|don't|不要|不是这样)(\s|$|[，。,.])/i
+
+export function detectErrorSignals(turns: readonly TranscriptTurn[]): ErrorSignals {
+  let toolFailures = 0
+  let userNegations = 0
+  let retries = 0
+  let blameMarkers = 0
+  const assistantIntents: string[] = []
+  for (const t of turns) {
+    if (t.role === 'tool' && t.isError) toolFailures += 1
+    if (t.role === 'user' && NEGATION_RE.test(t.content)) userNegations += 1
+    if (t.role === 'system' && t.content.includes('memside:blame')) blameMarkers += 1
+    if (t.role === 'assistant') {
+      const intent = t.content.replace(/again|retry|重新|再试/gi, '').trim().slice(0, 24)
+      if (assistantIntents.includes(intent)) retries += 1
+      else assistantIntents.push(intent)
+    }
+  }
+  return {
+    toolFailures, userNegations, retries, blameMarkers,
+    hasSignal: toolFailures + userNegations + retries + blameMarkers > 0,
+  }
+}
