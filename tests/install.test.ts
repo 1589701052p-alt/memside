@@ -103,6 +103,11 @@ test('hook command uses a curl header marker, not a shell comment (cmd.exe-safe)
     expect(cmd).toContain(`x-memside-tag: ${MEMSIDE_TAG}`)
     // the `#` shell-comment form is absent (would break cmd.exe)
     expect(cmd).not.toContain(`# ${MEMSIDE_TAG}`)
+    // --noproxy 127.0.0.1,localhost: in proxy environments curl would route
+    // the loopback call through the system HTTP_PROXY and get a 502, breaking
+    // every hook (capture + SessionStart injection). claude code's hook
+    // subprocess inherits HTTP_PROXY, so this flag is mandatory.
+    expect(cmd).toContain('--noproxy 127.0.0.1,localhost')
     // --max-time 2 guard is preserved (collector must not block the hook)
     expect(cmd).toContain('--max-time 2')
   }

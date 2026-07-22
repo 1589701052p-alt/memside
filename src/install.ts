@@ -80,7 +80,15 @@ function resolveHome(): string {
  */
 function hookCommand(port: number, event: HookEvent): string {
   const url = `http://127.0.0.1:${port}/hooks/claude/${event}`
-  return `curl -s --max-time 2 -X POST ${url} -H "content-type: application/json" -H "x-memside-tag: ${MEMSIDE_TAG}" -d @-`
+  // `--noproxy 127.0.0.1,localhost` is mandatory in proxy environments: curl
+  // otherwise honors HTTP_PROXY/HTTPS_PROXY for the loopback call too, sending
+  // 127.0.0.1:PORT through the system proxy (e.g. a clash/v2ray on :7897)
+  // which returns 502 and silently breaks EVERY hook - capture AND the
+  // SessionStart additionalContext injection. claude code's hook subprocess
+  // inherits the system env including HTTP_PROXY, so it cannot rely on a
+  // session-set NO_PROXY. --noproxy bypasses the proxy for loopback only; the
+  // distiller's outbound Ark call still uses HTTPS_PROXY as needed.
+  return `curl -s --noproxy 127.0.0.1,localhost --max-time 2 -X POST ${url} -H "content-type: application/json" -H "x-memside-tag: ${MEMSIDE_TAG}" -d @-`
 }
 
 /**
