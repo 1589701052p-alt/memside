@@ -2,7 +2,7 @@
 
 ## MVP build: COMPLETE
 
-All 17 tasks are implemented. The full test suite is green (`bun test` -> 65 pass,
+All 17 tasks are implemented. The full test suite is green (`bun test` -> 85 pass,
 0 fail) and `tsc --noEmit` is clean.
 
 ### Task summary
@@ -64,17 +64,20 @@ target machine before declaring the MVP shipped:
    target machine. If claude code stores the key differently (e.g. in a
    keychain, or under a different JSON field), update `src/creds.ts`.
 
-2. **Hook stdin -> POST body wiring + SessionStart additionalContext** (Task 14):
-   the installed hook command pipes claude code's stdin JSON to the collector
-   via `curl -d @-`. Confirm that claude code actually pipes the hook payload
-   to stdin in the expected shape (`{ transcript, cwd, sourceEventId }`).
-   Additionally, the `SessionStart` hook can return
-   `hookSpecificOutput.additionalContext` to inject memory into the session.
-   Today SessionStart POSTs to the collector (`/hooks/claude/SessionStart`)
-   and returns empty stdout (no additionalContext). To make injection actually
-   work on session start, retarget the SessionStart hook to `POST /inject` and
-   emit the `additionalContext` envelope, or add a dedicated injector command.
-   This live contract was not verified automatically.
+2. **C2/C3 capture+inject loops - implemented, live smoke pending** (final-fix3,
+   commit `ac73ce4`): the capture loop now reads `transcript_path` (claude code's
+   JSONL file path, verified against the 2.1.217 binary + a real local
+   transcript) via `src/claude/transcript.ts` `parseTranscriptFile`, not the
+   inline `transcript` array the original collector assumed (which was always
+   undefined in production). The inject loop now returns the
+   `hookSpecificOutput.additionalContext` envelope from the SessionStart
+   collector branch (envelope shape verified against the binary's own error
+   string). The remaining verification is a live end-to-end smoke: run
+   `bun run src/cli.ts start-and-install`, use claude code in a repo for a turn
+   (a `Stop` hook should fire), confirm a candidate appears at the web UI,
+   approve it, start a NEW claude code session in the same cwd, and confirm the
+   `## Learned context (auto-injected, advisory)` block is prepended to the
+   session. This live contract is not locked by automated tests.
 
 3. **Anthropic model id reachability** (Task 8/16): the distiller calls the
    Anthropic API with model `claude-haiku-4-5-20251001`. Confirm this model id
