@@ -1,13 +1,15 @@
 /**
- * memside functional demo - exercises every user-facing feature against a
- * throwaway tmp DB + the real LLM (your Ark proxy / Anthropic API key).
+ * memside install verifier - an automated check that runs the full feature
+ * matrix against a throwaway tmp DB + the real LLM to confirm your install is
+ * wired up end-to-end. This is NOT a usage tutorial - for the hands-on
+ * walkthrough see the "使用教程" section in README.md.
  *
  * Run:
  *   NO_PROXY=127.0.0.1,localhost bun run demo.ts
  *
  * `NO_PROXY` keeps local HTTP off the system proxy; the distill LLM call still
  * uses HTTPS_PROXY + your ~/.claude/settings.json creds. Distill takes ~15-30s
- * per job, so the whole demo runs ~1-2 min. Nothing touches your real
+ * per job, so the whole run takes ~1-2 min. Nothing touches your real
  * ~/.memside/memside.db - it uses a tmp DB.
  *
  * Feature matrix covered:
