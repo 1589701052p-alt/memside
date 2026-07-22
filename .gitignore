@@ -1,0 +1,6 @@
+node_modules/
+.memside/
+.superpowers/
+*.db
+*.db-*
+dist/
