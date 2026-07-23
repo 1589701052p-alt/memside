@@ -140,9 +140,9 @@ hook ack)。
 
 探索"用公司内部 codeagent CLI(Claude Code 封装,不暴露 API 凭证)替代直连 Anthropic SDK 驱动 distill"的结论:**技术上可行**。memside 的 `callAnthropic` seam(`src/scheduler.ts:38`、`src/daemon.ts:117`)可替换为 spawn `codeagent -p --system-prompt <sys> --output-format json --tools "" --no-session-persistence`,stdin 传 user prompt,从 envelope 的 `.result` 取文本返回;distiller / scheduler / store 核心不动。本机用标准 `claude` + Ark 代理实测两次均成立(envelope `type:"result"` / `result` 字段、stdin + `--system-prompt` 共存、中文编码正常、~12s / $0.02 一次)。**硬前提**:codeagent 必须透传 `-p` / `--system-prompt` / `--output-format` / stdin(公司机器上待验证,验证清单见对话记录)。
 
-桥接有五个脆弱点,第 1 个正在解决,其余四个在此追踪:
+桥接有五个脆弱点,第 1 个已解决(PR #7),其余四个在此追踪:
 
-1. **markdown 围栏包裹致 `JSON.parse` 静默失败** - 模型 `result` 可能被 ```` ```json ... ``` ```` 围栏包裹,`src/memory/distiller.ts:63` 的 `JSON.parse(raw)` 抛错 -> catch 吞掉 -> 产出 0 候选(实测撞到,间歇性)。**正在解决**(新增 `extractJsonObject` 纯函数扒围栏 / 抠首个 `{...}` 块,见对应 spec / plan)。
+1. **markdown 围栏包裹致 `JSON.parse` 静默失败** - 模型 `result` 可能被 ```` ```json ... ``` ```` 围栏包裹,`src/memory/distiller.ts:63` 的 `JSON.parse(raw)` 抛错 -> catch 吞掉 -> 产出 0 候选(实测撞到,间歇性)。**已解决**(PR #7,三道防线:`extractJsonObject` 状态机扒围栏 + distiller/dedup SYSTEM_PROMPT 加 JSON 模板 + `callWithRetry` 重试喂错误回模型;170/170 测试全绿,final review verdict Yes)。
 2. **`[category:xxx]` 前缀校验过严** - `src/memory/distiller.ts:70` 的 `if (!o.title.includes('[category:')) continue` 会丢弃后端模型输出。codeagent 后端若非 Claude(实测 glm 把 `[category:convention]` 写成 `[convention]`),候选被静默丢弃。需放宽校验或加固 prompt。
 3. **长 transcript vs context window** - `src/daemon.ts:28` 的 `makeLoadTranscript` 全量加载不截断(已知最大单条 payload 660KB,见上方 candidate-queue debt 第 1 项)。codeagent 后端 context 可能小于直连 haiku,长 transcript 超限 / 被截。需在 codeagent 模式下加预算裁剪(复用 `clipByBudget` 思路)。
 4. **system prompt 可能被 codeagent 覆盖 / 拼接** - 公司封装常强制注入企业合规 / 审计 system prompt,稀释 distiller "ONLY a JSON object" 指令 -> 输出格式乱 -> 回到第 1 项。备选 fallback:把 system prompt 拼进 user prompt 开头(user prompt 一般不被覆盖)。
