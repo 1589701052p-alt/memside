@@ -214,8 +214,28 @@ export async function patchMemory(
     if (input.scopeType !== undefined && input.scopeType !== row.scopeType) {
       changed.push('scopeType')
       set.scopeType = input.scopeType
-    }
-    if (input.scopeId !== undefined && input.scopeId !== (row.scopeId ?? null)) {
+      if (input.scopeType === 'global') {
+        // global ⇒ scopeId must be null (CHECK invariant); auto-clear so a
+        // scopeType-only patch can't leave a stale scopeId that violates it.
+        if (row.scopeId !== null) { changed.push('scopeId'); set.scopeId = null }
+      } else {
+        // project ⇒ scopeId must be non-null; fall back to the memory's
+        // source cwd (origin project), else require an explicit scopeId.
+        const desired = input.scopeId !== undefined ? input.scopeId : (row.sourceCwd ?? null)
+        if (desired === null) {
+          throw new MemoryConflictError('project scope requires a sourceCwd or explicit scopeId')
+        }
+        if (desired !== (row.scopeId ?? null)) { changed.push('scopeId'); set.scopeId = desired }
+      }
+    } else if (input.scopeId !== undefined && input.scopeId !== (row.scopeId ?? null)) {
+      // scopeId-only change (pre-existing capability): enforce the CHECK
+      // invariant for the unchanged scopeType.
+      if (row.scopeType === 'global' && input.scopeId !== null) {
+        throw new MemoryConflictError('global scope requires null scopeId')
+      }
+      if (row.scopeType === 'project' && input.scopeId === null) {
+        throw new MemoryConflictError('project scope requires non-null scopeId')
+      }
       changed.push('scopeId')
       set.scopeId = input.scopeId
     }
