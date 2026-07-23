@@ -120,10 +120,11 @@ const cols = raw.prepare('PRAGMA table_info(memories)').all() as { name: string 
 if (!cols.some((c) => c.name === 'source_cwd')) {
   raw.exec('ALTER TABLE memories ADD COLUMN source_cwd TEXT')
   raw.exec("UPDATE memories SET source_cwd = scope_id WHERE scope_type = 'project' AND source_cwd IS NULL")
+  raw.exec("UPDATE memories SET source_cwd = (SELECT cwd FROM memory_distill_jobs WHERE id = memories.distill_job_id) WHERE source_cwd IS NULL AND distill_job_id IS NOT NULL")
 }
 ```
 
-- 回填只覆盖旧 project 记忆（其 `scope_id` 即来源 cwd）；旧 global 记忆来源不可恢复，保持 NULL（UI 显示"来源: 手动"语义上略不精确，但可接受——它们本就无来源记录；后续可单独显示"未知"）。为区分"手动"与"旧 global 未知"，UI 展示规则：`sourceCwd` 非空->末段名；`sourceKind==='manual'`->"手动"；否则（旧 global 无来源）->"未知"。
+- 回填分两步：第一条 UPDATE 覆盖旧 project 记忆（其 `scope_id` 即来源 cwd）；第二条 UPDATE 从 `distill_job_id -> memory_distill_jobs.cwd` 恢复仍为 NULL 的行（含旧 global 记忆——它们 `scope_id=NULL` 但有 `distill_job_id`）。仅无 `distill_job_id` 的行（手动记忆）无来源可溯，保持 NULL -> UI 显示"手动"/"未知"。`memory_distill_jobs` 与 `memories` 同由 `openDb` DDL 创建（自 MVP 起共存），子查询安全。UI 展示规则：`sourceCwd` 非空->末段名；`sourceKind==='manual'`->"手动"；否则（无来源记录）->"未知"。
 - 幂等：探测到列已存在则跳过 ALTER 与回填，重复 `openDb` 无副作用。
 
 ## 6. 数据流

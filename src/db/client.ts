@@ -71,6 +71,7 @@ export function openDb(path: string) {
     if (!cols.some((c) => c.name === 'source_cwd')) {
       raw.exec('ALTER TABLE memories ADD COLUMN source_cwd TEXT')
       raw.exec("UPDATE memories SET source_cwd = scope_id WHERE scope_type = 'project' AND source_cwd IS NULL")
+      raw.exec("UPDATE memories SET source_cwd = (SELECT cwd FROM memory_distill_jobs WHERE id = memories.distill_job_id) WHERE source_cwd IS NULL AND distill_job_id IS NOT NULL")
     }
   }
   return db
