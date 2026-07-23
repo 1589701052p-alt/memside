@@ -322,3 +322,24 @@ test('POST /api/memories/bulk-promote rejects multiple and broadcasts per id', a
   const after = await db.select().from(memories)
   expect(after.every((m) => m.status === 'rejected')).toBe(true)
 })
+
+test('POST /api/memories/bulk-promote skips not-found id and continues the batch', async () => {
+  // Skip-path lock: a nonexistent id (promoteCandidate throws MemoryNotFoundError)
+  // must be swallowed by the per-id try/catch, increment neither the rejected
+  // count nor emit a memory.promoted broadcast, and the rest of the batch must
+  // still process. Without this the boundary behavior is untested even though
+  // it's the route's core error-handling contract.
+  const c1 = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't1', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const c2 = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't2', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const r = await req('/api/memories/bulk-promote', {
+    method: 'POST',
+    body: JSON.stringify({ ids: [c1.id, 'nonexistent-id', c2.id], action: 'reject' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(200)
+  expect(r.body.rejected).toBe(2)
+  expect(broadcastCalls.filter((m) => (m as any).type === 'memory.promoted').length).toBe(2)
+  const after = await db.select().from(memories)
+  expect(after.length).toBe(2)
+  expect(after.every((m) => m.status === 'rejected')).toBe(true)
+})
