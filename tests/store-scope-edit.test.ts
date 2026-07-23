@@ -1,3 +1,13 @@
+// Regression guards for the scope-edit feature (spec
+// 2026-07-23-editable-scope-and-source-project, §5.2 patchMemory scope coupling + §9 testing).
+// Locks two invariants; if a refactor turns any of these red, the intent is below - do not weaken
+// the assertion to make it pass:
+//  1. patchMemory couples scopeType<->scopeId to the DB CHECK constraint - project->global clears
+//     scopeId, global->project derives scopeId from row.sourceCwd, no-sourceCwd throws
+//     MemoryConflictError (commit b7a4f19).
+//  2. An edited scope changes injection scope - project->global injects in any cwd, global->project
+//     only in the source cwd (commit ca49ebf).
+
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
