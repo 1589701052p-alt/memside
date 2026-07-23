@@ -81,9 +81,15 @@ test('judgeValue user prompt includes title and bodyMd', async () => {
 })
 
 test('VALUE_JUDGE_SYSTEM_PROMPT is neutral (no bias words)', () => {
-  // 锁中性：prompt 不得出现 keep/discard/dangerous/unsure/cautious/careful 等引导词
+  // 锁中性（用户硬约束：禁止有任何引导 AI 的提示词在）。keep/discard 是代码对
+  // category 的确定映射，prompt 只分类。下列任一词出现即违约——覆盖倾向 keep
+  // (keep/important/valuable)、倾向 discard (discard/reject/dangerous)、
+  // 以及犹豫类暗示 (unsure/cautious/careful/avoid/don't)。
   const lower = VALUE_JUDGE_SYSTEM_PROMPT.toLowerCase()
-  for (const w of ['discard', 'keep', 'dangerous', 'unsure', 'cautious', 'careful', 'reject']) {
+  for (const w of [
+    'discard', 'keep', 'dangerous', 'unsure', 'cautious', 'careful', 'reject',
+    "don't", 'avoid', 'important', 'valuable',
+  ]) {
     expect(lower).not.toContain(w)
   }
 })
