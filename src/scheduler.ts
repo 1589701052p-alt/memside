@@ -3,8 +3,9 @@ import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope } from '@/memory/store'
+import { listForDedupByScope, logDiscards, type DiscardRecord } from '@/memory/store'
 import { judgeDuplicates } from '@/memory/dedup'
+import { judgeValue, type ValueClass } from '@/memory/valueFilter'
 import type { MemoryInput, Memory } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 
@@ -121,13 +122,32 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         cwd: job.cwd ?? '',
         callAnthropic: deps.callAnthropic,
       })
-      // Dedup: filter semantic duplicates against same-scope existing memories
-      // (candidate + approved) before persisting. judgeDuplicates swallows LLM /
-      // parse errors conservatively (all-new), so dedup failure never blocks
-      // distill nor backs off the job. listForDedupByScope DB errors DO bubble
-      // to the catch below (infrastructure fault -> retry), per spec §8.
-      const keep = await dedupCandidates(db, deps.callAnthropic, candidates, job.cwd ?? null)
-      for (const c of keep) {
+      // Value filter: classify each candidate (rules 1-6). public-knowledge/
+      // derivable => discard (audit-logged); decision/convention/trap/topology
+      // => keep with valueClass; no valid classification => keep valueClass=null.
+      // judgeValue swallows its own LLM errors (all keep+null), never bubbles.
+      const verdicts = await judgeValue(candidates, deps.callAnthropic)
+      const keepWithClass: { cand: DistillCandidate; valueClass: ValueClass | null }[] = []
+      const discarded: DiscardRecord[] = []
+      verdicts.forEach((v, i) => {
+        const c = candidates[i]
+        if (!c) return
+        if (v.keep) keepWithClass.push({ cand: c, valueClass: v.valueClass })
+        else discarded.push({ title: c.title, bodyMd: c.bodyMd, reason: v.reason })
+      })
+      if (discarded.length > 0) {
+        // Best-effort audit log: a DB failure here must not block distill or
+        // retry the job (audit is side-effect, not load-bearing).
+        try { await logDiscards(db, job.id, discarded) } catch (e) { console.warn('memside: logDiscards failed', e) }
+      }
+      // Dedup survivors against same-scope existing (existing behavior).
+      const keepCandidates = keepWithClass.map((k) => k.cand)
+      const deduped = await dedupCandidates(db, deps.callAnthropic, keepCandidates, job.cwd ?? null)
+      // Re-attach valueClass by reference: dedupCandidates returns a same-reference
+      // subset of keepCandidates (candidates.filter(...)), so the cand object
+      // identity survives dedup and we can map back to its valueClass.
+      const classByCand = new Map(keepWithClass.map((k) => [k.cand, k.valueClass]))
+      for (const c of deduped) {
         await deps.createCandidate(db, {
           scopeType: c.scopeType,
           scopeId: resolveScopeId(c.scopeType, job.cwd ?? null),
@@ -140,6 +160,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           distillJobId: job.id,
           distillAction: c.distillAction,
           sourceEventId: job.sourceEventId,
+          valueClass: classByCand.get(c) ?? null,
         })
       }
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() }).where(eq(memoryDistillJobs.id, job.id)).run()

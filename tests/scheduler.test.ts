@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick, dedupCandidates, DISTILL_DEBOUNCE_MS } from '@/scheduler'
 import { createCandidate as realCreateCandidate } from '@/memory/store'
-import { memoryDistillJobs, memories } from '@/db/schema'
+import { memoryDistillJobs, memories, memoryDiscards } from '@/db/schema'
 import type { DistillCandidate } from '@/memory/distiller'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
@@ -108,6 +108,7 @@ test('tick filters duplicate candidates (dedup marks duplicate, not persisted)',
     callAnthropic: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:process] 14天退款', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: ex.id }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
@@ -127,6 +128,7 @@ test('tick keeps all candidates when dedup LLM throws (conservative, job still d
     callAnthropic: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
       throw new Error('dedup api down')
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
@@ -143,10 +145,14 @@ test('tick skips dedup LLM when no existing memories in scope', async () => {
   let createCalls = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async () => { callCount++; return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) },
+    callAnthropic: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
-  expect(callCount).toBe(1)
+  expect(callCount).toBe(2)
   expect(createCalls).toBe(1)
 })
 
@@ -162,6 +168,7 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
     callAnthropic: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
     },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
@@ -227,4 +234,99 @@ test('dedupCandidates bubbles listForDedupByScope DB errors (spec §8)', async (
   db2.$client.close()
   const cand: DistillCandidate = { title: '[category:x] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' }
   await expect(dedupCandidates(db2, async () => 'x', [cand], '/r')).rejects.toThrow()
+})
+
+// ---------------------------------------------------------------------------
+// Value-filter integration: tick inserts judgeValue + logDiscards BETWEEN
+// distill and dedup. judgeValue classifies each candidate (rules 1-6);
+// public-knowledge/derivable => discard (audit-logged to memory_discards),
+// decision/convention/trap/topology => keep with valueClass, no valid
+// classification => keep valueClass=null. valueClass is carried alongside
+// each candidate and re-attached after dedup by object reference.
+// ---------------------------------------------------------------------------
+
+test('tick discards value-filter public-knowledge, logs to memory_discards, no createCandidate', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let createCalls = 0
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    callAnthropic: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] js array map', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'public-knowledge' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+    },
+    createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(createCalls).toBe(0)
+  const discards = await db.select().from(memoryDiscards)
+  expect(discards.length).toBe(1)
+  expect(discards[0]!.reason).toBe('public-knowledge')
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('done')
+})
+
+test('tick passes valueClass into createCandidate for kept candidates', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    callAnthropic: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] chose A not B because', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(captured.valueClass).toBe('decision')
+})
+
+test('tick keeps all as valueClass=null when judgeValue LLM throws, job still done', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  let createCalls = 0
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    callAnthropic: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      if (callCount === 2) throw new Error('value api down')
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(createCalls).toBe(1)
+  expect(captured.valueClass).toBeNull()
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('done')
+})
+
+test('tick runs judgeValue before dedup (3-phase call order)', async () => {
+  // Pre-position an existing memory so dedup actually calls the LLM (without
+  // existing memories, judgeDuplicates short-circuits and the 3rd phase is
+  // never reached, making the call-order assertion untestable).
+  const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'existing', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  const phases: string[] = []
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    callAnthropic: async (_sys, user) => {
+      callCount++
+      if (callCount === 1) { phases.push('distill'); return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) }
+      if (callCount === 2) { phases.push('judgeValue'); return JSON.stringify({ verdicts: [{ index: 0, category: 'trap' }] }) }
+      phases.push('dedup'); return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+    },
+    createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+  })
+  expect(phases).toEqual(['distill', 'judgeValue', 'dedup'])
 })
