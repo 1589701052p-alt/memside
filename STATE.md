@@ -104,9 +104,10 @@ hook ack)。
 
 审计了 live DB(`~/.memside/memside.db`:**571 候选 / 2 已审批**,
 102 MB;约 19 小时运行)。候选队列实质上是坏的:生产速度远超审批,
-且没有去重。**去重正在单独 brainstorming**(见
-`docs/superpowers/specs/` + `plans/` 里的去重设计)。其余发现作为后续
-工作记录于此:
+且没有去重。**去重已落地**(PR #5,`src/memory/dedup.ts` 语义近重复聚合);
+**候选价值过滤已落地**(PR #9,`src/memory/valueFilter.ts` 中性 6 类分类 ->
+自动丢弃规则 1/2 + 优先级打标规则 3-6 + UI 排序 + `memory_discards` 审计表),
+直接缓解下方第 2 项。其余发现作为后续工作记录于此:
 
 1. **events/jobs 从不清理 + 存了完整 transcript** - `src/server.ts:113-127`
    在每次 Stop hook 时把*整个* transcript JSON 序列化进
@@ -115,9 +116,11 @@ hook ack)。
    删 job)。102 MB DB 里有 92 MB 是 `memory_distill_events.payload`
    (316 行;最大单行 660 KB)。需要清理策略 + 只存摘要而非完整 transcript
    副本。
-2. **候选队列增长快于审批** - 约 19 小时内 571 候选 vs 2 已审批。审批
-   步骤是 capture->distill->approve->inject 闭环里断掉的那一环。需要在
-   队列 UI 里加候选上限 / 老化 / 近重复聚合,让人能真正走完它。
+2. **候选队列增长快于审批**(部分缓解) - 约 19 小时内 571 候选 vs 2 已审批。
+   审批步骤是 capture->distill->approve->inject 闭环里断掉的那一环。**已缓解**:
+   dedup(PR #5)做近重复聚合;value filter(PR #9)自动丢弃 public-knowledge/derivable
+   类低价值候选 + 按价值优先级排序 + "批量拒绝未评估"一键清理。**仍开放**:队列上限 /
+   老化策略未做(value filter 降噪声后优先级降)。
 3. **`scope_id` 是原始 cwd,无归一化** - `src/scheduler.ts:76` 写入
    `scopeId = job.cwd`;`src/adapter/claudeCode.ts:38` 用
    `projectId = input.cwd` 注入,靠精确字符串 `eq` 匹配。Windows 路径大小写 /
@@ -135,6 +138,18 @@ hook ack)。
    `status='running'`;`sweepStuckRunning`(`src/daemon.ts:108`)只在
    daemon 启动时跑一次,所以长寿命 daemon 永远恢复不了它们。需要周期性
    sweep,或在 tick 侧对 `running` 行做超时跳过。
+
+## 已知债务 - 候选价值过滤 minor (PR #9, 2026-07-23)
+
+PR #9(judgeValue 中性 6 类分类 + 优先级打标 + `memory_discards` 丢弃审计 +
+UI 排序/徽标/批量拒绝)已合并。最终 whole-branch 评审 verdict=SHIP,下列
+minor 经判定 defer(非阻塞,记此追踪):
+
+1. `tests/store-crud.test.ts` 的 logDiscards 测试未断言 `bodyMd`(写入路径已覆盖)。
+2. `tests/scheduler.test.ts` Test 7 throw-path mock 有死分支(dedup 短路致第 3 mock 不触发;测试气味,非正确性)。
+3. `src/server.ts` bulk-promote 的 bare `catch` 可收窄为 `MemoryNotFoundError`/`MemoryConflictError`(当前 skip+continue 语义可接受)。
+4. `src/web/App.tsx` `bulkRejectUnevaluated` 无本地 try/catch(与既有 approve/reject 一致,pre-existing)。
+5. `memories.value_class` 无 DB-level CHECK(全 TS 类型化,不可利用;同 `status`/`runtime` 现状)。
 
 ## Known debt - codeagent 桥接遗留 (2026-07-23)
 
