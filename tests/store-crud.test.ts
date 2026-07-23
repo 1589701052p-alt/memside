@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { memories } from '@/db/schema'
-import { createCandidate, listApprovedByScope, getMemoryById } from '@/memory/store'
+import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT } from '@/memory/store'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
@@ -79,4 +79,45 @@ test('createCandidate defaults sourceCwd to null when omitted', async () => {
     tags: [], sourceKind: 'manual', runtime: null,
   })
   expect(m.sourceCwd).toBeNull()
+})
+
+test('listForDedupByScope returns candidate+approved in same scope', async () => {
+  const c = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'cand', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const a = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'appr', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, a.id)).run()
+  const rows = await listForDedupByScope(db, { scopeType: 'project', scopeId: '/r' })
+  expect(rows.map((r) => r.id).sort()).toEqual([a.id, c.id].sort())
+  expect(rows.every((r) => r.status === 'candidate' || r.status === 'approved')).toBe(true)
+})
+
+test('listForDedupByScope excludes other scopes and terminal statuses', async () => {
+  await createCandidate(db, { scopeType: 'project', scopeId: '/other', title: 'other scope', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await createCandidate(db, { scopeType: 'global', scopeId: null, title: 'global scope', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const rej = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'rejected', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await db.update(memories).set({ status: 'rejected' }).where(eq(memories.id, rej.id)).run()
+  const rows = await listForDedupByScope(db, { scopeType: 'project', scopeId: '/r' })
+  expect(rows.length).toBe(0)
+})
+
+test('listForDedupByScope limits candidates to DEDUP_EXISTING_LIMIT', async () => {
+  for (let i = 0; i < DEDUP_EXISTING_LIMIT + 5; i++) {
+    await createCandidate(db, { scopeType: 'global', scopeId: null, title: `c${i}`, bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  }
+  const rows = await listForDedupByScope(db, { scopeType: 'global', scopeId: null })
+  expect(rows.length).toBe(DEDUP_EXISTING_LIMIT)
+})
+
+test('listForDedupByScope returns approved all + candidate limited', async () => {
+  for (let i = 0; i < 3; i++) {
+    const m = await createCandidate(db, { scopeType: 'global', scopeId: null, title: `a${i}`, bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+    await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, m.id)).run()
+  }
+  for (let i = 0; i < DEDUP_EXISTING_LIMIT + 2; i++) {
+    await createCandidate(db, { scopeType: 'global', scopeId: null, title: `c${i}`, bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  }
+  const rows = await listForDedupByScope(db, { scopeType: 'global', scopeId: null })
+  const approved = rows.filter((r) => r.status === 'approved')
+  const candidates = rows.filter((r) => r.status === 'candidate')
+  expect(approved.length).toBe(3)
+  expect(candidates.length).toBe(DEDUP_EXISTING_LIMIT)
 })
