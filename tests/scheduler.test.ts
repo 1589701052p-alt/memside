@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick, DISTILL_DEBOUNCE_MS } from '@/scheduler'
-import { memoryDistillJobs } from '@/db/schema'
+import { createCandidate as realCreateCandidate } from '@/memory/store'
+import { memoryDistillJobs, memories } from '@/db/schema'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
@@ -92,4 +93,78 @@ test('tick applies backoff on distill error', async () => {
   expect(rows[0]!.status).toBe('pending')
   expect(rows[0]!.attempts).toBe(1)
   expect(rows[0]!.lastError).toBeTruthy()
+})
+
+test('tick filters duplicate candidates (dedup marks duplicate, not persisted)', async () => {
+  const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: '[category:invariant] refund within 14 days', bodyMd: '14d', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let createCalls = 0
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'refund 14 days' }],
+    callAnthropic: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:process] 14天退款', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: ex.id }] })
+    },
+    createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(createCalls).toBe(0)
+})
+
+test('tick keeps all candidates when dedup LLM throws (conservative, job still done)', async () => {
+  const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'existing', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let createCalls = 0
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    callAnthropic: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      throw new Error('dedup api down')
+    },
+    createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(createCalls).toBe(1)
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('done')
+})
+
+test('tick skips dedup LLM when no existing memories in scope', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let callCount = 0
+  let createCalls = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    callAnthropic: async () => { callCount++; return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) },
+    createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(callCount).toBe(1)
+  expect(createCalls).toBe(1)
+})
+
+test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', async () => {
+  const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'existing', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    callAnthropic: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(captured.sourceCwd).toBe('/r')
+  expect(captured.distillAction).toBe('new')
 })

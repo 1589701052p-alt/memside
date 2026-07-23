@@ -3,6 +3,8 @@ import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
+import { listForDedupByScope } from '@/memory/store'
+import { judgeDuplicates } from '@/memory/dedup'
 import type { MemoryInput, Memory } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 
@@ -39,6 +41,45 @@ export interface TickDeps {
 }
 
 /**
+ * Filter semantic duplicates out of a distill batch. Groups candidates by
+ * (scopeType, scopeId) - scopeId derived the same way createCandidate does
+ * (project -> jobCwd, global -> null) - and for each group asks judgeDuplicates
+ * to compare against same-scope existing memories. Returns the subset to keep.
+ *
+ * judgeDuplicates handles its own LLM-error fallback (all-new), so this never
+ * throws on dedup failure. listForDedupByScope DB errors DO bubble to tick's
+ * catch (infrastructure fault -> job retry), per spec §8.
+ */
+async function dedupCandidates(
+  db: DbClient,
+  callAnthropic: TickDeps['callAnthropic'],
+  candidates: DistillCandidate[],
+  jobCwd: string | null,
+): Promise<DistillCandidate[]> {
+  if (candidates.length === 0) return []
+  const groups = new Map<string, { scopeType: DistillCandidate['scopeType']; scopeId: string | null; items: { c: DistillCandidate; globalIndex: number }[] }>()
+  candidates.forEach((c, i) => {
+    const scopeId = c.scopeType === 'project' ? (jobCwd ?? 'unknown') : null
+    const key = `${c.scopeType}:${scopeId ?? ''}`
+    if (!groups.has(key)) groups.set(key, { scopeType: c.scopeType, scopeId, items: [] })
+    groups.get(key)!.items.push({ c, globalIndex: i })
+  })
+  const keepFlags = new Array(candidates.length).fill(false)
+  for (const g of groups.values()) {
+    const existing = await listForDedupByScope(db, { scopeType: g.scopeType, scopeId: g.scopeId })
+    const verdicts = await judgeDuplicates({
+      newCandidates: g.items.map((it) => it.c),
+      existing,
+      callAnthropic,
+    })
+    for (const v of verdicts) {
+      if (!v.duplicate) keepFlags[g.items[v.index]!.globalIndex] = true
+    }
+  }
+  return candidates.filter((_, i) => keepFlags[i])
+}
+
+/**
  * Single pass over due jobs. Selects only `pending` jobs whose `nextRunAt <= now`
  * (limit DISTILL_BATCH_LIMIT), marks each `running`, calls the distiller, persists
  * candidates, then marks `done`. On error: bumps attempts; if attempts >=
@@ -70,7 +111,13 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         cwd: job.cwd ?? '',
         callAnthropic: deps.callAnthropic,
       })
-      for (const c of candidates) {
+      // Dedup: filter semantic duplicates against same-scope existing memories
+      // (candidate + approved) before persisting. judgeDuplicates swallows LLM /
+      // parse errors conservatively (all-new), so dedup failure never blocks
+      // distill nor backs off the job. listForDedupByScope DB errors DO bubble
+      // to the catch below (infrastructure fault -> retry), per spec §8.
+      const keep = await dedupCandidates(db, deps.callAnthropic, candidates, job.cwd ?? null)
+      for (const c of keep) {
         await deps.createCandidate(db, {
           scopeType: c.scopeType,
           scopeId: c.scopeType === 'project' ? (job.cwd ?? 'unknown') : null,
