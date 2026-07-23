@@ -1,5 +1,6 @@
 import type { DistillCandidate } from '@/memory/distiller'
 import type { MemoryScope, MemoryStatus } from '@/memory/pure'
+import { callWithRetry } from './retry'
 
 export interface ExistingMemoryForDedup {
   id: string
@@ -21,7 +22,14 @@ export type DedupVerdict =
 
 export const DEDUP_SYSTEM_PROMPT = `You are memside-dedup. Decide whether each new candidate memory is a SEMANTIC DUPLICATE of any existing memory in the same scope - the same rule or fact, even if worded differently or tagged with a different [category:] prefix.
 
-Respond ONLY with JSON: {"verdicts":[{"index":<n>,"isDuplicate":true,"duplicateOfId":"<id>"} | {"index":<n>,"isDuplicate":false}]}. Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be one of the existing ids. When unsure, emit isDuplicate:false.`
+输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
+{
+  "verdicts": [
+    {"index": 0, "isDuplicate": false},
+    {"index": 1, "isDuplicate": true, "duplicateOfId": "A"}
+  ]
+}
+Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be one of the existing ids. When unsure, emit isDuplicate:false.`
 
 function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingMemoryForDedup[]): string {
   // judgeDuplicates short-circuits empty `existing` before reaching here, so the
@@ -29,6 +37,30 @@ function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingM
   const exLines = existing.map((e) => `id=${e.id} | ${e.title}`).join('\n')
   const newLines = newCandidates.map((c, i) => `[${i}] ${c.title}\n${c.bodyMd}`).join('\n---\n')
   return `Existing memories (same scope):\n${exLines}\n\nNew candidates:\n${newLines}\n\nReturn JSON per the system instructions.`
+}
+
+/**
+ * Validate parsed dedup output for retry-worthiness. Returns an error message
+ * to retry, or null to accept. Checks: parsed has a `verdicts` array, each
+ * verdict has a numeric `index`, and any `isDuplicate:true` verdict references
+ * a `duplicateOfId` in `existingIds`. Exhausted retries fall through to the
+ * existing per-verdict hallucination->new logic.
+ */
+function dedupShouldRetry(existingIds: Set<string>): (parsed: unknown) => string | null {
+  return (parsed) => {
+    if (!parsed || typeof parsed !== 'object') return '返回的不是 JSON 对象'
+    const p = parsed as { verdicts?: unknown }
+    if (!Array.isArray(p.verdicts)) return '缺少 verdicts 数组'
+    for (let i = 0; i < p.verdicts.length; i++) {
+      const v = p.verdicts[i] as Record<string, unknown> | null
+      if (!v || typeof v.index !== 'number') return `verdict ${i} 缺少 index`
+      if (v.isDuplicate === true) {
+        if (typeof v.duplicateOfId !== 'string') return `verdict ${v.index} 标记重复但缺少 duplicateOfId`
+        if (!existingIds.has(v.duplicateOfId)) return `verdict ${v.index} 的 duplicateOfId 不在已有记忆中`
+      }
+    }
+    return null
+  }
 }
 
 /**
@@ -48,8 +80,12 @@ export async function judgeDuplicates(input: DedupInput): Promise<DedupVerdict[]
   }
   const existingIds = new Set(input.existing.map((e) => e.id))
   try {
-    const raw = await input.callAnthropic(DEDUP_SYSTEM_PROMPT, renderUserPrompt(input.newCandidates, input.existing))
-    const parsed = JSON.parse(raw) as { verdicts?: unknown }
+    const parsed = await callWithRetry({
+      call: input.callAnthropic,
+      system: DEDUP_SYSTEM_PROMPT,
+      user: renderUserPrompt(input.newCandidates, input.existing),
+      shouldRetry: dedupShouldRetry(existingIds),
+    }) as { verdicts?: unknown } | undefined
     if (!parsed || !Array.isArray(parsed.verdicts)) {
       return input.newCandidates.map((_, i) => ({ index: i, duplicate: false }))
     }

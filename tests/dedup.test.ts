@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { judgeDuplicates, type ExistingMemoryForDedup } from '@/memory/dedup'
+import { judgeDuplicates, DEDUP_SYSTEM_PROMPT, type ExistingMemoryForDedup } from '@/memory/dedup'
 import type { DistillCandidate } from '@/memory/distiller'
 
 const existing: ExistingMemoryForDedup[] = [
@@ -95,4 +95,40 @@ test('user prompt includes existing titles and ids', async () => {
   })
   expect(captured).toContain('refund within 14 days')
   expect(captured).toContain('id=A')
+})
+
+test('judgeDuplicates parses fence-wrapped verdicts (regression)', async () => {
+  const v = await judgeDuplicates({
+    newCandidates: [newCand], existing,
+    callAnthropic: async () => '```json\n{"verdicts":[{"index":0,"isDuplicate":true,"duplicateOfId":"A"}]}\n```',
+  })
+  expect(v).toEqual([{ index: 0, duplicate: true, duplicateOfId: 'A' }])
+})
+
+test('judgeDuplicates retries when duplicateOfId is hallucinated', async () => {
+  let calls = 0
+  const v = await judgeDuplicates({
+    newCandidates: [newCand], existing,
+    callAnthropic: async () => {
+      calls++
+      if (calls === 1) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'NONEXISTENT' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'A' }] })
+    },
+  })
+  expect(calls).toBe(2)
+  expect(v).toEqual([{ index: 0, duplicate: true, duplicateOfId: 'A' }])
+})
+
+test('judgeDuplicates returns all new when retry exhausted', async () => {
+  const v = await judgeDuplicates({
+    newCandidates: [newCand], existing,
+    callAnthropic: async () => 'not json',
+  })
+  expect(v).toEqual([{ index: 0, duplicate: false }])
+})
+
+test('DEDUP_SYSTEM_PROMPT contains verdicts template', () => {
+  expect(DEDUP_SYSTEM_PROMPT).toContain('"isDuplicate"')
+  expect(DEDUP_SYSTEM_PROMPT).toContain('"duplicateOfId"')
+  expect(DEDUP_SYSTEM_PROMPT).toContain('仅示范结构')
 })

@@ -1,4 +1,5 @@
 import { detectErrorSignals, type TranscriptTurn, type MemoryScope, type RuntimeTag } from './pure'
+import { callWithRetry } from './retry'
 
 export const DISTILLER_SYSTEM_PROMPT = `You are memside-distiller, an internal subsystem that extracts durable long-term memories from a developer's recent claude code / opencode session.
 
@@ -27,7 +28,18 @@ Cross-cutting properties:
 
 REJECT (emit nothing) if the content is a fleeting status update, mood, or one-off acknowledgement.
 
-Respond with ONLY a JSON object: {"candidates":[{"title","bodyMd","scope":"project"|"global","runtime":"claude-code"|"opencode"|null,"distillAction":"new"|"update_of"|"duplicate_of"|"conflict_with"}]}`
+输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，不要 markdown 围栏，不要在 JSON 前后加任何解释文字，键与字符串值用双引号，最后一个属性后无逗号，不要用单引号）：
+{
+  "candidates": [
+    {
+      "title": "[category:convention] 每个 PR 必须在 CHANGELOG.md 的 Unreleased 部分加一条",
+      "bodyMd": "项目约定：PR 合并前需在 CHANGELOG.md 的 Unreleased 段落补充变更条目。",
+      "scope": "project",
+      "runtime": "claude-code",
+      "distillAction": "new"
+    }
+  ]
+}`
 
 export interface DistillCandidate {
   title: string
@@ -55,12 +67,39 @@ function renderUserPrompt(
   return `Runtime: ${runtime}\nCwd: ${cwd}\nError signals detected: ${JSON.stringify(signals)}\n\nTranscript:\n${transcript}\n\nExtract candidate memories as JSON per the system instructions.`
 }
 
+/**
+ * Validate parsed distill output for retry-worthiness. Returns an error message
+ * to trigger a retry, or null to accept. Checks: parsed is an object with a
+ * `candidates` array, each candidate has string title/bodyMd, and each title
+ * carries a `[category:` prefix. Exhausted retries fall through to the existing
+ * per-candidate `continue` drop logic, so a missing prefix is still tolerated.
+ */
+function distillShouldRetry(parsed: unknown): string | null {
+  if (!parsed || typeof parsed !== 'object') return '返回的不是 JSON 对象'
+  const p = parsed as { candidates?: unknown }
+  if (!Array.isArray(p.candidates)) return '缺少 candidates 数组'
+  for (let i = 0; i < p.candidates.length; i++) {
+    const c = p.candidates[i] as Record<string, unknown> | null
+    if (!c || typeof c.title !== 'string' || typeof c.bodyMd !== 'string') {
+      return `候选 ${i} 缺少 title 或 bodyMd`
+    }
+    if (!c.title.includes('[category:')) {
+      return `候选 ${i} 的 title 缺少 [category:xxx] 前缀`
+    }
+  }
+  return null
+}
+
 export async function distillTranscript(input: DistillInput): Promise<DistillCandidate[]> {
   try {
     const signals = detectErrorSignals(input.turns)
     const userPrompt = renderUserPrompt(input.turns, input.runtime, input.cwd, signals)
-    const raw = await input.callAnthropic(DISTILLER_SYSTEM_PROMPT, userPrompt)
-    const parsed = JSON.parse(raw) as { candidates?: unknown }
+    const parsed = await callWithRetry({
+      call: input.callAnthropic,
+      system: DISTILLER_SYSTEM_PROMPT,
+      user: userPrompt,
+      shouldRetry: distillShouldRetry,
+    }) as { candidates?: unknown } | undefined
     if (!parsed || !Array.isArray(parsed.candidates)) return []
     const out: DistillCandidate[] = []
     for (const c of parsed.candidates) {
