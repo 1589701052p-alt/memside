@@ -27,6 +27,7 @@ export const memories = sqliteTable(
     approvedAt: integer('approved_at'),
     createdAt: integer('created_at').notNull(),
     version: integer('version').notNull().default(1),
+    valueClass: text('value_class'), // nullable: decision|convention|trap|topology; null = unevaluated
   },
   (t) => ({
     scopeStatusIdx: index('idx_memories_scope_status').on(t.scopeType, t.scopeId, t.status),
@@ -72,5 +73,22 @@ export const memoryDistillEvents = sqliteTable(
   },
   (t) => ({
     jobAttemptIdx: index('idx_distill_events_job_attempt').on(t.distillJobId, t.attemptIndex, t.ts),
+  }),
+)
+
+export const memoryDiscards = sqliteTable(
+  'memory_discards',
+  {
+    id: text('id').primaryKey(),
+    distillJobId: text('distill_job_id')
+      .notNull()
+      .references(() => memoryDistillJobs.id, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    bodyMd: text('body_md').notNull(),
+    reason: text('reason').notNull(), // 'public-knowledge' | 'derivable'
+    ts: integer('ts').notNull(),
+  },
+  (t) => ({
+    tsIdx: index('idx_discards_ts').on(t.ts),
   }),
 )
