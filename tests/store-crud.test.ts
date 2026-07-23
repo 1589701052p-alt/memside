@@ -3,8 +3,8 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { memories } from '@/db/schema'
-import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT } from '@/memory/store'
+import { memories, memoryDistillJobs, memoryDiscards } from '@/db/schema'
+import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards } from '@/memory/store'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
@@ -126,4 +126,43 @@ test('listForDedupByScope returns approved all + candidate limited', async () =>
   const candidates = rows.filter((r) => r.status === 'candidate')
   expect(approved.length).toBe(3)
   expect(candidates.length).toBe(DEDUP_EXISTING_LIMIT)
+})
+
+test('createCandidate stores valueClass and reads it back', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null, valueClass: 'decision',
+  })
+  expect(m.valueClass).toBe('decision')
+  const got = await getMemoryById(db, m.id)
+  expect(got?.memory.valueClass).toBe('decision')
+})
+
+test('createCandidate defaults valueClass to null when omitted', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null,
+  })
+  expect(m.valueClass).toBeNull()
+})
+
+test('logDiscards writes rows with title/bodyMd/reason/distillJobId', async () => {
+  // need a distill job row for the FK
+  db.insert(memoryDistillJobs).values({ id: 'j1', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code', cwd: '/r', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 0 }).run()
+  await logDiscards(db, 'j1', [
+    { title: 't1', bodyMd: 'b1', reason: 'public-knowledge' },
+    { title: 't2', bodyMd: 'b2', reason: 'derivable' },
+  ])
+  const rows = await db.select().from(memoryDiscards).orderBy(memoryDiscards.ts)
+  expect(rows.length).toBe(2)
+  expect(rows[0]!.title).toBe('t1')
+  expect(rows[0]!.reason).toBe('public-knowledge')
+  expect(rows[0]!.distillJobId).toBe('j1')
+})
+
+test('logDiscards is a no-op on empty list', async () => {
+  db.insert(memoryDistillJobs).values({ id: 'j2', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code', cwd: '/r', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 0 }).run()
+  await logDiscards(db, 'j2', [])
+  const rows = await db.select().from(memoryDiscards)
+  expect(rows.length).toBe(0)
 })
