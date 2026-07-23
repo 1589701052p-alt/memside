@@ -19,6 +19,8 @@ export interface MemoryItem {
   status: string
   scopeType?: string
   runtime?: string | null
+  sourceCwd?: string | null
+  sourceKind?: string
   createdAt?: number
   version?: number
 }
@@ -47,7 +49,7 @@ export async function promoteMemory(
 
 export async function patchMemory(
   id: string,
-  body: { title?: string; bodyMd?: string; tags?: string[] },
+  body: { title?: string; bodyMd?: string; tags?: string[]; scopeType?: 'project' | 'global'; scopeId?: string | null },
   fetchFn: FetchLike = fetch,
 ): Promise<MemoryItem> {
   const res = await fetchFn(`/api/memories/${id}`, {
@@ -55,7 +57,8 @@ export async function patchMemory(
     body: JSON.stringify(body),
     headers: { 'content-type': 'application/json' },
   })
-  const data = await res.json()
+  const data = await res.json() as { memory?: MemoryItem; error?: string }
+  if (!res.ok) throw new Error(data.error ?? 'patch failed')
   return data.memory as MemoryItem
 }
 

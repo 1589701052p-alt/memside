@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { listMemories, promoteMemory } from '@/web/api'
+import { listMemories, promoteMemory, patchMemory } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
 // not unit-tested; this client is the testable seam — a `fetchFn` param lets
@@ -28,4 +28,22 @@ test('promoteMemory POSTs to /api/memories/:id/promote', async () => {
   expect(captured!.url).toBe('/api/memories/1/promote')
   expect(captured!.method).toBe('POST')
   expect(captured!.body).toContain('approve')
+})
+
+test('patchMemory PATCHes /api/memories/:id with scopeType in body', async () => {
+  let captured: { url: string; method: string; body: string } | null = null
+  const fetchFn = (async (url: string, init: any) => {
+    captured = { url, method: init.method, body: init.body }
+    return new Response(JSON.stringify({ memory: { id: '1', status: 'candidate' }, changedFields: ['scopeType'] }), { status: 200 })
+  }) as any
+  await patchMemory('1', { scopeType: 'global' }, fetchFn)
+  expect(captured!.url).toBe('/api/memories/1')
+  expect(captured!.method).toBe('PATCH')
+  expect(captured!.body).toContain('scopeType')
+})
+
+test('patchMemory throws on non-OK response with server error message', async () => {
+  const fetchFn = (async () =>
+    new Response(JSON.stringify({ error: 'project scope requires a sourceCwd' }), { status: 409 })) as any
+  await expect(patchMemory('1', { scopeType: 'project' }, fetchFn)).rejects.toThrow('sourceCwd')
 })
