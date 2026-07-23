@@ -132,3 +132,9 @@ test('DEDUP_SYSTEM_PROMPT contains verdicts template', () => {
   expect(DEDUP_SYSTEM_PROMPT).toContain('"duplicateOfId"')
   expect(DEDUP_SYSTEM_PROMPT).toContain('仅示范结构')
 })
+
+test('DEDUP_SYSTEM_PROMPT is neutral (no unsure tie-breaker)', () => {
+  // 锁中性：删 "When unsure, emit isDuplicate:false." 后不得回退
+  const lower = DEDUP_SYSTEM_PROMPT.toLowerCase()
+  expect(lower).not.toContain('unsure')
+})
