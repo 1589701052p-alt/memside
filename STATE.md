@@ -99,3 +99,42 @@ transcript + the real Ark LLM. In proxy environments, set
 `NO_PROXY=127.0.0.1,localhost bun run smoke-live.ts` (the Ark call still goes
 through `HTTPS_PROXY`). Distill takes ~15-30s (async fire-and-forget, does not
 block the hook ack).
+
+## Known debt — candidate-queue audit (2026-07-23)
+
+Audited the live DB (`~/.memside/memside.db`: **571 candidate / 2 approved**,
+102 MB; ~19h of runtime). The candidate queue is effectively broken: production
+vastly outpaces approval, and there is no dedup. **Dedup is being brainstormed
+separately** (see `docs/superpowers/specs/` + `plans/` for the dedup design).
+The remaining findings are tracked here as follow-up work:
+
+1. **events/jobs never cleaned + full transcript stored** — `src/server.ts:113-127`
+   JSON-stringifies the *entire* transcript into `memory_distill_events.payload`
+   on every Stop hook; there is no delete / TTL for done/failed jobs or their
+   events (grep confirmed — only the FK `ON DELETE CASCADE` exists, nothing
+   deletes jobs). 92 MB of the 102 MB DB is `memory_distill_events.payload`
+   (316 rows; largest single row 660 KB). Needs a cleanup policy + summary-only
+   storage instead of full-transcript copy.
+2. **Candidate-queue growth outpaces approval** — 571 candidates in ~19h vs 2
+   approved. The approve step is the broken link in capture->distill->approve->
+   inject. Needs a candidate cap / aging / near-duplicate aggregation in the
+   queue UI so a human can actually get through it.
+3. **`scope_id` is raw cwd with no normalization** — `src/scheduler.ts:76`
+   writes `scopeId = job.cwd`; `src/adapter/claudeCode.ts:38` injects with
+   `projectId = input.cwd`, matched by exact string `eq`. Windows path case /
+   trailing slash / symlink / 8.3-shortname drift silently breaks project-scope
+   injection (approved project memories never reach a new session). Needs cwd
+   normalization at both write and match sites.
+4. **Schema drift + migration backfill gap** — the live DB's `memories` table
+   has **no `source_cwd` column** (`PRAGMA table_info` confirmed): the running
+   daemon was started from pre-`source_cwd` code and never restarted, so the
+   `client.ts:66-75` migration never ran. Additionally the backfill
+   `UPDATE memories SET source_cwd = scope_id WHERE scope_type='project'`
+   (`client.ts:73`) only covers project rows — **global memories' `source_cwd`
+   would stay NULL**, losing their origin project. Needs a daemon restart to
+   apply the migration AND a backfill fix that populates `source_cwd` for global
+   rows from their distill job's `cwd`.
+5. **Stuck `running` distill jobs** — 2 jobs are stuck in `status='running'`;
+   `sweepStuckRunning` (`src/daemon.ts:108`) runs only once at daemon startup, so
+   a long-lived daemon never recovers them. Needs a periodic sweep or a
+   tick-side timeout-skip for `running` rows.
