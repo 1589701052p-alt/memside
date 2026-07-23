@@ -123,3 +123,40 @@ const TRANSITIONS: Record<MemoryStatus, MemoryStatus[]> = {
 export function canTransition(from: MemoryStatus, to: MemoryStatus): boolean {
   return TRANSITIONS[from].includes(to)
 }
+
+/**
+ * Extract the first balanced {...} object from raw LLM output. Strips markdown
+ * fences (```json...``` / ```...``` / ~~~...~~~) and surrounding prose by
+ * locating the first '{' and scanning to its matching '}' with string-aware
+ * depth counting (braces inside "..." / \"...\" are NOT counted). No regex.
+ *
+ * - No '{' in raw -> return raw (caller's JSON.parse fails into its existing catch).
+ * - Matched -> return the [start..i] substring.
+ * - Unbalanced (truncated) -> return raw.slice(start) (parse fails, existing catch).
+ *
+ * Property: only turns a "false failure" (valid {...} buried in noise) into
+ * success; genuinely-non-JSON input is passed through unchanged.
+ */
+export function extractJsonObject(raw: string): string {
+  const start = raw.indexOf('{')
+  if (start === -1) return raw
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = start; i < raw.length; i++) {
+    const c = raw[i]
+    if (inString) {
+      if (escape) escape = false
+      else if (c === '\\') escape = true
+      else if (c === '"') inString = false
+    } else {
+      if (c === '"') inString = true
+      else if (c === '{') depth++
+      else if (c === '}') {
+        depth--
+        if (depth === 0) return raw.slice(start, i + 1)
+      }
+    }
+  }
+  return raw.slice(start)
+}
