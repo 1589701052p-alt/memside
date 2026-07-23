@@ -21,6 +21,14 @@ test('handles braces inside strings', () => {
   expect(extractJsonObject('{"title":"a{b}"}')).toBe('{"title":"a{b}"}')
 })
 
+test('handles escaped quote inside string', () => {
+  // Locks the `escape` branch of the state machine (pure.ts): a backslash before
+  // a quote must NOT close the string, so the `}` after it is counted as a real
+  // closer. Regression here would silently mis-extract any JSON with escaped
+  // quotes. Reviewer runtime-verified correctness; this test pins it.
+  expect(extractJsonObject('{"a":"b\\"c"}')).toBe('{"a":"b\\"c"}')
+})
+
 test('handles nested objects', () => {
   expect(extractJsonObject('{"a":{"b":{"c":1}}}')).toBe('{"a":{"b":{"c":1}}}')
 })
