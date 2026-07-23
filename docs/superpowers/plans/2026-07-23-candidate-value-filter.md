@@ -202,6 +202,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ### Task 3: valueFilter.ts — judgeValue 纯函数 + 中性 prompt
 
+> **实现偏差（已采纳）**：下方代码模板用的是 `callAnthropic(...) + JSON.parse(raw)` 直解。实际落地改为镜像 dedup 的 `callWithRetry({call, system, user, shouldRetry: valueShouldRetry(n)})`（`./retry`，PR #7 已合入），tolerate markdown 围栏包裹的 JSON 并带反馈重试。以下代码块保留作设计意图参考，**以 spec §5.1 + 实际 `src/memory/valueFilter.ts` 为准**（commit 0b4961f）。
+
 **Files:**
 - Create: `src/memory/valueFilter.ts`
 - Test: `tests/valueFilter.test.ts`
