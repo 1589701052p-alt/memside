@@ -16,6 +16,7 @@ export const memories = sqliteTable(
     sourceKind: text('source_kind', {
       enum: ['conversation', 'error', 'manual'],
     }).notNull(),
+    sourceCwd: text('source_cwd'), // 来源项目 cwd；蒸馏来自 job.cwd，手动记忆为 null
     sourceEventId: text('source_event_id'),
     distillJobId: text('distill_job_id'),
     distillAction: text('distill_action', {
