@@ -18,6 +18,7 @@ export interface MemoryInput {
   tags: string[]
   sourceKind: 'conversation' | 'error' | 'manual'
   runtime: RuntimeTag
+  sourceCwd?: string | null
   sourceEventId?: string | null
   distillJobId?: string | null
   distillAction?: 'new' | 'update_of' | 'duplicate_of' | 'conflict_with' | null
@@ -33,6 +34,7 @@ export interface Memory {
   tags: string[]
   status: MemoryStatus
   sourceKind: string
+  sourceCwd: string | null
   sourceEventId: string | null
   distillJobId: string | null
   distillAction: string | null
@@ -56,7 +58,8 @@ function rowToMemory(r: any): Memory {
   return {
     id: r.id, scopeType: r.scopeType, scopeId: r.scopeId, runtime: r.runtime ?? null,
     title: r.title, bodyMd: r.bodyMd, tags: parseTags(r.tags), status: r.status,
-    sourceKind: r.sourceKind, sourceEventId: r.sourceEventId ?? null,
+    sourceKind: r.sourceKind, sourceCwd: r.sourceCwd ?? null,
+    sourceEventId: r.sourceEventId ?? null,
     distillJobId: r.distillJobId ?? null, distillAction: r.distillAction ?? null,
     supersedesId: r.supersedesId ?? null, supersededById: r.supersededById ?? null,
     approvedAt: r.approvedAt ?? null, createdAt: r.createdAt, version: r.version,
@@ -70,13 +73,15 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     id, scopeType: input.scopeType, scopeId: input.scopeId, runtime: input.runtime,
     title: input.title, bodyMd: input.bodyMd, tags: JSON.stringify(input.tags),
     status: 'candidate', sourceKind: input.sourceKind,
+    sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null,
     approvedAt: null, createdAt: now, version: 1,
   })
   return rowToMemory({ id, scopeType: input.scopeType, scopeId: input.scopeId, runtime: input.runtime,
     title: input.title, bodyMd: input.bodyMd, tags: JSON.stringify(input.tags), status: 'candidate',
-    sourceKind: input.sourceKind, sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
+    sourceKind: input.sourceKind, sourceCwd: input.sourceCwd ?? null,
+    sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null, approvedAt: null,
     createdAt: now, version: 1 })
 }

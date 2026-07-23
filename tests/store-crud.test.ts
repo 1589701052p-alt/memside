@@ -62,3 +62,21 @@ test('getMemoryById returns row', async () => {
   const got = await getMemoryById(db, m.id)
   expect(got?.memory.id).toBe(m.id)
 })
+
+test('createCandidate stores sourceCwd and reads it back', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r',
+  })
+  expect(m.sourceCwd).toBe('/r')
+  const got = await getMemoryById(db, m.id)
+  expect(got?.memory.sourceCwd).toBe('/r')
+})
+
+test('createCandidate defaults sourceCwd to null when omitted', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null,
+  })
+  expect(m.sourceCwd).toBeNull()
+})
