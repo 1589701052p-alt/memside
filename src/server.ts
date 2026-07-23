@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { desc } from 'drizzle-orm'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDistillEvents } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById } from '@/memory/store'
 import { parseTranscriptFile } from '@/claude/transcript'
@@ -137,6 +137,27 @@ export function createApp(deps: AppDeps) {
   })
 
   // --- Memory API ---------------------------------------------------------
+  // Status (background visibility): lets the web UI show capture / distill
+  // activity so the user isn't staring at an empty queue with no clue whether
+  // the daemon is working. Returns event count, recent distill-job stats, and
+  // the most recent error (if any).
+  app.get('/api/status', async (c) => {
+    const jobs = await deps.db.select().from(memoryDistillJobs).orderBy(desc(memoryDistillJobs.createdAt)).limit(20).all()
+    const events = await deps.db.select().from(memoryDistillEvents).all()
+    const memRows = await deps.db.select().from(memories).all()
+    const jobStats: Record<string, number> = {}
+    for (const j of jobs) jobStats[j.status] = (jobStats[j.status] ?? 0) + 1
+    const memStats: Record<string, number> = {}
+    for (const m of memRows) memStats[m.status] = (memStats[m.status] ?? 0) + 1
+    const errored = jobs.find((j) => j.lastError)
+    return c.json({
+      events: events.length,
+      jobs: jobStats,
+      memories: memStats,
+      lastError: errored ? { error: errored.lastError } : null,
+    })
+  })
+
   app.get('/api/memories', async (c) => {
     const rows = await deps.db.select().from(memories).orderBy(desc(memories.createdAt))
     return c.json({ items: rows })

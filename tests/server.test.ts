@@ -5,7 +5,7 @@ import { openDb } from '@/db/client'
 import { createCandidate, promoteCandidate } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
-import { memoryDistillEvents } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
 
 // EBUSY-safe pattern (same as store-promote.test.ts / adapter-claude.test.ts):
 // wipe `root` once in beforeAll, give each test its own fresh subdir, and
@@ -252,4 +252,27 @@ test('PATCH /api/memories/:id updates title and broadcasts', async () => {
   expect(r.body.memory.title).toBe('t2')
   expect(r.body.changedFields).toContain('title')
   expect(broadcastCalls.some((m) => (m as any).type === 'memory.updated')).toBe(true)
+})
+
+test('GET /api/status reports events, job stats, memory counts, and lastError', async () => {
+  // Background visibility for the web UI: the status bar needs the capture-event
+  // count, distill-job state counts, memory counts by status, and the most
+  // recent distill error so the user can see the daemon working instead of an
+  // empty queue.
+  const c1 = await createCandidate(db, { scopeType: 'project', scopeId: '/p', title: '[category:x] a', bodyMd: 'a', tags: [], sourceKind: 'manual', runtime: null })
+  await promoteCandidate(db, c1.id, { action: 'approve' })
+  await createCandidate(db, { scopeType: 'project', scopeId: '/p', title: '[category:x] b', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const now = Date.now()
+  db.insert(memoryDistillJobs).values({ id: 'j1', debounceKey: 'k1', sourceEventId: 's1', runtime: 'claude-code', cwd: '/p', status: 'done', attempts: 0, nextRunAt: now, createdAt: now }).run()
+  db.insert(memoryDistillJobs).values({ id: 'j2', debounceKey: 'k2', sourceEventId: 's2', runtime: 'claude-code', cwd: '/p', status: 'failed', attempts: 3, nextRunAt: now, createdAt: now, lastError: 'boom' }).run()
+  db.insert(memoryDistillEvents).values({ distillJobId: 'j1', attemptIndex: 0, ts: now, kind: 'conversation', payload: '[]' }).run()
+
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.events).toBe(1)
+  expect(r.body.jobs.done).toBe(1)
+  expect(r.body.jobs.failed).toBe(1)
+  expect(r.body.memories.candidate).toBe(1)
+  expect(r.body.memories.approved).toBe(1)
+  expect(r.body.lastError).toEqual({ error: 'boom' })
 })
