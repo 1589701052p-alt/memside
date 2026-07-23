@@ -39,8 +39,8 @@ export default function App() {
     await promoteMemory(id, { action: 'reject' })
     void refresh()
   }
-  async function edit(id: string, title: string, bodyMd: string) {
-    await patchMemory(id, { title, bodyMd })
+  async function edit(id: string, title: string, bodyMd: string, scopeType: 'project' | 'global') {
+    await patchMemory(id, { title, bodyMd, scopeType })
     void refresh()
   }
 
@@ -125,7 +125,7 @@ export default function App() {
           m={m}
           onApprove={() => approve(m.id)}
           onReject={() => reject(m.id)}
-          onEdit={(t, b) => edit(m.id, t, b)}
+          onEdit={(t, b, s) => edit(m.id, t, b, s)}
         />
       ))}
       {candidates.length === 0 && !loading && !error && (
@@ -146,26 +146,51 @@ function MemoryCard({
   m: MemoryItem
   onApprove: () => void
   onReject: () => void
-  onEdit: (title: string, bodyMd: string) => void
+  onEdit: (title: string, bodyMd: string, scopeType: 'project' | 'global') => Promise<void>
 }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(m.title)
   const [body, setBody] = useState(m.bodyMd ?? '')
+  const [scope, setScope] = useState<'project' | 'global'>(m.scopeType === 'project' ? 'project' : 'global')
+  const [editError, setEditError] = useState<string | null>(null)
+  const sourceLabel = m.sourceCwd
+    ? (m.sourceCwd.split(/[\\/]/).filter(Boolean).pop() ?? m.sourceCwd)
+    : m.sourceKind === 'manual'
+      ? '手动'
+      : '未知'
+  async function save() {
+    setEditError(null)
+    try {
+      await onEdit(title, body, scope)
+      setEditing(false)
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : String(e))
+    }
+  }
   return (
     <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16, marginBottom: 12 }}>
       {editing ? (
         <>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ marginRight: 12 }}>
+              <input type="radio" checked={scope === 'project'} onChange={() => setScope('project')} /> project
+            </label>
+            <label>
+              <input type="radio" checked={scope === 'global'} onChange={() => setScope('global')} /> global
+            </label>
+          </div>
           <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: '100%', marginBottom: 8 }} />
           <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} style={{ width: '100%', marginBottom: 8 }} />
-          <button onClick={() => { onEdit(title, body); setEditing(false) }}>保存</button>
+          <button onClick={save}>保存</button>
           <button onClick={() => setEditing(false)}>取消</button>
+          {editError && <div style={{ color: '#c00', fontSize: 12, marginTop: 6 }}>{editError}</div>}
         </>
       ) : (
         <>
           <strong>{m.title}</strong>
           {m.bodyMd && <p style={{ color: '#555' }}>{m.bodyMd}</p>}
           <small>
-            {m.scopeType} · {m.runtime ?? '任意 runtime'}
+            {m.scopeType} · {m.runtime ?? '任意 runtime'} · 来源: <span title={m.sourceCwd ?? ''}>{sourceLabel}</span>
           </small>
           <div style={{ marginTop: 8 }}>
             <button onClick={onApprove} style={{ marginRight: 8 }}>
@@ -174,7 +199,7 @@ function MemoryCard({
             <button onClick={onReject} style={{ marginRight: 8 }}>
               拒绝
             </button>
-            <button onClick={() => setEditing(true)}>编辑</button>
+            <button onClick={() => { setEditError(null); setEditing(true) }}>编辑</button>
           </div>
         </>
       )}

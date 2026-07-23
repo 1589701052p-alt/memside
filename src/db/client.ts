@@ -24,6 +24,7 @@ export function openDb(path: string) {
       tags TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected')),
       source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual')),
+      source_cwd TEXT,
       source_event_id TEXT,
       distill_job_id TEXT,
       distill_action TEXT CHECK (distill_action IN ('new','update_of','duplicate_of','conflict_with') OR distill_action IS NULL),
@@ -62,5 +63,16 @@ export function openDb(path: string) {
     );
     CREATE INDEX IF NOT EXISTS idx_distill_events_job_attempt ON memory_distill_events(distill_job_id, attempt_index, ts);
   `)
+  // Idempotent migration: add source_cwd to pre-existing memories tables.
+  // CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so a column
+  // added in a later release needs an explicit ALTER + backfill.
+  {
+    const cols = raw.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'source_cwd')) {
+      raw.exec('ALTER TABLE memories ADD COLUMN source_cwd TEXT')
+      raw.exec("UPDATE memories SET source_cwd = scope_id WHERE scope_type = 'project' AND source_cwd IS NULL")
+      raw.exec("UPDATE memories SET source_cwd = (SELECT cwd FROM memory_distill_jobs WHERE id = memories.distill_job_id) WHERE source_cwd IS NULL AND distill_job_id IS NOT NULL")
+    }
+  }
   return db
 }

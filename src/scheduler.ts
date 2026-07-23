@@ -78,6 +78,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           bodyMd: c.bodyMd,
           tags: [],
           sourceKind: 'conversation',
+          sourceCwd: job.cwd ?? null,
           runtime: c.runtime,
           distillJobId: job.id,
           distillAction: c.distillAction,

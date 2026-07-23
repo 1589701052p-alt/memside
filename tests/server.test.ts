@@ -276,3 +276,34 @@ test('GET /api/status reports events, job stats, memory counts, and lastError', 
   expect(r.body.memories.approved).toBe(1)
   expect(r.body.lastError).toEqual({ error: 'boom' })
 })
+
+test('PATCH /api/memories/:id edits scope project->global', async () => {
+  const c = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r',
+  })
+  const r = await req(`/api/memories/${c.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ scopeType: 'global' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(200)
+  expect(r.body.memory.scopeType).toBe('global')
+  expect(r.body.memory.scopeId).toBeNull()
+  expect(r.body.changedFields).toContain('scopeType')
+  expect(broadcastCalls.some((m) => (m as any).type === 'memory.updated')).toBe(true)
+})
+
+test('PATCH /api/memories/:id global->project without sourceCwd returns 409', async () => {
+  const c = await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null,
+  })
+  const r = await req(`/api/memories/${c.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ scopeType: 'project' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(409)
+  expect(r.body.error).toBeTruthy()
+})

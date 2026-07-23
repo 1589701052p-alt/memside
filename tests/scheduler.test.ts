@@ -62,6 +62,22 @@ test('tick runs a due job and marks done, produces candidates', async () => {
   expect(rows[0]!.status).toBe('done')
 })
 
+test('tick passes sourceCwd from job.cwd into createCandidate', async () => {
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/proj/x', debounceKey: 'k1', debounceMs: 0,
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'something' }],
+    callAnthropic: async () => JSON.stringify({
+      candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'global', runtime: null, distillAction: 'new' }],
+    }),
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(captured.sourceCwd).toBe('/proj/x')
+})
+
 test('tick applies backoff on distill error', async () => {
   const { jobId } = await enqueueDistillJob(db, {
     sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
