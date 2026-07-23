@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memories } from '@/db/schema'
@@ -9,6 +9,8 @@ import {
   type MemoryStatus,
   type RuntimeTag,
 } from './pure'
+
+import type { ExistingMemoryForDedup } from './dedup'
 
 export interface MemoryInput {
   scopeType: MemoryScope
@@ -118,6 +120,37 @@ export async function listApprovedByScope(
       global: globalRows.filter(filterRuntime).map(toRow),
     },
   }
+}
+
+export const DEDUP_EXISTING_LIMIT = 50
+
+/**
+ * Load same-scope candidate + approved memories for dedup comparison. project =
+ * exact scopeId match; global = scopeId IS NULL. Returns approved (all) + candidate
+ * (createdAt DESC LIMIT DEDUP_EXISTING_LIMIT), de-duped by id, projecting only
+ * {id,title,scopeType,scopeId,status} (no body/runtime, to keep the dedup prompt
+ * small). Other statuses (archived/rejected/superseded) excluded.
+ */
+export async function listForDedupByScope(
+  db: DbClient,
+  opts: { scopeType: MemoryScope; scopeId: string | null },
+): Promise<ExistingMemoryForDedup[]> {
+  const scopeClause = opts.scopeId === null ? isNull(memories.scopeId) : eq(memories.scopeId, opts.scopeId)
+  const cols = { id: memories.id, title: memories.title, scopeType: memories.scopeType, scopeId: memories.scopeId, status: memories.status }
+  const approvedRows = await db.select(cols).from(memories).where(
+    and(eq(memories.scopeType, opts.scopeType), scopeClause, eq(memories.status, 'approved')),
+  ).orderBy(desc(memories.createdAt)).all()
+  const candidateRows = await db.select(cols).from(memories).where(
+    and(eq(memories.scopeType, opts.scopeType), scopeClause, eq(memories.status, 'candidate')),
+  ).orderBy(desc(memories.createdAt)).limit(DEDUP_EXISTING_LIMIT).all()
+  const seen = new Set<string>()
+  const out: ExistingMemoryForDedup[] = []
+  for (const r of [...approvedRows, ...candidateRows]) {
+    if (seen.has(r.id)) continue
+    seen.add(r.id)
+    out.push({ id: r.id, title: r.title, scopeType: r.scopeType as MemoryScope, scopeId: r.scopeId, status: r.status as MemoryStatus })
+  }
+  return out
 }
 
 // canTransition (defined in pure.ts) is the authoritative state-machine
