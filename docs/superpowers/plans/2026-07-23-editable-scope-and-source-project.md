@@ -668,6 +668,10 @@ test('App.tsx annotates source project', () => {
 test('App.tsx exposes a scope edit control', () => {
   expect(src).toContain('scopeType')
 })
+
+test('App.tsx surfaces edit errors (spec §8)', () => {
+  expect(src).toContain('editError')
+})
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -689,21 +693,31 @@ Expected: FAIL（App.tsx 当前无 "来源" / scopeType 选择器）。
 把 `MemoryCard` 的 props 类型里 `onEdit` 改为：
 
 ```tsx
-  onEdit: (title: string, bodyMd: string, scopeType: 'project' | 'global') => void
+  onEdit: (title: string, bodyMd: string, scopeType: 'project' | 'global') => Promise<void>
 ```
 
-把 `MemoryCard` 组件体替换为：
+把 `MemoryCard` 组件体替换为（`save` 异步等待 `onEdit` 并捕获 409 等错误，避免 floating promise；spec §8 要求 UI 提示无来源项目等失败）：
 
 ```tsx
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(m.title)
   const [body, setBody] = useState(m.bodyMd ?? '')
   const [scope, setScope] = useState<'project' | 'global'>(m.scopeType === 'project' ? 'project' : 'global')
+  const [editError, setEditError] = useState<string | null>(null)
   const sourceLabel = m.sourceCwd
     ? (m.sourceCwd.split(/[\\/]/).filter(Boolean).pop() ?? m.sourceCwd)
     : m.sourceKind === 'manual'
       ? '手动'
       : '未知'
+  async function save() {
+    setEditError(null)
+    try {
+      await onEdit(title, body, scope)
+      setEditing(false)
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : String(e))
+    }
+  }
   return (
     <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16, marginBottom: 12 }}>
       {editing ? (
@@ -718,8 +732,9 @@ Expected: FAIL（App.tsx 当前无 "来源" / scopeType 选择器）。
           </div>
           <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: '100%', marginBottom: 8 }} />
           <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} style={{ width: '100%', marginBottom: 8 }} />
-          <button onClick={() => { onEdit(title, body, scope); setEditing(false) }}>保存</button>
+          <button onClick={save}>保存</button>
           <button onClick={() => setEditing(false)}>取消</button>
+          {editError && <div style={{ color: '#c00', fontSize: 12, marginTop: 6 }}>{editError}</div>}
         </>
       ) : (
         <>
@@ -735,7 +750,7 @@ Expected: FAIL（App.tsx 当前无 "来源" / scopeType 选择器）。
             <button onClick={onReject} style={{ marginRight: 8 }}>
               拒绝
             </button>
-            <button onClick={() => setEditing(true)}>编辑</button>
+            <button onClick={() => { setEditError(null); setEditing(true) }}>编辑</button>
           </div>
         </>
       )}
