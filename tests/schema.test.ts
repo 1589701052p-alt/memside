@@ -105,3 +105,34 @@ test('migration adds source_cwd to pre-existing db, backfills project rows, idem
   expect((reopened.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]).some((c) => c.name === 'source_cwd')).toBe(true)
   reopened.$client.close()
 })
+
+test('fresh db has value_class column', () => {
+  db = openDb(join(dir, 'vc.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'value_class')).toBe(true)
+})
+
+test('fresh db has memory_discards table', () => {
+  db = openDb(join(dir, 'md.db'))
+  const tables = db.$client.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_discards'").all() as { name: string }[]
+  expect(tables.length).toBe(1)
+})
+
+test('migration adds value_class to pre-existing db, idempotent, no backfill', () => {
+  const dbPath = join(dir, 'oldvc.db')
+  const old = new Database(dbPath)
+  old.exec(`CREATE TABLE memories (id TEXT PRIMARY KEY, scope_type TEXT NOT NULL CHECK (scope_type IN ('project','global')), scope_id TEXT, runtime TEXT, title TEXT NOT NULL, body_md TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL, source_kind TEXT NOT NULL, source_cwd TEXT, source_event_id TEXT, distill_job_id TEXT, distill_action TEXT, supersedes_id TEXT, superseded_by_id TEXT, approved_at INTEGER, created_at INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 1, CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL)))`)
+  old.exec(`INSERT INTO memories (id, scope_type, scope_id, title, body_md, tags, status, source_kind, created_at, version) VALUES ('p1','project','/r','t','b','[]','candidate','manual',1,1)`)
+  old.close()
+  const migrated = openDb(dbPath)
+  const cols = migrated.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'value_class')).toBe(true)
+  // no backfill: existing row stays NULL
+  const rows = migrated.$client.prepare('SELECT id, value_class FROM memories').all() as { id: string; value_class: string | null }[]
+  expect(rows.find((r) => r.id === 'p1')!.value_class).toBeNull()
+  migrated.$client.close()
+  // idempotent: reopen doesn't throw (guard skips ALTER)
+  const reopened = openDb(dbPath)
+  expect((reopened.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]).some((c) => c.name === 'value_class')).toBe(true)
+  reopened.$client.close()
+})
