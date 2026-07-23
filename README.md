@@ -1,6 +1,6 @@
 # memside
 
-[claude code](https://claude.com/claude-code) 的本地记忆 sidecar。它监听你的 claude code 会话,把反复出现的经验教训、踩过的坑、团队约定提炼成简洁的记忆条目,经你 web UI 审批后,在未来的会话里自动注入--全程不阻塞你的工作。
+AI agent (目前仅支持Claude Code) 的本地记忆 sidecar。它监听你的 claude code 会话,把反复出现的经验教训、踩过的坑、团队约定提炼成简洁的记忆条目,经你 web UI 审批后,在未来的会话里自动注入--全程不阻塞你的工作。
 
 ```
    claude code 会话
