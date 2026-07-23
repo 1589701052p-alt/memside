@@ -24,9 +24,9 @@ export const DEDUP_SYSTEM_PROMPT = `You are memside-dedup. Decide whether each n
 Respond ONLY with JSON: {"verdicts":[{"index":<n>,"isDuplicate":true,"duplicateOfId":"<id>"} | {"index":<n>,"isDuplicate":false}]}. Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be one of the existing ids. When unsure, emit isDuplicate:false.`
 
 function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingMemoryForDedup[]): string {
-  const exLines = existing.length === 0
-    ? '(none)'
-    : existing.map((e) => `id=${e.id} | ${e.title}`).join('\n')
+  // judgeDuplicates short-circuits empty `existing` before reaching here, so the
+  // map join never runs against []. No `(none)` fallback needed.
+  const exLines = existing.map((e) => `id=${e.id} | ${e.title}`).join('\n')
   const newLines = newCandidates.map((c, i) => `[${i}] ${c.title}\n${c.bodyMd}`).join('\n---\n')
   return `Existing memories (same scope):\n${exLines}\n\nNew candidates:\n${newLines}\n\nReturn JSON per the system instructions.`
 }

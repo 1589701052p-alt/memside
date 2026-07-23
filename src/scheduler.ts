@@ -41,6 +41,16 @@ export interface TickDeps {
 }
 
 /**
+ * Derive the scopeId a candidate/job resolves to, matching the rule used by
+ * `createCandidate` (project -> cwd, global -> null). Centralizing it here
+ * keeps the dedup grouping and the createCandidate input in lockstep so the
+ * two cannot drift on scopeId derivation.
+ */
+function resolveScopeId(scopeType: DistillCandidate['scopeType'], cwd: string | null): string | null {
+  return scopeType === 'project' ? (cwd ?? 'unknown') : null
+}
+
+/**
  * Filter semantic duplicates out of a distill batch. Groups candidates by
  * (scopeType, scopeId) - scopeId derived the same way createCandidate does
  * (project -> jobCwd, global -> null) - and for each group asks judgeDuplicates
@@ -50,7 +60,7 @@ export interface TickDeps {
  * throws on dedup failure. listForDedupByScope DB errors DO bubble to tick's
  * catch (infrastructure fault -> job retry), per spec §8.
  */
-async function dedupCandidates(
+export async function dedupCandidates(
   db: DbClient,
   callAnthropic: TickDeps['callAnthropic'],
   candidates: DistillCandidate[],
@@ -59,7 +69,7 @@ async function dedupCandidates(
   if (candidates.length === 0) return []
   const groups = new Map<string, { scopeType: DistillCandidate['scopeType']; scopeId: string | null; items: { c: DistillCandidate; globalIndex: number }[] }>()
   candidates.forEach((c, i) => {
-    const scopeId = c.scopeType === 'project' ? (jobCwd ?? 'unknown') : null
+    const scopeId = resolveScopeId(c.scopeType, jobCwd)
     const key = `${c.scopeType}:${scopeId ?? ''}`
     if (!groups.has(key)) groups.set(key, { scopeType: c.scopeType, scopeId, items: [] })
     groups.get(key)!.items.push({ c, globalIndex: i })
@@ -120,7 +130,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       for (const c of keep) {
         await deps.createCandidate(db, {
           scopeType: c.scopeType,
-          scopeId: c.scopeType === 'project' ? (job.cwd ?? 'unknown') : null,
+          scopeId: resolveScopeId(c.scopeType, job.cwd ?? null),
           title: c.title,
           bodyMd: c.bodyMd,
           tags: [],

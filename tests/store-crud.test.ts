@@ -95,6 +95,12 @@ test('listForDedupByScope excludes other scopes and terminal statuses', async ()
   await createCandidate(db, { scopeType: 'global', scopeId: null, title: 'global scope', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
   const rej = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'rejected', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
   await db.update(memories).set({ status: 'rejected' }).where(eq(memories.id, rej.id)).run()
+  // Cover the remaining terminal statuses (rejected already above); the query
+  // selects only candidate+approved, so all three must be excluded.
+  const arc = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'archived', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await db.update(memories).set({ status: 'archived' }).where(eq(memories.id, arc.id)).run()
+  const sup = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'superseded', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await db.update(memories).set({ status: 'superseded' }).where(eq(memories.id, sup.id)).run()
   const rows = await listForDedupByScope(db, { scopeType: 'project', scopeId: '/r' })
   expect(rows.length).toBe(0)
 })
