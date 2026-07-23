@@ -2,7 +2,9 @@ import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
-import { createCandidate, patchMemory, MemoryConflictError } from '@/memory/store'
+import { eq } from 'drizzle-orm'
+import { memories } from '@/db/schema'
+import { createCandidate, patchMemory, listApprovedByScope, MemoryConflictError } from '@/memory/store'
 
 const root = join(import.meta.dir, '.tmp-scope-edit')
 let dir = ''
@@ -71,4 +73,30 @@ test('patch scope unchanged is idempotent no-op', async () => {
   const r = await patchMemory(db, m.id, { scopeType: 'global' })
   expect(r.changedFields).toEqual([])
   expect(r.memory.version).toBe(1)
+})
+
+test('project->global then approved injects in any cwd', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r',
+  })
+  await patchMemory(db, m.id, { scopeType: 'global' })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, m.id)).run()
+  const set = await listApprovedByScope(db, { projectId: '/other', runtime: 'claude-code' })
+  expect(set.byScope.global.length).toBe(1)
+  expect(set.byScope.project.length).toBe(0)
+})
+
+test('global->project then approved injects only in source cwd', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r',
+  })
+  await patchMemory(db, m.id, { scopeType: 'project' })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, m.id)).run()
+  const inSource = await listApprovedByScope(db, { projectId: '/r', runtime: 'claude-code' })
+  expect(inSource.byScope.project.length).toBe(1)
+  const inOther = await listApprovedByScope(db, { projectId: '/other', runtime: 'claude-code' })
+  expect(inOther.byScope.project.length).toBe(0)
+  expect(inOther.byScope.global.length).toBe(0)
 })
