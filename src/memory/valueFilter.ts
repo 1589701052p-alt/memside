@@ -1,4 +1,5 @@
 import type { DistillCandidate } from '@/memory/distiller'
+import { callWithRetry } from './retry'
 
 export type ValueClass = 'decision' | 'convention' | 'trap' | 'topology'
 export type DiscardReason = 'public-knowledge' | 'derivable'
@@ -22,8 +23,13 @@ category by these criteria:
 6. topology - a cross-boundary connection (cross-module/service/team/repo) invisible
    from any single vantage point.
 
-Pick the best-fitting category for each candidate. Respond ONLY with JSON:
-{"verdicts":[{"index":<n>,"category":"public-knowledge|derivable|decision|convention|trap|topology"}]}.
+Pick the best-fitting category for each candidate. 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
+{
+  "verdicts": [
+    {"index": 0, "category": "decision"},
+    {"index": 1, "category": "public-knowledge"}
+  ]
+}
 Emit one verdict per candidate, keyed by index.`
 
 const VALID_CATEGORIES = new Set([
@@ -39,12 +45,37 @@ function renderUserPrompt(candidates: DistillCandidate[]): string {
 }
 
 /**
+ * Validate parsed value-judge output for retry-worthiness. Returns an error
+ * message to retry, or null to accept. Checks: parsed has a `verdicts` array,
+ * each verdict has a numeric `index` in [0, n), and a `category` string that is
+ * one of the 6 VALID_CATEGORIES. Exhausted retries fall through to the existing
+ * per-verdict hallucinated-category -> keep+null mapping.
+ */
+function valueShouldRetry(n: number): (parsed: unknown) => string | null {
+  return (parsed) => {
+    if (!parsed || typeof parsed !== 'object') return '返回的不是 JSON 对象'
+    const p = parsed as { verdicts?: unknown }
+    if (!Array.isArray(p.verdicts)) return '缺少 verdicts 数组'
+    for (let i = 0; i < p.verdicts.length; i++) {
+      const v = p.verdicts[i] as Record<string, unknown> | null
+      if (!v || typeof v.index !== 'number') return `verdict ${i} 缺少 index`
+      if (v.index < 0 || v.index >= n) return `verdict ${v.index} 的 index 越界`
+      if (typeof v.category !== 'string' || !VALID_CATEGORIES.has(v.category)) {
+        return `verdict ${v.index} 的 category 非法`
+      }
+    }
+    return null
+  }
+}
+
+/**
  * Classify each candidate into one of 6 categories (rules 1-6). Code maps
  * public-knowledge/derivable => discard, decision/convention/trap/topology =>
  * keep with valueClass. No valid classification (LLM error / non-JSON / missing
- * index / hallucinated category) => keep with valueClass=null (unevaluated):
- * discard requires a positive rule-1/2 classification; absent that, keep. Never
- * throws, never blocks distill (mirrors dedup's judgeDuplicates).
+ * verdicts / missing index / hallucinated category / retries exhausted) => keep
+ * with valueClass=null (unevaluated): discard requires a positive rule-1/2
+ * classification; absent that, keep. Never throws, never blocks distill (mirrors
+ * dedup's judgeDuplicates).
  */
 export async function judgeValue(
   candidates: DistillCandidate[],
@@ -55,8 +86,12 @@ export async function judgeValue(
   const keepNull = (): ValueVerdict[] =>
     candidates.map((_, i) => ({ index: i, keep: true, valueClass: null }))
   try {
-    const raw = await callAnthropic(VALUE_JUDGE_SYSTEM_PROMPT, renderUserPrompt(candidates))
-    const parsed = JSON.parse(raw) as { verdicts?: unknown }
+    const parsed = await callWithRetry({
+      call: callAnthropic,
+      system: VALUE_JUDGE_SYSTEM_PROMPT,
+      user: renderUserPrompt(candidates),
+      shouldRetry: valueShouldRetry(n),
+    }) as { verdicts?: unknown } | undefined
     if (!parsed || !Array.isArray(parsed.verdicts)) return keepNull()
     const byIndex = new Map<number, ValueVerdict>()
     for (const v of parsed.verdicts) {

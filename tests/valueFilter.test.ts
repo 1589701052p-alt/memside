@@ -87,3 +87,27 @@ test('VALUE_JUDGE_SYSTEM_PROMPT is neutral (no bias words)', () => {
     expect(lower).not.toContain(w)
   }
 })
+
+test('judgeValue parses fence-wrapped JSON (regression: harden silent-failure)', async () => {
+  // TDD: master PR #7 hardened dedup/distiller against markdown-fence-wrapped JSON;
+  // valueFilter must use the same extractJsonObject-via-callWithRetry path, else an
+  // entire batch would degrade to keep+null when the LLM wraps output in ```json.
+  const v = await judgeValue([cand('a')], async () =>
+    '```json\n{"verdicts":[{"index":0,"category":"decision"}]}\n```',
+  )
+  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+})
+
+test('judgeValue retries on invalid category then accepts valid one', async () => {
+  // TDD: valueShouldRetry must force a retry when a verdict's category is not one
+  // of the 6 VALID_CATEGORIES; on the next attempt the LLM returns a valid category
+  // and judgeValue maps it correctly (proves the shouldRetry feedback loop works).
+  let calls = 0
+  const v = await judgeValue([cand('a')], async () => {
+    calls++
+    if (calls === 1) return verdictsJson({ index: 0, category: 'nonsense' })
+    return verdictsJson({ index: 0, category: 'decision' })
+  })
+  expect(calls).toBe(2)
+  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+})
