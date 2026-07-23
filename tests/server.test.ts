@@ -5,7 +5,7 @@ import { openDb } from '@/db/client'
 import { createCandidate, promoteCandidate } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories } from '@/db/schema'
 
 // EBUSY-safe pattern (same as store-promote.test.ts / adapter-claude.test.ts):
 // wipe `root` once in beforeAll, give each test its own fresh subdir, and
@@ -306,4 +306,19 @@ test('PATCH /api/memories/:id global->project without sourceCwd returns 409', as
   })
   expect(r.status).toBe(409)
   expect(r.body.error).toBeTruthy()
+})
+
+test('POST /api/memories/bulk-promote rejects multiple and broadcasts per id', async () => {
+  const c1 = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't1', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const c2 = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't2', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const r = await req('/api/memories/bulk-promote', {
+    method: 'POST',
+    body: JSON.stringify({ ids: [c1.id, c2.id], action: 'reject' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(200)
+  expect(r.body.rejected).toBe(2)
+  expect(broadcastCalls.filter((m) => (m as any).type === 'memory.promoted').length).toBe(2)
+  const after = await db.select().from(memories)
+  expect(after.every((m) => m.status === 'rejected')).toBe(true)
 })
