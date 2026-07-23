@@ -1,5 +1,24 @@
 import { useEffect, useState } from 'react'
-import { listMemories, promoteMemory, patchMemory, getStatus, type MemoryItem, type MemsideStatus } from './api'
+import { listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, type MemoryItem, type MemsideStatus } from './api'
+
+/**
+ * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
+ * valueBadge,不必经 props 透传。
+ *
+ * 优先级:decision/convention=高(0),trap/topology=中(1),null=未评估(2)。
+ * 候选队列按此排序,高价值先审;未评估条目可一键批量拒绝。
+ */
+const VALUE_LABEL: Record<string, string> = {
+  decision: '高·决策', convention: '高·约定', trap: '中·陷阱', topology: '中·拓扑',
+}
+function valueBadge(vc: string | null | undefined): string {
+  return vc && VALUE_LABEL[vc] ? VALUE_LABEL[vc] : '未评估'
+}
+function priorityRank(vc: string | null | undefined): number {
+  if (vc === 'decision' || vc === 'convention') return 0
+  if (vc === 'trap' || vc === 'topology') return 1
+  return 2
+}
 
 /**
  * 审批队列 UI。每 3s 轮询 /api/memories + /api/status。顶部状态栏展示后台
@@ -44,7 +63,18 @@ export default function App() {
     void refresh()
   }
 
-  const candidates = items.filter((i) => i.status === 'candidate')
+  async function bulkRejectUnevaluated() {
+    const ids = items
+      .filter((i) => i.status === 'candidate' && priorityRank(i.valueClass) === 2)
+      .map((i) => i.id)
+    if (ids.length === 0) return
+    await bulkPromote(ids, 'reject')
+    void refresh()
+  }
+
+  const candidates = items
+    .filter((i) => i.status === 'candidate')
+    .sort((a, b) => priorityRank(a.valueClass) - priorityRank(b.valueClass))
   const jobs = status?.jobs ?? {}
   const running = (jobs.running ?? 0) + (jobs.pending ?? 0)
 
@@ -118,6 +148,11 @@ export default function App() {
       ) : null}
 
       <p>{candidates.length} 条候选记忆待审</p>
+      {candidates.some((m) => priorityRank(m.valueClass) === 2) ? (
+        <button onClick={() => bulkRejectUnevaluated()} style={{ marginBottom: 12 }}>
+          批量拒绝未评估
+        </button>
+      ) : null}
       {loading && candidates.length === 0 && <p>加载中…</p>}
       {candidates.map((m) => (
         <MemoryCard
@@ -188,6 +223,7 @@ function MemoryCard({
       ) : (
         <>
           <strong>{m.title}</strong>
+          <span style={{ marginLeft: 8, fontSize: 12, color: '#888' }}>{valueBadge(m.valueClass)}</span>
           {m.bodyMd && <p style={{ color: '#555' }}>{m.bodyMd}</p>}
           <small>
             {m.scopeType} · {m.runtime ?? '任意 runtime'} · 来源: <span title={m.sourceCwd ?? ''}>{sourceLabel}</span>

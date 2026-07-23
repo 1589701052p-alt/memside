@@ -29,7 +29,7 @@ export const DEDUP_SYSTEM_PROMPT = `You are memside-dedup. Decide whether each n
     {"index": 1, "isDuplicate": true, "duplicateOfId": "A"}
   ]
 }
-Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be one of the existing ids. When unsure, emit isDuplicate:false.`
+Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be one of the existing ids.`
 
 function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingMemoryForDedup[]): string {
   // judgeDuplicates short-circuits empty `existing` before reaching here, so the

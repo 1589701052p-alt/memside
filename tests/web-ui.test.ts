@@ -18,3 +18,14 @@ test('App.tsx exposes a scope edit control', () => {
 test('App.tsx surfaces edit errors (spec §8)', () => {
   expect(src).toContain('editError')
 })
+
+// Task 8: 价值优先级排序 + valueClass 徽标 + 批量拒绝未评估。
+// 派生优先级标签(高·决策 等) + 未评估 占位 + 批量拒绝按钮文案。
+// 一旦 refactor 删掉这些 UI 锚点会立刻变红。
+test('App.tsx renders valueClass badge labels and bulk-reject button (source text)', () => {
+  // 派生优先级标签
+  expect(src).toContain('高·决策')
+  expect(src).toContain('未评估')
+  // 批量拒绝未评估按钮
+  expect(src).toContain('批量拒绝未评估')
+})

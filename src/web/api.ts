@@ -23,6 +23,7 @@ export interface MemoryItem {
   sourceKind?: string
   createdAt?: number
   version?: number
+  valueClass?: string | null
 }
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
@@ -77,4 +78,21 @@ export interface MemsideStatus {
 export async function getStatus(fetchFn: FetchLike = fetch): Promise<MemsideStatus> {
   const res = await fetchFn('/api/status')
   return (await res.json()) as MemsideStatus
+}
+
+/**
+ * POST /api/memories/bulk-promote - reject multiple candidates in one call
+ * (avoids N round-trips when clearing the unevaluated tail of the queue).
+ */
+export async function bulkPromote(
+  ids: string[],
+  action: 'reject',
+  fetchFn: FetchLike = fetch,
+): Promise<{ rejected: number }> {
+  const res = await fetchFn('/api/memories/bulk-promote', {
+    method: 'POST',
+    body: JSON.stringify({ ids, action }),
+    headers: { 'content-type': 'application/json' },
+  })
+  return (await res.json()) as { rejected: number }
 }

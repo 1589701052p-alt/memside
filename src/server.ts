@@ -191,6 +191,22 @@ export function createApp(deps: AppDeps) {
     }
   })
 
+  app.post('/api/memories/bulk-promote', async (c) => {
+    const body = await c.req.json().catch(() => ({ ids: [] as string[], action: 'reject' }))
+    const ids: string[] = Array.isArray(body.ids) ? body.ids.filter((x: unknown) => typeof x === 'string') : []
+    let count = 0
+    for (const id of ids) {
+      try {
+        const m = await promoteCandidate(deps.db, id, { action: 'reject' })
+        deps.broadcast({ type: 'memory.promoted', memoryId: m.id, newStatus: m.status })
+        count += 1
+      } catch {
+        // skip not-found / non-candidate (already terminal); continue with the rest
+      }
+    }
+    return c.json({ rejected: count })
+  })
+
   app.post('/api/memories', async (c) => {
     const body = await c.req.json()
     const m = await createCandidate(deps.db, { ...body, sourceKind: 'manual', runtime: body.runtime ?? null })

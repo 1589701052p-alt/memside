@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { memories, memoryDistillJobs, memoryDistillEvents } from './schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards } from './schema'
 
 export type DbClient = ReturnType<typeof openDb>
 
@@ -11,7 +11,7 @@ export function openDb(path: string) {
   const raw = new Database(path)
   raw.exec('PRAGMA journal_mode=WAL')
   raw.exec('PRAGMA synchronous=NORMAL')
-  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents } })
+  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards } })
   // Schema bootstrap (idempotent). DDL lives here so tests need no migration runner.
   raw.exec(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -62,6 +62,15 @@ export function openDb(path: string) {
       payload TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_distill_events_job_attempt ON memory_distill_events(distill_job_id, attempt_index, ts);
+    CREATE TABLE IF NOT EXISTS memory_discards (
+      id TEXT PRIMARY KEY,
+      distill_job_id TEXT NOT NULL REFERENCES memory_distill_jobs(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      body_md TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      ts INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_discards_ts ON memory_discards(ts);
   `)
   // Idempotent migration: add source_cwd to pre-existing memories tables.
   // CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so a column
@@ -72,6 +81,14 @@ export function openDb(path: string) {
       raw.exec('ALTER TABLE memories ADD COLUMN source_cwd TEXT')
       raw.exec("UPDATE memories SET source_cwd = scope_id WHERE scope_type = 'project' AND source_cwd IS NULL")
       raw.exec("UPDATE memories SET source_cwd = (SELECT cwd FROM memory_distill_jobs WHERE id = memories.distill_job_id) WHERE source_cwd IS NULL AND distill_job_id IS NOT NULL")
+    }
+  }
+  // Idempotent migration: add value_class to pre-existing memories tables.
+  // No backfill (future-only feature; existing rows stay NULL = unevaluated).
+  {
+    const cols = raw.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'value_class')) {
+      raw.exec('ALTER TABLE memories ADD COLUMN value_class TEXT')
     }
   }
   return db

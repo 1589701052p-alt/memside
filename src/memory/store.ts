@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories } from '@/db/schema'
+import { memories, memoryDiscards } from '@/db/schema'
 import {
   canTransition,
   type InjectableMemorySet,
@@ -11,6 +11,7 @@ import {
 } from './pure'
 
 import type { ExistingMemoryForDedup } from './dedup'
+import type { ValueClass } from './valueFilter'
 
 export interface MemoryInput {
   scopeType: MemoryScope
@@ -24,6 +25,7 @@ export interface MemoryInput {
   sourceEventId?: string | null
   distillJobId?: string | null
   distillAction?: 'new' | 'update_of' | 'duplicate_of' | 'conflict_with' | null
+  valueClass?: ValueClass | null
 }
 
 export interface Memory {
@@ -45,6 +47,7 @@ export interface Memory {
   approvedAt: number | null
   createdAt: number
   version: number
+  valueClass: ValueClass | null
 }
 
 function parseTags(s: string): string[] {
@@ -65,6 +68,7 @@ function rowToMemory(r: any): Memory {
     distillJobId: r.distillJobId ?? null, distillAction: r.distillAction ?? null,
     supersedesId: r.supersedesId ?? null, supersededById: r.supersededById ?? null,
     approvedAt: r.approvedAt ?? null, createdAt: r.createdAt, version: r.version,
+    valueClass: (r.valueClass ?? null) as ValueClass | null,
   }
 }
 
@@ -78,14 +82,14 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null,
-    approvedAt: null, createdAt: now, version: 1,
+    approvedAt: null, createdAt: now, version: 1, valueClass: input.valueClass ?? null,
   })
   return rowToMemory({ id, scopeType: input.scopeType, scopeId: input.scopeId, runtime: input.runtime,
     title: input.title, bodyMd: input.bodyMd, tags: JSON.stringify(input.tags), status: 'candidate',
     sourceKind: input.sourceKind, sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null, approvedAt: null,
-    createdAt: now, version: 1 })
+    createdAt: now, version: 1, valueClass: input.valueClass ?? null })
 }
 
 export async function getMemoryById(db: DbClient, id: string): Promise<{ memory: Memory } | null> {
@@ -316,4 +320,29 @@ export async function unarchiveMemory(db: DbClient, id: string): Promise<Memory>
     tx.update(memories).set({ status: 'approved' }).where(eq(memories.id, id)).run()
     return rowToMemory(tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()[0]!)
   })
+}
+
+export interface DiscardRecord {
+  title: string
+  bodyMd: string
+  reason: 'public-knowledge' | 'derivable'
+}
+
+/**
+ * Persist value-filter-discarded candidates to the memory_discards audit table.
+ * Best-effort: caller (scheduler.tick) swallows thrown errors so an audit-log
+ * failure never blocks distill or retries the job. No-op on empty list.
+ */
+export async function logDiscards(
+  db: DbClient,
+  distillJobId: string,
+  discards: DiscardRecord[],
+): Promise<void> {
+  if (discards.length === 0) return
+  const ts = Date.now()
+  await db.insert(memoryDiscards).values(
+    discards.map((d) => ({
+      id: ulid(), distillJobId, title: d.title, bodyMd: d.bodyMd, reason: d.reason, ts,
+    })),
+  )
 }

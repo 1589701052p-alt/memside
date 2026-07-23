@@ -102,27 +102,38 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   //    and scope='project' so scopeId resolves to the job's cwd. The ONLY mock
   //    is callAnthropic - everything else is the real production path.
   //
-  //    C1+C3 lock: we capture the `userPrompt` arg passed to callAnthropic and
-  //    assert it contains a substring of the hook's transcript turn. If the
-  //    data path broke (parseTranscriptFile returned [], or turns never reached
-  //    the distiller), the mock would still return a candidate and the rest of
-  //    the test would pass - but capturedUserPrompt would be empty. This
-  //    assertion is the proof that turns flowed JSONL file -> parseTranscriptFile
-  //    -> collector -> events -> makeLoadTranscript -> distiller.
+  //    3-phase mock (value-filter integration): call 1 = distill candidates,
+  //    call 2 = judgeValue verdicts. Dedup is skipped (no existing memories in
+  //    scope), so there is no 3rd call.
+  //
+  //    C1+C3 lock: we capture the `userPrompt` arg passed to callAnthropic on
+  //    the DISTILL call (call 1) and assert it contains a substring of the
+  //    hook's transcript turn. If the data path broke (parseTranscriptFile
+  //    returned [], or turns never reached the distiller), the mock would
+  //    still return a candidate and the rest of the test would pass - but
+  //    capturedUserPrompt would be empty. This assertion is the proof that
+  //    turns flowed JSONL file -> parseTranscriptFile -> collector -> events
+  //    -> makeLoadTranscript -> distiller.
   let capturedUserPrompt = ''
+  let callCount = 0
   await tick(db, {
     loadTranscript: makeLoadTranscript(db),
     callAnthropic: async (_system: string, user: string) => {
-      capturedUserPrompt = user
-      return JSON.stringify({
-        candidates: [{
-          title: '[category:invariant] refund window 14 days',
-          bodyMd: 'Refunds allowed within 14 days of shipment.',
-          scope: 'project',
-          runtime: null,
-          distillAction: 'new',
-        }],
-      })
+      callCount++
+      if (callCount === 1) {
+        capturedUserPrompt = user
+        return JSON.stringify({
+          candidates: [{
+            title: '[category:invariant] refund window 14 days',
+            bodyMd: 'Refunds allowed within 14 days of shipment.',
+            scope: 'project',
+            runtime: null,
+            distillAction: 'new',
+          }],
+        })
+      }
+      // judgeValue: classify the candidate as a 'decision' (keep with valueClass).
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
     createCandidate,
   })
