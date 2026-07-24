@@ -8,6 +8,7 @@ import { tick, startMemoryDistillLoop, enqueueDistillJob, type TickDeps } from '
 import { createCandidate } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall } from '@/anthropic'
+import type { LLMCall } from '@/llm'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
@@ -43,24 +44,24 @@ export function makeLoadTranscript(db: DbClient): TickDeps['loadTranscript'] {
 
 /**
  * Single distill pass for tests: build `TickDeps` (loadTranscript from the
- * events table, callAnthropic from `makeCallAnthropic` unless injected,
+ * events table, callLLM from `makeLLMCall` unless injected,
  * createCandidate from the store) and run one `tick`. Returns the count of
  * jobs processed.
  *
- * Both `loadClaudeCreds` and `callAnthropic` are injectable so tests never
+ * Both `loadClaudeCreds` and `callLLM` are injectable so tests never
  * touch the network.
  */
 export async function runDistillOnce(
   db: DbClient,
   deps: {
     loadClaudeCreds?: () => ClaudeCreds
-    callAnthropic?: (systemPrompt: string, userPrompt: string) => Promise<string>
+    callLLM?: LLMCall
   } = {},
 ): Promise<number> {
-  const callAnthropic = deps.callAnthropic ?? makeLLMCall({ loadClaudeCreds: deps.loadClaudeCreds ?? loadClaudeCreds })
+  const callLLM = deps.callLLM ?? makeLLMCall({ loadClaudeCreds: deps.loadClaudeCreds ?? loadClaudeCreds })
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
-    callAnthropic,
+    callLLM,
     createCandidate,
   }
   return tick(db, tickDeps)
@@ -91,7 +92,7 @@ export function sweepStuckRunning(db: DbClient): number {
 /**
  * Start the memside daemon: open the DB, sweep stuck-running jobs, build the
  * claude-code adapter + Hono app, `Bun.serve` on `port` (default 7777), and
- * start the 1Hz distill loop with the real `callAnthropic` (via
+ * start the 1Hz distill loop with the real `callLLM` (via
  * `loadClaudeCreds`). Optional `installClaudeHooks` writes the collector
  * hook commands into `~/.claude/settings.json`.
  *
@@ -114,7 +115,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
 
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
-    callAnthropic: makeLLMCall(),
+    callLLM: makeLLMCall(),
     createCandidate,
   }
   const stopLoop = startMemoryDistillLoop(db, tickDeps)

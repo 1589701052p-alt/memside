@@ -8,6 +8,7 @@ import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass } from '@/memory/valueFilter'
 import type { MemoryInput, Memory } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
+import type { LLMCall } from '@/llm'
 
 export const DISTILL_DEBOUNCE_MS = 5_000
 export const DISTILL_BATCH_LIMIT = 5
@@ -36,7 +37,7 @@ export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
 
 export interface TickDeps {
   loadTranscript: (job: { id: string; cwd: string | null; sourceEventId: string }) => Promise<TranscriptTurn[]>
-  callAnthropic: (systemPrompt: string, userPrompt: string) => Promise<string>
+  callLLM: LLMCall
   /** Signature matches store.createCandidate(db, MemoryInput): Promise<Memory>. */
   createCandidate: (db: DbClient, input: MemoryInput) => Promise<Memory>
 }
@@ -63,7 +64,7 @@ function resolveScopeId(scopeType: DistillCandidate['scopeType'], cwd: string | 
  */
 export async function dedupCandidates(
   db: DbClient,
-  callAnthropic: TickDeps['callAnthropic'],
+  callLLM: LLMCall,
   candidates: DistillCandidate[],
   jobCwd: string | null,
 ): Promise<DistillCandidate[]> {
@@ -81,7 +82,7 @@ export async function dedupCandidates(
     const verdicts = await judgeDuplicates({
       newCandidates: g.items.map((it) => it.c),
       existing,
-      callAnthropic,
+      callLLM,
     })
     for (const v of verdicts) {
       if (!v.duplicate) keepFlags[g.items[v.index]!.globalIndex] = true
@@ -120,13 +121,13 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         turns,
         runtime: job.runtime as 'claude-code' | 'opencode',
         cwd: job.cwd ?? '',
-        callAnthropic: deps.callAnthropic,
+        callLLM: deps.callLLM,
       })
       // Value filter: classify each candidate (rules 1-6). public-knowledge/
       // derivable => discard (audit-logged); decision/convention/trap/topology
       // => keep with valueClass; no valid classification => keep valueClass=null.
       // judgeValue swallows its own LLM errors (all keep+null), never bubbles.
-      const verdicts = await judgeValue(candidates, deps.callAnthropic)
+      const verdicts = await judgeValue(candidates, deps.callLLM)
       const keepWithClass: { cand: DistillCandidate; valueClass: ValueClass | null }[] = []
       const discarded: DiscardRecord[] = []
       verdicts.forEach((v, i) => {
@@ -142,7 +143,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       }
       // Dedup survivors against same-scope existing (existing behavior).
       const keepCandidates = keepWithClass.map((k) => k.cand)
-      const deduped = await dedupCandidates(db, deps.callAnthropic, keepCandidates, job.cwd ?? null)
+      const deduped = await dedupCandidates(db, deps.callLLM, keepCandidates, job.cwd ?? null)
       // Re-attach valueClass by reference: dedupCandidates returns a same-reference
       // subset of keepCandidates (candidates.filter(...)), so the cand object
       // identity survives dedup and we can map back to its valueClass.

@@ -13,7 +13,7 @@ const newCand: DistillCandidate = {
 test('judgeDuplicates marks duplicate with valid duplicateOfId', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'A' }] }),
+    callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'A' }] }),
   })
   expect(v).toEqual([{ index: 0, duplicate: true, duplicateOfId: 'A' }])
 })
@@ -21,7 +21,7 @@ test('judgeDuplicates marks duplicate with valid duplicateOfId', async () => {
 test('judgeDuplicates marks new when isDuplicate false', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }),
+    callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }),
   })
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })
@@ -29,7 +29,7 @@ test('judgeDuplicates marks new when isDuplicate false', async () => {
 test('judgeDuplicates returns all new when LLM throws', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => { throw new Error('api down') },
+    callLLM: async () => { throw new Error('api down') },
   })
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })
@@ -37,7 +37,7 @@ test('judgeDuplicates returns all new when LLM throws', async () => {
 test('judgeDuplicates returns all new on non-JSON response', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => 'not json',
+    callLLM: async () => 'not json',
   })
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })
@@ -45,7 +45,7 @@ test('judgeDuplicates returns all new on non-JSON response', async () => {
 test('judgeDuplicates returns all new on missing verdicts field', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => JSON.stringify({ foo: 'bar' }),
+    callLLM: async () => JSON.stringify({ foo: 'bar' }),
   })
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })
@@ -53,7 +53,7 @@ test('judgeDuplicates returns all new on missing verdicts field', async () => {
 test('judgeDuplicates treats hallucinated duplicateOfId as new', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'NONEXISTENT' }] }),
+    callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'NONEXISTENT' }] }),
   })
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })
@@ -62,7 +62,7 @@ test('judgeDuplicates skips LLM and returns all new when existing is empty', asy
   let called = 0
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing: [],
-    callAnthropic: async () => { called++; return 'x' },
+    callLLM: async () => { called++; return 'x' },
   })
   expect(called).toBe(0)
   expect(v).toEqual([{ index: 0, duplicate: false }])
@@ -72,7 +72,7 @@ test('judgeDuplicates returns [] and skips LLM when newCandidates is empty', asy
   let called = 0
   const v = await judgeDuplicates({
     newCandidates: [], existing,
-    callAnthropic: async () => { called++; return 'x' },
+    callLLM: async () => { called++; return 'x' },
   })
   expect(called).toBe(0)
   expect(v).toEqual([])
@@ -82,7 +82,7 @@ test('judgeDuplicates treats missing indices as new', async () => {
   const two: DistillCandidate[] = [newCand, { ...newCand, title: '[category:x] second' }]
   const v = await judgeDuplicates({
     newCandidates: two, existing,
-    callAnthropic: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }),
+    callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }),
   })
   expect(v).toEqual([{ index: 0, duplicate: false }, { index: 1, duplicate: false }])
 })
@@ -91,7 +91,7 @@ test('user prompt includes existing titles and ids', async () => {
   let captured = ''
   await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async (_sys, user) => { captured = user; return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }) },
+    callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }) },
   })
   expect(captured).toContain('refund within 14 days')
   expect(captured).toContain('id=A')
@@ -100,7 +100,7 @@ test('user prompt includes existing titles and ids', async () => {
 test('judgeDuplicates parses fence-wrapped verdicts (regression)', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => '```json\n{"verdicts":[{"index":0,"isDuplicate":true,"duplicateOfId":"A"}]}\n```',
+    callLLM: async () => '```json\n{"verdicts":[{"index":0,"isDuplicate":true,"duplicateOfId":"A"}]}\n```',
   })
   expect(v).toEqual([{ index: 0, duplicate: true, duplicateOfId: 'A' }])
 })
@@ -109,7 +109,7 @@ test('judgeDuplicates retries when duplicateOfId is hallucinated', async () => {
   let calls = 0
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => {
+    callLLM: async () => {
       calls++
       if (calls === 1) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'NONEXISTENT' }] })
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'A' }] })
@@ -122,7 +122,7 @@ test('judgeDuplicates retries when duplicateOfId is hallucinated', async () => {
 test('judgeDuplicates returns all new when retry exhausted', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
-    callAnthropic: async () => 'not json',
+    callLLM: async () => 'not json',
   })
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })

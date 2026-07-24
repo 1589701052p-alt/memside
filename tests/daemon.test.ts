@@ -35,12 +35,12 @@ afterEach(() => {
 /**
  * Task 16 integration capstone: locks in the wiring that `runDistillOnce`
  * composes `loadTranscript` (reads `memoryDistillEvents` rows + parses JSON
- * payload into TranscriptTurn[]) + `callAnthropic` + `createCandidate` and
+ * payload into TranscriptTurn[]) + `callLLM` + `createCandidate` and
  * drives `tick` to mark a job `done`.
  *
  * The Anthropic call + creds are mocked so this never touches the network.
  */
-test('runDistillOnce wires loadTranscript + callAnthropic + createCandidate end-to-end (mocked)', async () => {
+test('runDistillOnce wires loadTranscript + callLLM + createCandidate end-to-end (mocked)', async () => {
   const { jobId } = await enqueueDistillJob(db, {
     sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0,
   })
@@ -55,7 +55,7 @@ test('runDistillOnce wires loadTranscript + callAnthropic + createCandidate end-
   })
   await runDistillOnce(db, {
     loadClaudeCreds: () => ({ apiKey: 'sk-test', source: 'test' }),
-    callAnthropic: async () => JSON.stringify({
+    callLLM: async () => JSON.stringify({
       candidates: [{ title: '[category:invariant] refund 14d', bodyMd: '14 days', scope: 'project', runtime: null, distillAction: 'new' }],
     }),
   })

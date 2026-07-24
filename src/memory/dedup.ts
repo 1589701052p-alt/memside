@@ -1,6 +1,7 @@
 import type { DistillCandidate } from '@/memory/distiller'
 import type { MemoryScope, MemoryStatus } from '@/memory/pure'
 import { callWithRetry } from './retry'
+import type { LLMCall } from '@/llm'
 
 export interface ExistingMemoryForDedup {
   id: string
@@ -13,7 +14,7 @@ export interface ExistingMemoryForDedup {
 export interface DedupInput {
   newCandidates: DistillCandidate[]
   existing: ExistingMemoryForDedup[]
-  callAnthropic: (system: string, user: string) => Promise<string>
+  callLLM: LLMCall
 }
 
 export type DedupVerdict =
@@ -65,7 +66,7 @@ function dedupShouldRetry(existingIds: Set<string>): (parsed: unknown) => string
 
 /**
  * Judge each new candidate against same-scope existing memories for semantic
- * duplication. Pure + injectable `callAnthropic` (same seam as the distiller).
+ * duplication. Pure + injectable `callLLM` (same seam as the distiller).
  *
  * Conservative fallback (never throws, never drops info): on LLM error, non-JSON,
  * missing `verdicts`, missing indices, or a hallucinated `duplicateOfId` not in
@@ -81,7 +82,7 @@ export async function judgeDuplicates(input: DedupInput): Promise<DedupVerdict[]
   const existingIds = new Set(input.existing.map((e) => e.id))
   try {
     const parsed = await callWithRetry({
-      call: input.callAnthropic,
+      call: input.callLLM,
       system: DEDUP_SYSTEM_PROMPT,
       user: renderUserPrompt(input.newCandidates, input.existing),
       shouldRetry: dedupShouldRetry(existingIds),
