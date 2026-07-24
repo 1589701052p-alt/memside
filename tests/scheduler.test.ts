@@ -54,7 +54,7 @@ test('tick runs a due job and marks done, produces candidates', async () => {
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   const processed = await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'we only refund within 14 days' }],
-    callAnthropic: async () => JSON.stringify({
+    callLLM: async () => JSON.stringify({
       candidates: [{ title: '[category:invariant] refund window 14d', bodyMd: '14 days', scope: 'project', runtime: null, distillAction: 'new' }],
     }),
     createCandidate: async (_db, input) => ({ id: 'c1', status: 'candidate', version: 1 } as any),
@@ -72,7 +72,7 @@ test('tick passes sourceCwd from job.cwd into createCandidate', async () => {
   let captured: any = null
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'something' }],
-    callAnthropic: async () => JSON.stringify({
+    callLLM: async () => JSON.stringify({
       candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'global', runtime: null, distillAction: 'new' }],
     }),
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
@@ -87,7 +87,7 @@ test('tick applies backoff on distill error', async () => {
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   await tick(db, {
     loadTranscript: async () => { throw new Error('no transcript') },
-    callAnthropic: async () => '[]',
+    callLLM: async () => '[]',
     createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
   })
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
@@ -105,7 +105,7 @@ test('tick filters duplicate candidates (dedup marks duplicate, not persisted)',
   let callCount = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'refund 14 days' }],
-    callAnthropic: async () => {
+    callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:process] 14天退款', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
       if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
@@ -125,7 +125,7 @@ test('tick keeps all candidates when dedup LLM throws (conservative, job still d
   let callCount = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async () => {
+    callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
       if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
@@ -145,7 +145,7 @@ test('tick skips dedup LLM when no existing memories in scope', async () => {
   let createCalls = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async () => {
+    callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
       return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
@@ -165,7 +165,7 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
   let callCount = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async () => {
+    callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
       if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
@@ -181,7 +181,7 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
 // Direct dedupCandidates tests (Fix 1 + Fix 2 from final branch review).
 // These exercise the grouping + globalIndex mapping + cross-scope isolation
 // + spec §8 DB-error bubbling directly, with real DB prepositioning and real
-// listForDedupByScope - only callAnthropic is mocked.
+// listForDedupByScope - only callLLM is mocked.
 // ---------------------------------------------------------------------------
 
 test('dedupCandidates keeps non-duplicate and drops duplicate in a multi-candidate group', async () => {
@@ -252,7 +252,7 @@ test('tick discards value-filter public-knowledge, logs to memory_discards, no c
   let callCount = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async () => {
+    callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] js array map', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
       if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'public-knowledge' }] })
@@ -275,7 +275,7 @@ test('tick passes valueClass into createCandidate for kept candidates', async ()
   let callCount = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async () => {
+    callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] chose A not B because', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
       if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
@@ -294,7 +294,7 @@ test('tick keeps all as valueClass=null when judgeValue LLM throws, job still do
   let callCount = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async () => {
+    callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
       if (callCount === 2) throw new Error('value api down')
@@ -320,7 +320,7 @@ test('tick runs judgeValue before dedup (3-phase call order)', async () => {
   let callCount = 0
   await tick(db, {
     loadTranscript: async () => [{ role: 'user', content: 'x' }],
-    callAnthropic: async (_sys, user) => {
+    callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) { phases.push('distill'); return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) }
       if (callCount === 2) { phases.push('judgeValue'); return JSON.stringify({ verdicts: [{ index: 0, category: 'trap' }] }) }

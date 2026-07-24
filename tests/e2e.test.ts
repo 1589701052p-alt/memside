@@ -63,7 +63,7 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   //    TranscriptTurn[], persists them into memory_distill_events (C1+C3 fix),
   //    and enqueues a distill job. No inline mock transcript - this exercises
   //    the real parseTranscriptFile -> DB -> makeLoadTranscript -> distiller
-  //    path. Only callAnthropic is mocked (no live API key in CI).
+  //    path. Only callLLM is mocked (no live API key in CI).
   const fixturePath = join(dir, 'transcript.jsonl')
   writeFileSync(
     fixturePath,
@@ -100,13 +100,13 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   //    mocked Anthropic. The mock returns one candidate with a
   //    [category:invariant] title (required by the distiller's parse guard)
   //    and scope='project' so scopeId resolves to the job's cwd. The ONLY mock
-  //    is callAnthropic - everything else is the real production path.
+  //    is callLLM - everything else is the real production path.
   //
   //    3-phase mock (value-filter integration): call 1 = distill candidates,
   //    call 2 = judgeValue verdicts. Dedup is skipped (no existing memories in
   //    scope), so there is no 3rd call.
   //
-  //    C1+C3 lock: we capture the `userPrompt` arg passed to callAnthropic on
+  //    C1+C3 lock: we capture the `userPrompt` arg passed to callLLM on
   //    the DISTILL call (call 1) and assert it contains a substring of the
   //    hook's transcript turn. If the data path broke (parseTranscriptFile
   //    returned [], or turns never reached the distiller), the mock would
@@ -118,7 +118,7 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   let callCount = 0
   await tick(db, {
     loadTranscript: makeLoadTranscript(db),
-    callAnthropic: async (_system: string, user: string) => {
+    callLLM: async (_system: string, user: string) => {
       callCount++
       if (callCount === 1) {
         capturedUserPrompt = user

@@ -1,4 +1,5 @@
 import type { DistillCandidate } from '@/memory/distiller'
+import type { LLMCall } from '@/llm'
 import { callWithRetry } from './retry'
 
 export type ValueClass = 'decision' | 'convention' | 'trap' | 'topology'
@@ -79,7 +80,7 @@ function valueShouldRetry(n: number): (parsed: unknown) => string | null {
  */
 export async function judgeValue(
   candidates: DistillCandidate[],
-  callAnthropic: (system: string, user: string) => Promise<string>,
+  callLLM: LLMCall,
 ): Promise<ValueVerdict[]> {
   const n = candidates.length
   if (n === 0) return []
@@ -87,7 +88,7 @@ export async function judgeValue(
     candidates.map((_, i) => ({ index: i, keep: true, valueClass: null }))
   try {
     const parsed = await callWithRetry({
-      call: callAnthropic,
+      call: callLLM,
       system: VALUE_JUDGE_SYSTEM_PROMPT,
       user: renderUserPrompt(candidates),
       shouldRetry: valueShouldRetry(n),

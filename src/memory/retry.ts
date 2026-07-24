@@ -1,7 +1,8 @@
 import { extractJsonObject } from './pure'
+import type { LLMCall } from '@/llm'
 
 export interface RetryOpts {
-  call: (system: string, user: string) => Promise<string>
+  call: LLMCall
   system: string
   user: string
   /** Return an error message to retry, or null to accept the parsed output. */

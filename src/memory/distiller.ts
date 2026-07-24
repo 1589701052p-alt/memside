@@ -1,4 +1,5 @@
 import { detectErrorSignals, type TranscriptTurn, type MemoryScope, type RuntimeTag } from './pure'
+import type { LLMCall } from '@/llm'
 import { callWithRetry } from './retry'
 
 export const DISTILLER_SYSTEM_PROMPT = `You are memside-distiller, an internal subsystem that extracts durable long-term memories from a developer's recent claude code / opencode session.
@@ -54,7 +55,7 @@ export interface DistillInput {
   runtime: 'claude-code' | 'opencode'
   cwd: string
   /** Injected seam; production wires the real Anthropic call, tests pass a mock. */
-  callAnthropic: (systemPrompt: string, userPrompt: string) => Promise<string>
+  callLLM: LLMCall
 }
 
 function renderUserPrompt(
@@ -95,7 +96,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillCan
     const signals = detectErrorSignals(input.turns)
     const userPrompt = renderUserPrompt(input.turns, input.runtime, input.cwd, signals)
     const parsed = await callWithRetry({
-      call: input.callAnthropic,
+      call: input.callLLM,
       system: DISTILLER_SYSTEM_PROMPT,
       user: userPrompt,
       shouldRetry: distillShouldRetry,
