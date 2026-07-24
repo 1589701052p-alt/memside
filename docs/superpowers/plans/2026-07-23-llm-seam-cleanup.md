@@ -4,19 +4,19 @@
 
 **Goal:** 把核心记忆模块对 AI 调用层的依赖收敛到一个 SDK-free 的 `LLMCall` 契约（`src/llm.ts`），seam 改 vendor-neutral 名 `callLLM`，`max_tokens` 可配（默认 8192），唯一行为变更是 2048->8192。
 
-**Architecture:** 新建 SDK-free 契约模块 `src/llm.ts`（`LLMCall` / `LLMCallOpts` / `DEFAULT_LLM_MAX_TOKENS=8192`，不 import SDK）；`src/anthropic.ts` 保留为实现（`makeCallAnthropic`->`makeLLMCall`，`opts.maxTokens` 透传）；核心 4 处（`distiller`/`dedup`/`scheduler`/`daemon`）seam 字段 `callAnthropic`->`callLLM` 并引用契约类型。核心 `import type { LLMCall } from '@/llm'` 物理上不碰 SDK。
+**Architecture:** 新建 SDK-free 契约模块 `src/llm.ts`（`LLMCall` / `LLMCallOpts` / `DEFAULT_LLM_MAX_TOKENS=8192`，不 import SDK）；`src/anthropic.ts` 保留为实现（`makeCallAnthropic`->`makeLLMCall`，`opts.maxTokens` 透传）；核心 6 处内联 seam 契约（`distiller`/`dedup`/`valueFilter`/`scheduler`/`retry`/`daemon`）统一为 `LLMCall` 类型、字段名 `callAnthropic`->`callLLM`。核心 `import type { LLMCall } from '@/llm'` 物理上不碰 SDK。distill/dedup/valueFilter 经 `callWithRetry` 中介消费 seam（2 参调用，8192 默认值自动贯通三处）。
 
 **Tech Stack:** Bun + Hono + Drizzle + bun:sqlite(WAL) + zod + @anthropic-ai/sdk；测试 bun:test。
 
 ## Global Constraints
 
 - `bun run typecheck && bun test` 必须全绿才能 push（CLAUDE.md 运行门槛）。
-- 严禁直推 `master`；本分支 `refactor/llm-seam-cleanup`（基线 `origin/master` `4e52cee`，spec commit `7bc73fe`），PR 合 `master`。
+- 严禁直推 `master`；本分支 `refactor/llm-seam-cleanup`（已 rebase 到 `origin/master` `d662607`；spec commit `d0bc869`、plan commit 见本文件），PR 合 `master`。
 - 任何生产代码改动必须带测试；纯函数/纯数据层为首选可断言面（CLAUDE.md）。
-- 唯一运行时行为变更：`max_tokens` 2048 -> 8192。其余纯重构零行为变更；不改 prompt、不改 distiller/dedup 降级语义、不动 `creds.ts`、零 schema 变更。
-- 契约模块 `src/llm.ts` 刻意不 import `@anthropic-ai/sdk` / `./creds`；SDK 只存在于 `src/anthropic.ts`。
+- 唯一运行时行为变更：`max_tokens` 2048 -> 8192。其余纯重构零行为变更；不改 prompt、不改 distill/dedup/valueFilter 降级语义、不改 `callWithRetry` 重试逻辑、不动 `creds.ts`、零 schema 变更。
+- 契约模块 `src/llm.ts` 刻意不 import `@anthropic-ai/sdk` / `./creds`；SDK 只存在于 `src/anthropic.ts`。`src/memory/retry.ts` 的 `callWithRetry` 属核心层（SDK-free，只 import `./pure`），其 `RetryOpts.call` 也改用 `LLMCall` 类型。
 - commit message 末尾带 `Co-Authored-By: Claude <noreply@anthropic.com>`（CLAUDE.md）。
-- 完成全部任务后、写代码前已清理 `.superpowers/sdd/`（本计划落地流程 step 4，CLAUDE.md 强制）。
+- `.superpowers/sdd/` 已清理（CLAUDE.md 闸门）。
 
 ## File Structure
 
@@ -26,13 +26,15 @@
 | `tests/llm.test.ts`（新） | 契约常量锁定 | 新建，锁 8192 |
 | `src/anthropic.ts` | Anthropic SDK 实现 | `makeCallAnthropic`->`makeLLMCall` + opts + import `./llm` |
 | `tests/anthropic.test.ts` | 实现测试 | 符号改名 + 加 max_tokens 测试 |
-| `src/memory/distiller.ts` | distill | seam 字段 `callAnthropic`->`callLLM: LLMCall` |
-| `src/memory/dedup.ts` | dedup | seam 字段 `callAnthropic`->`callLLM: LLMCall` |
-| `src/scheduler.ts` | tick | `TickDeps.callAnthropic`->`callLLM: LLMCall` + 透传 |
+| `src/memory/distiller.ts` | distill | seam 字段 `callAnthropic`->`callLLM: LLMCall` + `callWithRetry` 入参 |
+| `src/memory/dedup.ts` | dedup | seam 字段 `callAnthropic`->`callLLM: LLMCall` + `callWithRetry` 入参 |
+| `src/memory/valueFilter.ts` | 价值分类（judgeValue） | seam 参数 `callAnthropic`->`callLLM: LLMCall` + `callWithRetry` 入参 |
+| `src/memory/retry.ts` | callWithRetry 中介 | `RetryOpts.call` 类型 -> `LLMCall`（字段名 `call` 保留） |
+| `src/scheduler.ts` | tick（distill->judgeValue->dedup） | `TickDeps.callAnthropic`->`callLLM: LLMCall` + 5 处透传 |
 | `src/daemon.ts` | 组合根 | `makeLLMCall` 装配 + seam 字段改名 + import 类型 |
-| 5 个测试文件 | mock 字段改名 | `callAnthropic:`->`callLLM:`（~22 处） |
+| 5 个测试文件 | mock 字段改名 | `callAnthropic:`->`callLLM:`（32 处） |
 
-依赖方向（无循环）：`src/llm.ts`（无依赖）；`src/anthropic.ts` -> `./llm` + `./creds` + SDK；核心 -> `@/llm`（type only）；`src/daemon.ts` -> `@/anthropic` + `@/llm`。
+依赖方向（无循环）：`src/llm.ts`（无依赖）；`src/anthropic.ts` -> `./llm` + `./creds` + SDK；`src/memory/retry.ts` -> `./pure` + `@/llm`(type)；`distiller`/`dedup`/`valueFilter` -> `./retry` + `@/llm`(type)；`scheduler` -> `@/llm`(type) + 上述；`daemon` -> `@/anthropic` + `@/llm`。
 
 ---
 
@@ -44,7 +46,7 @@
 
 **Interfaces:**
 - Consumes: 无。
-- Produces: `LLMCall`（`(system, user, opts?) => Promise<string>`）、`LLMCallOpts`（`{ maxTokens?: number }`）、`DEFAULT_LLM_MAX_TOKENS`（`8192`）。Task 2 的 `makeLLMCall` 返回 `LLMCall` 并用 `DEFAULT_LLM_MAX_TOKENS` 作默认；Task 3 的核心模块 `import type { LLMCall }`。
+- Produces: `LLMCall`（`(system, user, opts?) => Promise<string>`）、`LLMCallOpts`（`{ maxTokens?: number }`）、`DEFAULT_LLM_MAX_TOKENS`（`8192`）。Task 2 的 `makeLLMCall` 返回 `LLMCall` 并用 `DEFAULT_LLM_MAX_TOKENS` 作默认；Task 3 的核心模块与 `RetryOpts.call` `import type { LLMCall }`。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -55,8 +57,9 @@ import { test, expect } from 'bun:test'
 import { DEFAULT_LLM_MAX_TOKENS } from '@/llm'
 
 // 锁定契约层默认 max_tokens。该值由 makeLLMCall（src/anthropic.ts）在
-// opts.maxTokens 缺省时透传给 messages.create；改动此常量须同步审视 distill
-// 输出是否会被截断。见 spec §5.1 / §9。
+// opts.maxTokens 缺省时透传给 messages.create；distill/dedup/valueFilter 经
+// callWithRetry 以 2 参调用 seam，故 8192 默认值贯通三处。改动此常量须同步
+// 审视 distill 输出是否会被截断。见 spec §5.1 / §9。
 test('DEFAULT_LLM_MAX_TOKENS is 8192 (locks the 2048->8192 bump)', () => {
   expect(DEFAULT_LLM_MAX_TOKENS).toBe(8192)
 })
@@ -80,8 +83,9 @@ export interface LLMCallOpts {
 
 /**
  * vendor-neutral 的 LLM 调用 seam。核心记忆模块（distiller / dedup /
- * scheduler）依赖此类型，而非任何具体 provider。实现（src/anthropic.ts）
- * 只在组合根（daemon.ts）装配；测试注入 mock。返回模型响应的拼接文本。
+ * valueFilter / scheduler）与 callWithRetry 中介依赖此类型，而非任何具体
+ * provider。实现（src/anthropic.ts）只在组合根（daemon.ts）装配；测试注入
+ * mock。返回模型响应的拼接文本。
  *
  * 本模块刻意不 import `@anthropic-ai/sdk` / `./creds`，使"核心不依赖 SDK"
  * 成为结构保证：核心 `import type { LLMCall }` 编译期擦除，运行时零 SDK
@@ -113,6 +117,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 ---
 
 ## Task 2: `src/anthropic.ts` -> `makeLLMCall` + opts；扩展 `tests/anthropic.test.ts`
+
+> `src/anthropic.ts` 与 `tests/anthropic.test.ts` 在 `d662607` 上未变（仍是 `makeCallAnthropic`、`max_tokens: 2048`），本任务内容与初版一致。
 
 **Files:**
 - Modify: `src/anthropic.ts`
@@ -287,9 +293,10 @@ export interface AnthropicDeps {
 export const DISTILL_MODEL = 'claude-haiku-4-5-20251001'
 
 /**
- * Build the `callLLM(system, user, opts?)` seam the distiller / dedup consume.
- * Production wires the real `@anthropic-ai/sdk` client using `loadClaudeCreds`;
- * tests inject a mock `callLLM` directly (or `loadClaudeCreds` here).
+ * Build the `callLLM(system, user, opts?)` seam the distiller / dedup /
+ * valueFilter (via callWithRetry) consume. Production wires the real
+ * `@anthropic-ai/sdk` client using `loadClaudeCreds`; tests inject a mock
+ * `callLLM` directly (or `loadClaudeCreds` here).
  *
  * The resolved credentials drive three SDK inputs:
  *   - `apiKey`: the auth key (official `ANTHROPIC_API_KEY` or a proxy
@@ -358,7 +365,7 @@ import { makeLLMCall } from '@/anthropic'
     callAnthropic: makeLLMCall(),
 ```
 
-> 说明：`makeLLMCall()` 返回 `LLMCall`（3 参，opts 可选），赋给 `tickDeps.callAnthropic`（`TickDeps['callAnthropic']` 现仍为 2 参类型）。`(a,b,c?) => ...` 可赋给 `(a,b) => ...`，typecheck 通过。字段名 `callAnthropic` 与局部变量 `callAnthropic` 在本任务保持不变，Task 3 统一改 `callLLM`。
+> 说明：`makeLLMCall()` 返回 `LLMCall`（3 参，opts 可选），赋给 `tickDeps.callAnthropic`（`TickDeps['callAnthropic']` 现仍为 2 参类型）。`(a,b,c?) => ...` 可赋给 `(a,b) => ...`，typecheck 通过。distill/dedup/valueFilter 经 `callWithRetry` 以 2 参调 `opts.call`，8192 默认值贯通。字段名 `callAnthropic` 与局部变量 `callAnthropic` 在本任务保持不变，Task 3 统一改 `callLLM`。
 
 - [ ] **Step 5: 运行测试 + typecheck 确认通过**
 
@@ -387,29 +394,31 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ---
 
-## Task 3: seam 字段 `callAnthropic` -> `callLLM` 全量改名（核心 + daemon + 5 测试）
+## Task 3: seam 字段 `callAnthropic` -> `callLLM` 全量改名 + 6 处契约类型归一（核心 + daemon + 5 测试）
 
 **Files:**
 - Modify: `src/memory/distiller.ts`
 - Modify: `src/memory/dedup.ts`
+- Modify: `src/memory/valueFilter.ts`
+- Modify: `src/memory/retry.ts`
 - Modify: `src/scheduler.ts`
 - Modify: `src/daemon.ts`
 - Modify: `tests/distiller.test.ts`、`tests/dedup.test.ts`、`tests/scheduler.test.ts`、`tests/daemon.test.ts`、`tests/e2e.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1 的 `LLMCall`（核心 `import type`）；Task 2 的 `makeLLMCall`（daemon 已用）。
-- Produces: 核心类型 `DistillInput.callLLM`、`DedupInput.callLLM`、`TickDeps.callLLM`（均为 `LLMCall`）；`runDistillOnce` deps `callLLM?: LLMCall`。从此核心类型不带 vendor 名。
+- Consumes: Task 1 的 `LLMCall`（核心 + `RetryOpts` `import type`）；Task 2 的 `makeLLMCall`（daemon 已用）。
+- Produces: 核心类型 `DistillInput.callLLM`、`DedupInput.callLLM`、`TickDeps.callLLM`、`judgeValue` 参数 `callLLM`、`RetryOpts.call: LLMCall`（字段名 `call` 保留）、`runDistillOnce` deps `callLLM?: LLMCall`。从此核心类型不带 vendor 名。
 
-> 本任务必须**原子提交**：seam 字段名在 `TickDeps`/`DistillInput`/`DedupInput` 与所有 mock 之间互相依赖，分文件改会导致中间态 typecheck 失败。所有改动在同一 commit。
+> 本任务必须**原子提交**：seam 字段名在 `TickDeps`/`DistillInput`/`DedupInput`/`judgeValue`/`RetryOpts` 与所有 mock 之间互相依赖，分文件改会导致中间态 typecheck 失败。所有改动在同一 commit。
 
 - [ ] **Step 1: 改 `src/memory/distiller.ts`**
 
-加 import（`src/memory/distiller.ts:1` 之后新增一行）：
+加 import（`src/memory/distiller.ts:2` 之后新增一行）：
 ```ts
 import type { LLMCall } from '@/llm'
 ```
 
-`DistillInput` 字段（`src/memory/distiller.ts:45`）：
+`DistillInput` 字段（`src/memory/distiller.ts:57`）：
 ```ts
 // before
   callAnthropic: (systemPrompt: string, userPrompt: string) => Promise<string>
@@ -417,22 +426,22 @@ import type { LLMCall } from '@/llm'
   callLLM: LLMCall
 ```
 
-调用（`src/memory/distiller.ts:62`）：
+`callWithRetry` 入参（`src/memory/distiller.ts:98`）：
 ```ts
 // before
-    const raw = await input.callAnthropic(DISTILLER_SYSTEM_PROMPT, userPrompt)
+      call: input.callAnthropic,
 // after
-    const raw = await input.callLLM(DISTILLER_SYSTEM_PROMPT, userPrompt)
+      call: input.callLLM,
 ```
 
 - [ ] **Step 2: 改 `src/memory/dedup.ts`**
 
-加 import（`src/memory/dedup.ts:2` 之后新增一行）：
+加 import（`src/memory/dedup.ts:3` 之后新增一行）：
 ```ts
 import type { LLMCall } from '@/llm'
 ```
 
-`DedupInput` 字段（`src/memory/dedup.ts:15`）：
+`DedupInput` 字段（`src/memory/dedup.ts:16`）：
 ```ts
 // before
   callAnthropic: (system: string, user: string) => Promise<string>
@@ -440,22 +449,62 @@ import type { LLMCall } from '@/llm'
   callLLM: LLMCall
 ```
 
-调用（`src/memory/dedup.ts:51`）：
+`callWithRetry` 入参（`src/memory/dedup.ts:84`）：
 ```ts
 // before
-    const raw = await input.callAnthropic(DEDUP_SYSTEM_PROMPT, renderUserPrompt(input.newCandidates, input.existing))
+      call: input.callAnthropic,
 // after
-    const raw = await input.callLLM(DEDUP_SYSTEM_PROMPT, renderUserPrompt(input.newCandidates, input.existing))
+      call: input.callLLM,
 ```
 
-- [ ] **Step 3: 改 `src/scheduler.ts`**
+- [ ] **Step 3: 改 `src/memory/valueFilter.ts`**
 
-加 import（`src/scheduler.ts:9` 之后新增一行）：
+加 import（`src/memory/valueFilter.ts:2` 之后新增一行）：
 ```ts
 import type { LLMCall } from '@/llm'
 ```
 
-`TickDeps` 字段（`src/scheduler.ts:38`）：
+`judgeValue` 参数（`src/memory/valueFilter.ts:82`）：
+```ts
+// before
+  callAnthropic: (system: string, user: string) => Promise<string>,
+// after
+  callLLM: LLMCall,
+```
+
+`callWithRetry` 入参（`src/memory/valueFilter.ts:90`）：
+```ts
+// before
+      call: callAnthropic,
+// after
+      call: callLLM,
+```
+
+- [ ] **Step 4: 改 `src/memory/retry.ts`（仅 `RetryOpts.call` 类型 -> `LLMCall`，字段名 `call` 保留）**
+
+加 import（`src/memory/retry.ts:1` 之后新增一行）：
+```ts
+import type { LLMCall } from '@/llm'
+```
+
+`RetryOpts.call` 类型（`src/memory/retry.ts:4`）：
+```ts
+// before
+  call: (system: string, user: string) => Promise<string>
+// after
+  call: LLMCall
+```
+
+> `callWithRetry` 内部 `opts.call(opts.system, currentUser)`（2 参）不变；`LLMCall` 的 `opts?` 可选，2 参调用合法，8192 默认值经此贯通 distill/dedup/valueFilter。`tests/retry.test.ts` 用 `call: async () => ...` 位置传参，`async () => string` 可赋给 `LLMCall`，无需改测试。
+
+- [ ] **Step 5: 改 `src/scheduler.ts`**
+
+加 import（`src/scheduler.ts:10` 之后新增一行）：
+```ts
+import type { LLMCall } from '@/llm'
+```
+
+`TickDeps` 字段（`src/scheduler.ts:39`）：
 ```ts
 // before
   callAnthropic: (systemPrompt: string, userPrompt: string) => Promise<string>
@@ -463,7 +512,7 @@ import type { LLMCall } from '@/llm'
   callLLM: LLMCall
 ```
 
-`dedupCandidates` 参数（`src/scheduler.ts:65`）：
+`dedupCandidates` 参数（`src/scheduler.ts:66`）：
 ```ts
 // before
   callAnthropic: TickDeps['callAnthropic'],
@@ -471,7 +520,7 @@ import type { LLMCall } from '@/llm'
   callLLM: LLMCall,
 ```
 
-`judgeDuplicates` 调用（`src/scheduler.ts:83`）：
+`judgeDuplicates` 调用（`src/scheduler.ts:84`）：
 ```ts
 // before
       callAnthropic,
@@ -479,7 +528,7 @@ import type { LLMCall } from '@/llm'
       callLLM,
 ```
 
-`distillTranscript` 调用（`src/scheduler.ts:122`）：
+`distillTranscript` 调用（`src/scheduler.ts:123`）：
 ```ts
 // before
         callAnthropic: deps.callAnthropic,
@@ -487,17 +536,25 @@ import type { LLMCall } from '@/llm'
         callLLM: deps.callLLM,
 ```
 
-`dedupCandidates` 调用（`src/scheduler.ts:129`）：
+`judgeValue` 调用（`src/scheduler.ts:129`）：
 ```ts
 // before
-      const keep = await dedupCandidates(db, deps.callAnthropic, candidates, job.cwd ?? null)
+      const verdicts = await judgeValue(candidates, deps.callAnthropic)
 // after
-      const keep = await dedupCandidates(db, deps.callLLM, candidates, job.cwd ?? null)
+      const verdicts = await judgeValue(candidates, deps.callLLM)
 ```
 
-- [ ] **Step 4: 改 `src/daemon.ts`（字段名 + 类型 + 局部变量）**
+`dedupCandidates` 调用（`src/scheduler.ts:145`）：
+```ts
+// before
+      const deduped = await dedupCandidates(db, deps.callAnthropic, keepCandidates, job.cwd ?? null)
+// after
+      const deduped = await dedupCandidates(db, deps.callLLM, keepCandidates, job.cwd ?? null)
+```
 
-加 import（`src/daemon.ts:10` 附近新增一行）：
+- [ ] **Step 6: 改 `src/daemon.ts`（字段名 + 类型 + 局部变量）**
+
+加 import（`src/daemon.ts:10` `import { makeLLMCall } from '@/anthropic'` 之后新增一行）：
 ```ts
 import type { LLMCall } from '@/llm'
 ```
@@ -536,17 +593,17 @@ import type { LLMCall } from '@/llm'
 
 （`src/daemon.ts` 顶部注释 `daemon.ts:46/50/94` 提到 `callAnthropic`/`makeCallAnthropic` 的，一并改 `callLLM`/`makeLLMCall` 以保持一致。）
 
-- [ ] **Step 5: 改 5 个测试文件的 mock 字段 `callAnthropic:` -> `callLLM:`**
+- [ ] **Step 7: 改 5 个测试文件的 mock 字段 `callAnthropic:` -> `callLLM:`**
 
-机械替换：把传入 `distillTranscript` / `judgeDuplicates` / `tick` / `runDistillOnce` 的 mock 对象属性键 `callAnthropic:` 改为 `callLLM:`。文件与站点数（grep 验证）：
+机械替换：把传入 `distillTranscript` / `judgeDuplicates` / `judgeValue` / `tick` / `runDistillOnce` 的 mock 对象属性键 `callAnthropic:` 改为 `callLLM:`。文件与站点数（grep 验证）：
 
 | 文件 | mock 字段站点数 | 行号（近似） |
 |------|----------------|-------------|
-| `tests/distiller.test.ts` | 3 | 24, 35, 44 |
-| `tests/dedup.test.ts` | 10 | 16, 24, 32, 40, 48, 56, 65, 75, 85, 94 |
-| `tests/scheduler.test.ts` | 7 | 57, 75, 90, 108, 127, 146, 162 |
+| `tests/distiller.test.ts` | 6 | 24, 35, 44, 54, 65, 80 |
+| `tests/dedup.test.ts` | 13 | 16, 24, 32, 40, 48, 56, 65, 75, 85, 94, 103, 112, 125 |
+| `tests/scheduler.test.ts` | 11 | 57, 75, 90, 108, 128, 148, 168, 255, 278, 297, 323 |
 | `tests/daemon.test.ts` | 1 | 58 |
-| `tests/e2e.test.ts` | 1 | 115 |
+| `tests/e2e.test.ts` | 1 | 121 |
 
 示例（`tests/distiller.test.ts:24`）：
 ```ts
@@ -556,43 +613,46 @@ import type { LLMCall } from '@/llm'
     callLLM: async () => JSON.stringify(fakeResponse),
 ```
 
-> 这些 mock 都是 `async () => ...` 忽略入参，新增的可选第 3 参 `opts` 不影响。同时把注释里出现的 `callAnthropic` 改 `callLLM`（`tests/daemon.test.ts:38,43`、`tests/e2e.test.ts:66,103,105`、`tests/scheduler.test.ts:177`）。
+> 这些 mock 都是 `async () => ...` / `async (_sys, user) => ...` 忽略或部分用入参，新增的可选第 3 参 `opts` 不影响。同时把注释里出现的 `callAnthropic` 改 `callLLM`（`tests/daemon.test.ts:38,43`、`tests/e2e.test.ts:66,103,106,109`、`tests/scheduler.test.ts:184`）。`tests/valueFilter.test.ts`（`judgeValue` 第 2 参位置传 `async () =>`，无 `callAnthropic:` 字段）与 `tests/retry.test.ts`（`callWithRetry({ call: ... })`，字段名 `call`）**无需改动**。
 
-- [ ] **Step 6: 运行 typecheck + 全套测试确认通过**
+- [ ] **Step 8: 运行 typecheck + 全套测试确认通过**
 
 Run: `bun run typecheck`
-Expected: 无错误（所有 seam 字段名一致：核心类型 + daemon + mock 全为 `callLLM`）。
+Expected: 无错误（所有 seam 字段名一致：核心类型 + retry + daemon + mock 全为 `callLLM`；`RetryOpts.call` 类型为 `LLMCall`）。
 
 Run: `bun test`
-Expected: 全绿（100+ pass，与基线一致；本任务零行为变更，仅改名 + 类型来源切换）。
+Expected: 全绿（与基线 `d662607` 一致；本任务零行为变更，仅改名 + 类型来源切换）。
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/memory/distiller.ts src/memory/dedup.ts src/scheduler.ts src/daemon.ts \
+git add src/memory/distiller.ts src/memory/dedup.ts src/memory/valueFilter.ts src/memory/retry.ts \
+        src/scheduler.ts src/daemon.ts \
         tests/distiller.test.ts tests/dedup.test.ts tests/scheduler.test.ts tests/daemon.test.ts tests/e2e.test.ts
-git commit -m "refactor(llm): rename seam field callAnthropic->callLLM across core + tests
+git commit -m "refactor(llm): rename seam callAnthropic->callLLM across core + retry + tests
 
-Core types (DistillInput/DedupInput/TickDeps) now use callLLM: LLMCall from the
-SDK-free @/llm contract; daemon wires makeLLMCall() as callLLM; ~22 test mock
-sites renamed. Zero behavior change (max_tokens already 8192 from prior task).
+Core types (DistillInput/DedupInput/TickDeps/judgeValue param/RetryOpts.call) now use
+LLMCall from the SDK-free @/llm contract; daemon wires makeLLMCall() as callLLM; distill/
+dedup/valueFilter pass call: input.callLLM to callWithRetry. ~32 test mock sites renamed.
+Zero behavior change (max_tokens already 8192 from prior task).
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
 
 ---
 
-## Self-Review（plan 作者自检，已完成）
+## Self-Review（plan 作者自检，已完成；基于 rebase 后的 d662607）
 
-1. **Spec 覆盖**：G1（单一 `LLMCall` 类型）-> Task 1 + Task 3；G2（vendor-neutral 名 `callLLM`）-> Task 2（impl）+ Task 3（core）；G3（`max_tokens` 可配，默认 8192）-> Task 1（常量）+ Task 2（opts + 默认 + 测试）；G4（契约 SDK-free）-> Task 1；G5（仅 2048->8192 行为变更）-> Task 2 + Task 3 零行为变更。§5 接口契约逐条落到 Task 1/2/3 代码块。§9 测试策略逐条落（anthropic.test.ts 改名+扩展、llm.test.ts 新建、5 文件 mock 改名）。§11 文件清单一致（已按 keep+new 修正 spec）。无遗漏。
-2. **占位符扫描**：无 TBD/TODO；每个代码 step 均含完整代码。
-3. **类型一致性**：`LLMCall` / `LLMCallOpts` / `DEFAULT_LLM_MAX_TOKENS`（Task 1 定义）在 Task 2/3 引用名一致；`makeLLMCall`（Task 2 定义）在 Task 3 daemon 引用一致；字段名 `callLLM` 跨 Task 3 全部站点一致。Task 2 中间态字段名保持 `callAnthropic`、Task 3 统一改 `callLLM`，已显式标注。
-4. **绿提交链**：Task 1（独立）-> Task 2（impl 改名 + daemon import 改名，字段名不动，typecheck 过）-> Task 3（字段名全量改名，原子）。每任务末尾 `bun run typecheck && bun test` 全绿。
+1. **Spec 覆盖**：G1（单一 `LLMCall` 类型，替换 6 处内联字面量）-> Task 1 + Task 3（distiller/dedup/valueFilter/scheduler/retry/daemon）；G2（vendor-neutral 名 `callLLM`）-> Task 2（impl）+ Task 3（core）；G3（`max_tokens` 可配，默认 8192）-> Task 1（常量）+ Task 2（opts + 默认 + 测试）；G4（契约 SDK-free）-> Task 1；G5（仅 2048->8192 行为变更）-> Task 2 + Task 3 零行为变更。§5 接口契约逐条落到 Task 1/2/3 代码块（含新增 valueFilter/retry）。§9 测试策略逐条落（anthropic.test.ts 改名+扩展、llm.test.ts 新建、5 文件 mock 改名 32 处；valueFilter.test.ts/retry.test.ts 无需改）。§11 文件清单一致。无遗漏。
+2. **占位符扫描**：无 TBD/TODO；每个代码 step 均含完整代码或精确 before/after。
+3. **类型一致性**：`LLMCall` / `LLMCallOpts` / `DEFAULT_LLM_MAX_TOKENS`（Task 1 定义）在 Task 2/3 引用名一致；`makeLLMCall`（Task 2 定义）在 Task 3 daemon 引用一致；字段名 `callLLM` 跨 Task 3 全部站点一致；`RetryOpts.call` 字段名保留 `call`（仅类型改 `LLMCall`），与 `callWithRetry` 内部 `opts.call(...)` 调用一致。Task 2 中间态字段名保持 `callAnthropic`、Task 3 统一改 `callLLM`，已显式标注。
+4. **绿提交链**：Task 1（独立）-> Task 2（impl 改名 + daemon import 改名，字段名不动，typecheck 过：`LLMCall`(3 参) 可赋 2 参字段）-> Task 3（字段名 + RetryOpts 类型全量改，原子）。每任务末尾 `bun run typecheck && bun test` 全绿。
+5. **d662607 新增耦合点覆盖**：`callWithRetry` 中介（retry.ts）-> Task 3 Step 4；`judgeValue` 第 3 消费者（valueFilter.ts）-> Task 3 Step 3；scheduler 3 阶段 tick 的 `judgeValue`/`dedupCandidates` 调用（129/145）-> Task 3 Step 5。三处 LLM 调用均经 `callWithRetry` 2 参调 seam，8192 默认值贯通（Task 2）。
 
 ## 落地流程（CLAUDE.md）
 
-1. 已切 `refactor/llm-seam-cleanup`（基线 `4e52cee`，spec `7bc73fe`）。
-2. 本 plan 落档 + commit（含 spec §9/§11 test-file 组织微调）。
-3. 清理 `.superpowers/sdd/`（CLAUDE.md 强制：spec + plan 落档后、写代码前）。
+1. 已切 `refactor/llm-seam-cleanup`，已 rebase 到 `origin/master` `d662607`（spec `d0bc869`）。
+2. 本 plan 修订 + commit（含 spec §1/§5.3/§6/§7/§11 同步 valueFilter/retry/callWithRetry）。
+3. `.superpowers/sdd/` 已清理。
 4. 按计划执行 Task 1 -> 2 -> 3，每任务 `bun run typecheck && bun test` 全绿。
 5. push -> PR 合 `master`。
