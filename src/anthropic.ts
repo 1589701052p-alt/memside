@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
+import { DEFAULT_LLM_MAX_TOKENS, type LLMCall, type LLMCallOpts } from './llm'
 
 export interface AnthropicDeps {
   /** Injectable for tests; production uses the real `loadClaudeCreds`. */
@@ -27,10 +28,10 @@ export interface AnthropicDeps {
 export const DISTILL_MODEL = 'claude-haiku-4-5-20251001'
 
 /**
- * Build the `callAnthropic(systemPrompt, userPrompt)` seam the distiller
- * consumes. Production wires the real `@anthropic-ai/sdk` client using
- * `loadClaudeCreds`; tests inject a mock `loadClaudeCreds` (or the daemon /
- * distill tests inject `callAnthropic` directly, bypassing this entirely).
+ * Build the `callLLM(system, user, opts?)` seam the distiller / dedup /
+ * valueFilter (via callWithRetry) consume. Production wires the real
+ * `@anthropic-ai/sdk` client using `loadClaudeCreds`; tests inject a mock
+ * `callLLM` directly (or `loadClaudeCreds` here).
  *
  * The resolved credentials drive three SDK inputs:
  *   - `apiKey`: the auth key (official `ANTHROPIC_API_KEY` or a proxy
@@ -39,13 +40,14 @@ export const DISTILL_MODEL = 'claude-haiku-4-5-20251001'
  *     while the official API keeps its default.
  *   - `model`: the creds model when configured, otherwise `DISTILL_MODEL`.
  *
- * Throws if no credential is resolvable - the distiller's top-level try/catch
- * degrades that to "no candidates this round" and records `lastError` on the
- * job, so a misconfigured daemon never crashes the loop.
+ * `max_tokens` defaults to `DEFAULT_LLM_MAX_TOKENS` (8192); override per call
+ * via `opts.maxTokens`. Throws if no credential is resolvable - the distiller's
+ * top-level try/catch degrades that to "no candidates this round" and records
+ * `lastError` on the job, so a misconfigured daemon never crashes the loop.
  */
-export function makeCallAnthropic(deps: AnthropicDeps = {}) {
+export function makeLLMCall(deps: AnthropicDeps = {}): LLMCall {
   const load = deps.loadClaudeCreds ?? loadClaudeCreds
-  return async function callAnthropic(systemPrompt: string, userPrompt: string): Promise<string> {
+  return async function callLLM(system: string, user: string, opts?: LLMCallOpts): Promise<string> {
     const creds = load()
     if (!creds.apiKey) {
       throw new Error('no claude credentials; run memside with ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (+ ANTHROPIC_BASE_URL), or log in to claude code')
@@ -56,9 +58,9 @@ export function makeCallAnthropic(deps: AnthropicDeps = {}) {
     })
     const msg = await client.messages.create({
       model: creds.model ?? DISTILL_MODEL,
-      max_tokens: 2048,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      max_tokens: opts?.maxTokens ?? DEFAULT_LLM_MAX_TOKENS,
+      system,
+      messages: [{ role: 'user', content: user }],
     })
     // extract text from content blocks (TextBlock has type:'text' + text:string;
     // ToolUseBlock is silently dropped). The `ContentBlock` union doesn't narrow

@@ -7,7 +7,7 @@ import { memoryDistillEvents, memoryDistillJobs } from '@/db/schema'
 import { tick, startMemoryDistillLoop, enqueueDistillJob, type TickDeps } from '@/scheduler'
 import { createCandidate } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
-import { makeCallAnthropic } from '@/anthropic'
+import { makeLLMCall } from '@/anthropic'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
@@ -57,7 +57,7 @@ export async function runDistillOnce(
     callAnthropic?: (systemPrompt: string, userPrompt: string) => Promise<string>
   } = {},
 ): Promise<number> {
-  const callAnthropic = deps.callAnthropic ?? makeCallAnthropic({ loadClaudeCreds: deps.loadClaudeCreds ?? loadClaudeCreds })
+  const callAnthropic = deps.callAnthropic ?? makeLLMCall({ loadClaudeCreds: deps.loadClaudeCreds ?? loadClaudeCreds })
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
     callAnthropic,
@@ -114,7 +114,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
 
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
-    callAnthropic: makeCallAnthropic(),
+    callAnthropic: makeLLMCall(),
     createCandidate,
   }
   const stopLoop = startMemoryDistillLoop(db, tickDeps)
