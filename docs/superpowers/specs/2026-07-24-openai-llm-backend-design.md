@@ -160,18 +160,27 @@ export function makeLLMCall(deps: OpenAiDeps = {}): LLMCall {
 
 ```ts
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
-import { makeLLMCall as makeOpenAiCall } from '@/openai'
-import { resolveLLMBackend, type LLMCall } from '@/llm'   // LLMCall 已 import，合并
+import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
+import { resolveLLMBackend } from '@/llm'        // LLMCall 已 import，合并
+// ClaudeCreds 已从 './creds' import
 
-/** 按 resolveLLMBackend 选后端，装配对应 makeLLMCall 为 callLLM。 */
-function resolveCallLLM(): LLMCall {
-  return resolveLLMBackend(process.env) === 'openai' ? makeOpenAiCall() : makeAnthropicCall()
+interface ResolveCallLLMDeps {
+  loadClaudeCreds?: () => ClaudeCreds
+  loadOpenAiCreds?: () => OpenAiCreds | null
+}
+
+/** 按 resolveLLMBackend(process.env) 选后端，装配对应 makeLLMCall 为 callLLM。
+ *  可选注入两套 creds 供测试避开网络；不传则各 makeLLMCall 用各自默认 loader。 */
+function resolveCallLLM(deps: ResolveCallLLMDeps = {}): LLMCall {
+  return resolveLLMBackend(process.env) === 'openai'
+    ? makeOpenAiCall(deps.loadOpenAiCreds ? { loadOpenAiCreds: deps.loadOpenAiCreds } : {})
+    : makeAnthropicCall(deps.loadClaudeCreds ? { loadClaudeCreds: deps.loadClaudeCreds } : {})
 }
 ```
 
-- `runDistillOnce`：`const callLLM = deps.callLLM ?? resolveCallLLM()`（原为 `makeLLMCall({ loadClaudeCreds: ... })`）；测试仍可注入 `callLLM` / `loadClaudeCreds` 不变。
+- `runDistillOnce`：deps 类型加 `loadOpenAiCreds?: () => OpenAiCreds | null`（`loadClaudeCreds` 保留）；`const callLLM = deps.callLLM ?? resolveCallLLM({ loadClaudeCreds: deps.loadClaudeCreds, loadOpenAiCreds: deps.loadOpenAiCreds })`（原为 `makeLLMCall({ loadClaudeCreds: ... })`）。测试以注入 `callLLM` 为主（`tests/daemon.test.ts` 即如此，不经 `resolveCallLLM`），故选择逻辑不影响它。
 - `startDaemon`：`tickDeps.callLLM = resolveCallLLM()`（原为 `makeLLMCall()`）。
-- `runDistillOnce` 的 `loadClaudeCreds` 注入保留（Anthropic 路径测试用）；OpenAI 路径测试走 `callLLM` 注入或 `loadOpenAiCreds` 注入。
+- 删去 `daemon.ts` 顶部 `import { makeLLMCall } from '@/anthropic'`（改为上面两个具名 import）。
 
 ### 5.4 数据模型
 
@@ -247,8 +256,8 @@ OpenAI 实现把 `(system, user)` 映射成两条 message；返回的文本对 d
   - `{MEMSIDE_LLM_BACKEND:'', OPENAI_API_KEY:'x'}`（空字符串=未设）-> 'openai'。
   - `{MEMSIDE_LLM_BACKEND:'foo'}` -> 抛 "unknown MEMSIDE_LLM_BACKEND"。
   - 保留既有 `DEFAULT_LLM_MAX_TOKENS === 8192` 用例。
-- **`tests/creds.test.ts` / `tests/anthropic.test.ts`**：无改动。
-- **`tests/daemon.test.ts` / `tests/distiller.test.ts` / `tests/dedup.test.ts` / `tests/scheduler.test.ts` / `tests/e2e.test.ts`**：无改动（核心零改动；`runDistillOnce` 测试注入 mock `callLLM`，不经 `resolveCallLLM`）。若 `daemon.test.ts` 有断言"默认用 Anthropic"，加一条用例：`MEMSIDE_LLM_BACKEND=openai` + mock `@/openai` 时 `resolveCallLLM` 走 openai（可选，视现有测试结构）。
+- **`tests/creds.test.ts` / `tests/anthropic.test.ts`**：无改动（`anthropic.test.ts` 直接测 `makeLLMCall` + 注入 `loadClaudeCreds`，不经 daemon）。
+- **`tests/daemon.test.ts` / `tests/distiller.test.ts` / `tests/dedup.test.ts` / `tests/scheduler.test.ts` / `tests/e2e.test.ts`**：无改动（核心零改动；`daemon.test.ts` 注入 mock `callLLM`，不经 `resolveCallLLM`，故后端选择不影响它）。后端选择逻辑由 `tests/llm.test.ts` 的 `resolveLLMBackend` 用例覆盖。
 - **运行门槛**：`bun run typecheck && bun test` 全绿才能 push。
 
 ## 10. 落地流程（CLAUDE.md）
