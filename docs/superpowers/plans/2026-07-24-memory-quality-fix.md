@@ -533,7 +533,7 @@ import { detectErrorSignals, filterTranscriptForDistill, type TranscriptTurn, ty
 在 `DISTILLER_SYSTEM_PROMPT` 的 `REJECT (emit nothing) if the content is a fleeting status update, mood, or one-off acknowledgement.` 行之后追加：
 
 ```
-Also REJECT implementation details of the codebase being worked on that are visible in file reads — file contents, internal module behavior, config defaults, symbol names — these are re-derivable from the repository source, not durable memories. Anchor memories to rules, decisions, and constraints the user or domain explicitly states; do not summarize file contents the agent read.
+Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部实现、配置默认值、符号名）--这些可从仓库源码重新推导，不是持久记忆。把记忆锚定到用户或领域明确陈述的规则、决策与约束；不要总结 agent 读到的文件内容。
 ```
 
 - [ ] **Step 5: 运行测试确认通过**
