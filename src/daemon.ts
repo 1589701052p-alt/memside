@@ -62,11 +62,11 @@ function resolveCallLLM(deps: ResolveCallLLMDeps = {}): LLMCall {
 
 /**
  * Single distill pass for tests: build `TickDeps` (loadTranscript from the
- * events table, callLLM from `makeLLMCall` unless injected,
+ * events table, callLLM from `resolveCallLLM` unless injected,
  * createCandidate from the store) and run one `tick`. Returns the count of
  * jobs processed.
  *
- * Both `loadClaudeCreds` and `callLLM` are injectable so tests never
+ * Both `loadClaudeCreds` / `loadOpenAiCreds` and `callLLM` are injectable so tests never
  * touch the network.
  */
 export async function runDistillOnce(
@@ -112,7 +112,7 @@ export function sweepStuckRunning(db: DbClient): number {
  * Start the memside daemon: open the DB, sweep stuck-running jobs, build the
  * claude-code adapter + Hono app, `Bun.serve` on `port` (default 7777), and
  * start the 1Hz distill loop with the real `callLLM` (via
- * `loadClaudeCreds`). Optional `installClaudeHooks` writes the collector
+ * `resolveCallLLM()`). Optional `installClaudeHooks` writes the collector
  * hook commands into `~/.claude/settings.json`.
  *
  * Returns `{ server, stop }`; `stop` clears the loop interval and stops the
