@@ -612,8 +612,8 @@ test('non-protected category still discards normally', async () => {
 })
 
 test('VALUE_JUDGE_SYSTEM_PROMPT has sharpened derivable + public-knowledge definitions', () => {
-  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('被开发代码库自身的实现')
-  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('不属于 public-knowledge')
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('codebase being worked on')
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('do not belong here')
 })
 ```
 
