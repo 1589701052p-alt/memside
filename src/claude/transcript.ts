@@ -35,6 +35,20 @@ export function extractText(content: unknown): string {
 }
 
 /**
+ * Extract a file path from a tool_use `input` object, checking common keys.
+ * Used to pair `toolName` + `toolInputPath` onto the following tool_result.
+ */
+function extractToolInputPath(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const o = input as Record<string, unknown>
+  for (const k of ['file_path', 'notebook_path', 'path', 'filePath']) {
+    const v = o[k]
+    if (typeof v === 'string') return v
+  }
+  return undefined
+}
+
+/**
  * Parse a claude code transcript JSONL file into `TranscriptTurn[]`.
  *
  * claude code hook stdin payloads carry `transcript_path` - a path to a JSONL
@@ -51,8 +65,9 @@ export function extractText(content: unknown): string {
  *   turn (so `detectErrorSignals` can count tool failures).
  * - `type:"assistant"`: each `{type:'text'}` item -> `{role:'assistant', content}`.
  *   `{type:'thinking'}` is SKIPPED (internal reasoning would pollute retry
- *   detection). `{type:'tool_use'}` is SKIPPED (its result is captured by the
- *   tool_result on the following user row).
+ *   detection). `{type:'tool_use'}` is QUEUED (name + file_path extracted) and
+ *   paired FIFO with the following user row's `tool_result` blocks, so the
+ *   distill-time filter can compact file-source results by tool name.
  *
  * Pure + deterministic (only reads the given path). Never throws: file missing
  * / unreadable / empty / too large (>50MB) / malformed lines all degrade to a
@@ -73,6 +88,9 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
 
     const raw = readFileSync(path, 'utf-8')
     const turns: TranscriptTurn[] = []
+    // Pending tool_use blocks from the most recent assistant message,
+    // consumed FIFO by following user-row tool_result blocks.
+    const pendingToolUses: { name: string; inputPath?: string }[] = []
     // Split on '\n'; trimming each line also strips a trailing '\r' from CRLF
     // files. Newlines cannot appear inside valid JSON string values (they must
     // be escaped as \n), so a raw newline split is safe for JSONL.
@@ -103,12 +121,18 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
             if (item && typeof item === 'object' && !Array.isArray(item)) {
               const it = item as { type?: unknown; content?: unknown; is_error?: unknown }
               if (it.type === 'tool_result') {
-                turns.push({
-                  role: 'tool',
-                  content: extractText(it.content),
-                  isError: it.is_error === true,
-                })
-              }
+                  const paired = pendingToolUses.shift()
+                  const base = {
+                    role: 'tool' as const,
+                    content: extractText(it.content),
+                    isError: it.is_error === true,
+                  }
+                  turns.push(
+                    paired
+                      ? { ...base, toolName: paired.name, ...(paired.inputPath ? { toolInputPath: paired.inputPath } : {}) }
+                      : base,
+                  )
+                }
             }
           }
         }
@@ -119,11 +143,13 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
         if (Array.isArray(content)) {
           for (const item of content) {
             if (item && typeof item === 'object' && !Array.isArray(item)) {
-              const it = item as { type?: unknown; text?: unknown }
+              const it = item as { type?: unknown; text?: unknown; name?: unknown; input?: unknown }
               if (it.type === 'text' && typeof it.text === 'string') {
                 turns.push({ role: 'assistant', content: it.text })
+              } else if (it.type === 'tool_use' && typeof it.name === 'string') {
+                pendingToolUses.push({ name: it.name, inputPath: extractToolInputPath(it.input) })
               }
-              // thinking + tool_use are deliberately skipped (see JSDoc above).
+              // thinking is deliberately skipped (see JSDoc above).
             }
           }
         }

@@ -77,7 +77,7 @@ test('user tool_result with is_error absent -> isError false', () => {
   expect(turns).toEqual([{ role: 'tool', content: 'ok result', isError: false }])
 })
 
-test('assistant text+thinking+tool_use -> only text becomes {role:"assistant"}', () => {
+test('assistant text+thinking+tool_use (no following tool_result) -> only text emitted; tool_use queued but unconsumed', () => {
   const p = writeJsonl({
     type: 'assistant',
     message: {
@@ -90,9 +90,8 @@ test('assistant text+thinking+tool_use -> only text becomes {role:"assistant"}',
     },
   })
   const turns = parseTranscriptFile(p)
-  // thinking + tool_use must be skipped: thinking would pollute retry
-  // detection; tool_use's result is captured by the next user row's
-  // tool_result.
+  // thinking skipped; tool_use queued for the NEXT tool_result (none here) ->
+  // no tool turn emitted.
   expect(turns).toEqual([{ role: 'assistant', content: "I'll read the file." }])
 })
 
@@ -185,4 +184,49 @@ test('extractText: other types -> empty string', () => {
   expect(extractText(null)).toBe('')
   expect(extractText(undefined)).toBe('')
   expect(extractText({})).toBe('')
+})
+
+test('assistant tool_use + following user tool_result -> paired tool turn with toolName + path', () => {
+  const p = writeJsonl(
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'text', text: 'reading' },
+      { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/a/b.ts' } },
+    ] } },
+    { type: 'user', message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'toolu_1', content: 'export const x = 1' },
+    ] } },
+  )
+  const turns = parseTranscriptFile(p)
+  expect(turns).toEqual([
+    { role: 'assistant', content: 'reading' },
+    { role: 'tool', content: 'export const x = 1', isError: false, toolName: 'Read', toolInputPath: '/a/b.ts' },
+  ])
+})
+
+test('multiple tool_use consumed in order across following tool_results', () => {
+  const p = writeJsonl(
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'u1', name: 'Read', input: { file_path: '/f1' } },
+      { type: 'tool_use', id: 'u2', name: 'Bash', input: { command: 'ls' } },
+    ] } },
+    { type: 'user', message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'u1', content: 'f1-content' },
+      { type: 'tool_result', tool_use_id: 'u2', content: 'ls-output' },
+    ] } },
+  )
+  const turns = parseTranscriptFile(p)
+  expect(turns.filter((t) => t.role === 'tool')).toEqual([
+    { role: 'tool', content: 'f1-content', isError: false, toolName: 'Read', toolInputPath: '/f1' },
+    { role: 'tool', content: 'ls-output', isError: false, toolName: 'Bash' },
+  ])
+})
+
+test('orphan tool_result (no preceding tool_use) -> tool turn without toolName', () => {
+  const p = writeJsonl(
+    { type: 'user', message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'orphan', content: 'lonely' },
+    ] } },
+  )
+  const turns = parseTranscriptFile(p)
+  expect(turns).toEqual([{ role: 'tool', content: 'lonely', isError: false }])
 })
