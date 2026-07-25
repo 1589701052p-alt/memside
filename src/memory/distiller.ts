@@ -28,7 +28,7 @@ Cross-cutting properties:
 - bodyMd at most ~400 characters; title <= 120 chars including the prefix.
 
 REJECT (emit nothing) if the content is a fleeting status update, mood, or one-off acknowledgement.
-Also REJECT implementation details of the codebase being worked on that are visible in file reads — file contents, internal module behavior, config defaults, symbol names — these are re-derivable from the repository source, not durable memories. Anchor memories to rules, decisions, and constraints the user or domain explicitly states; do not summarize file contents the agent read. 被开发仓库自身源码的实现细节不可作为记忆保留。
+Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部实现、配置默认值、符号名）--这些可从仓库源码重新推导，不是持久记忆。把记忆锚定到用户或领域明确陈述的规则、决策与约束；不要总结 agent 读到的文件内容。
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，不要 markdown 围栏，不要在 JSON 前后加任何解释文字，键与字符串值用双引号，最后一个属性后无逗号，不要用单引号）：
 {
