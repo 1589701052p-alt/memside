@@ -18,3 +18,22 @@ export type LLMCall = (system: string, user: string, opts?: LLMCallOpts) => Prom
 
 /** opts.maxTokens 缺省时的默认 max_tokens。 */
 export const DEFAULT_LLM_MAX_TOKENS = 8192
+
+/** 组合根可选的 LLM 后端实现。vendor 名留在实现层（anthropic.ts / openai.ts）。 */
+export type LLMBackend = 'anthropic' | 'openai'
+
+/**
+ * 混合后端选择：显式 `MEMSIDE_LLM_BACKEND=anthropic|openai` 覆盖；未设（或空串）
+ * 时按 `OPENAI_API_KEY` 存在性探测——有则 openai，无则 anthropic。未识别的非空
+ * 值抛错（防拼错静默回退）。纯函数、SDK-free、不 import 任何实现，易单测。
+ *
+ * 不取 `hasAnthropicCreds` 参数：无 OPENAI_API_KEY 时默认 anthropic，若 anthropic
+ * 凭证也缺，由 `makeLLMCall`(anthropic) 在调用时抛 "no credentials"，语义正确。
+ */
+export function resolveLLMBackend(env: Record<string, string | undefined>): LLMBackend {
+  const e = env.MEMSIDE_LLM_BACKEND
+  if (e === 'openai') return 'openai'
+  if (e === 'anthropic') return 'anthropic'
+  if (e !== undefined && e !== '') throw new Error(`unknown MEMSIDE_LLM_BACKEND: ${e} (want 'anthropic' | 'openai')`)
+  return env.OPENAI_API_KEY ? 'openai' : 'anthropic'
+}

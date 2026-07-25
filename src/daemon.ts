@@ -7,9 +7,10 @@ import { memoryDistillEvents, memoryDistillJobs } from '@/db/schema'
 import { tick, startMemoryDistillLoop, enqueueDistillJob, type TickDeps } from '@/scheduler'
 import { createCandidate } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
-import { makeLLMCall } from '@/anthropic'
-import type { LLMCall } from '@/llm'
-import { loadClaudeCreds, type ClaudeCreds } from './creds'
+import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
+import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
+import { resolveLLMBackend, type LLMCall } from '@/llm'
+import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
 import { installHooks } from './install'
@@ -42,23 +43,41 @@ export function makeLoadTranscript(db: DbClient): TickDeps['loadTranscript'] {
   }
 }
 
+interface ResolveCallLLMDeps {
+  loadClaudeCreds?: () => ClaudeCreds
+  loadOpenAiCreds?: () => OpenAiCreds | null
+}
+
+/**
+ * 组合根：按 `resolveLLMBackend(process.env)` 选后端，装配对应 `makeLLMCall` 为
+ * `callLLM`。可选注入两套 creds 供测试避开网络；不传则各 `makeLLMCall` 用各自默认
+ * loader（anthropic 读 `~/.claude` + env；openai 读 env）。后端选择逻辑由
+ * `resolveLLMBackend` 单测覆盖（tests/llm.test.ts）；本函数是薄胶水。
+ */
+function resolveCallLLM(deps: ResolveCallLLMDeps = {}): LLMCall {
+  return resolveLLMBackend(process.env) === 'openai'
+    ? makeOpenAiCall(deps.loadOpenAiCreds ? { loadOpenAiCreds: deps.loadOpenAiCreds } : {})
+    : makeAnthropicCall(deps.loadClaudeCreds ? { loadClaudeCreds: deps.loadClaudeCreds } : {})
+}
+
 /**
  * Single distill pass for tests: build `TickDeps` (loadTranscript from the
- * events table, callLLM from `makeLLMCall` unless injected,
+ * events table, callLLM from `resolveCallLLM` unless injected,
  * createCandidate from the store) and run one `tick`. Returns the count of
  * jobs processed.
  *
- * Both `loadClaudeCreds` and `callLLM` are injectable so tests never
+ * Both `loadClaudeCreds` / `loadOpenAiCreds` and `callLLM` are injectable so tests never
  * touch the network.
  */
 export async function runDistillOnce(
   db: DbClient,
   deps: {
     loadClaudeCreds?: () => ClaudeCreds
+    loadOpenAiCreds?: () => OpenAiCreds | null
     callLLM?: LLMCall
   } = {},
 ): Promise<number> {
-  const callLLM = deps.callLLM ?? makeLLMCall({ loadClaudeCreds: deps.loadClaudeCreds ?? loadClaudeCreds })
+  const callLLM = deps.callLLM ?? resolveCallLLM({ loadClaudeCreds: deps.loadClaudeCreds, loadOpenAiCreds: deps.loadOpenAiCreds })
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
     callLLM,
@@ -93,7 +112,7 @@ export function sweepStuckRunning(db: DbClient): number {
  * Start the memside daemon: open the DB, sweep stuck-running jobs, build the
  * claude-code adapter + Hono app, `Bun.serve` on `port` (default 7777), and
  * start the 1Hz distill loop with the real `callLLM` (via
- * `loadClaudeCreds`). Optional `installClaudeHooks` writes the collector
+ * `resolveCallLLM()`). Optional `installClaudeHooks` writes the collector
  * hook commands into `~/.claude/settings.json`.
  *
  * Returns `{ server, stop }`; `stop` clears the loop interval and stops the
@@ -115,7 +134,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
 
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
-    callLLM: makeLLMCall(),
+    callLLM: resolveCallLLM(),
     createCandidate,
   }
   const stopLoop = startMemoryDistillLoop(db, tickDeps)

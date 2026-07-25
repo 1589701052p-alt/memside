@@ -140,11 +140,14 @@ NO_PROXY=127.0.0.1,localhost bun run demo.ts
 
 - [Bun](https://bun.sh) ≥ 1.3
 - claude code(CLI)
-- LLM 凭证,**二选一**:
+- LLM 凭证,**三选一**:
   - **火山引擎 Ark / 其他 Anthropic 兼容代理**,配在 `~/.claude/settings.json`(`ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` + `ANTHROPIC_DEFAULT_HAIKU_MODEL`),或
-  - **官方 Anthropic API key**,设 `ANTHROPIC_API_KEY`(distiller 调 `api.anthropic.com` + `claude-haiku-4-5-20251001`)。
+  - **官方 Anthropic API key**,设 `ANTHROPIC_API_KEY`(distiller 调 `api.anthropic.com` + `claude-haiku-4-5-20251001`),或
+  - **OpenAI 兼容 API**(如部门内部部署的 OpenAI 格式大模型),设 `OPENAI_API_KEY` + `OPENAI_BASE_URL` + `OPENAI_MODEL`(distiller 走 `/chat/completions`、Bearer 鉴权)。无 Anthropic 凭证时用这条。
 
 memside 直接读 claude code 自己的 settings,所以 claude code 能跑,distiller 就能用同一套凭证。
+
+后端选择:有 `OPENAI_API_KEY` 时自动用 OpenAI 后端,否则用 Anthropic;可用 `MEMSIDE_LLM_BACKEND=anthropic|openai` 显式覆盖(设错值会在 daemon 启动时报错,不静默回退)。
 
 ## 配置参考
 
@@ -153,6 +156,10 @@ memside 直接读 claude code 自己的 settings,所以 claude code 能跑,disti
 | `MEMSIDE_PORT` | `7777` | daemon HTTP 端口(hooks + web UI 代理目标) |
 | `~/.claude/settings.json` 的 `env` | - | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`(代理模式) |
 | `ANTHROPIC_API_KEY` | - | 官方 Anthropic key(优先级高于 settings.json) |
+| `OPENAI_API_KEY` | - | OpenAI 兼容后端的 API key(设了即自动启用 OpenAI 后端) |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI 兼容端点(部门内部代理填这里) |
+| `OPENAI_MODEL` | - | OpenAI 后端模型名(必配,无默认) |
+| `MEMSIDE_LLM_BACKEND` | 自动 | 显式 `anthropic` / `openai` 覆盖自动选择 |
 | `~/.memside/memside.db` | - | 记忆数据库(WAL 模式) |
 | `~/.claude/settings.json` 的 `hooks` | - | 四个 collector hook 装在这 |
 
