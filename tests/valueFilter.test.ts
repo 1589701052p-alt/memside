@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { judgeValue, VALUE_JUDGE_SYSTEM_PROMPT } from '@/memory/valueFilter'
+import { judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VALUE_PROTECTED_CATEGORIES } from '@/memory/valueFilter'
 import type { DistillCandidate } from '@/memory/distiller'
 
 const cand = (title: string, bodyMd = 'b'): DistillCandidate =>
@@ -104,16 +104,49 @@ test('judgeValue parses fence-wrapped JSON (regression: harden silent-failure)',
   expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
 })
 
-test('judgeValue retries on invalid category then accepts valid one', async () => {
-  // TDD: valueShouldRetry must force a retry when a verdict's category is not one
-  // of the 6 VALID_CATEGORIES; on the next attempt the LLM returns a valid category
-  // and judgeValue maps it correctly (proves the shouldRetry feedback loop works).
-  let calls = 0
-  const v = await judgeValue([cand('a')], async () => {
-    calls++
-    if (calls === 1) return verdictsJson({ index: 0, category: 'nonsense' })
-    return verdictsJson({ index: 0, category: 'decision' })
-  })
-  expect(calls).toBe(2)
+const prot = (cat: string) => cand(`[category:${cat}] some business rule`, 'b')
+
+test('parseCategory extracts lowercased category', () => {
+  expect(parseCategory('[category:Invariant] X')).toBe('invariant')
+  expect(parseCategory('[category:integration] X')).toBe('integration')
+  expect(parseCategory('no prefix here')).toBeNull()
+})
+
+test('VALUE_PROTECTED_CATEGORIES = invariant/integration/compliance', () => {
+  expect(VALUE_PROTECTED_CATEGORIES.has('invariant')).toBe(true)
+  expect(VALUE_PROTECTED_CATEGORIES.has('integration')).toBe(true)
+  expect(VALUE_PROTECTED_CATEGORIES.has('compliance')).toBe(true)
+  expect(VALUE_PROTECTED_CATEGORIES.has('architecture')).toBe(false)
+})
+
+test('judgeValue force-keeps protected invariant even when LLM says derivable', async () => {
+  const v = await judgeValue([prot('invariant')], async () => verdictsJson({ index: 0, category: 'derivable' }))
   expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+})
+
+test('judgeValue force-keeps protected integration/compliance with valueClass=decision', async () => {
+  const v = await judgeValue([prot('integration'), prot('compliance')], async () => verdictsJson(
+    { index: 0, category: 'public-knowledge' },
+    { index: 1, category: 'derivable' },
+  ))
+  expect(v).toEqual([
+    { index: 0, keep: true, valueClass: 'decision' },
+    { index: 1, keep: true, valueClass: 'decision' },
+  ])
+})
+
+test('judgeValue force-keeps protected category even when LLM throws', async () => {
+  const v = await judgeValue([prot('invariant')], async () => { throw new Error('down') })
+  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+})
+
+test('non-protected category still discards normally', async () => {
+  // architecture is NOT protected -> derivable discards it (code-restating case)
+  const v = await judgeValue([cand('[category:architecture] how module X works', 'b')], async () => verdictsJson({ index: 0, category: 'derivable' }))
+  expect(v).toEqual([{ index: 0, keep: false, reason: 'derivable' }])
+})
+
+test('VALUE_JUDGE_SYSTEM_PROMPT has sharpened derivable + public-knowledge definitions', () => {
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain("THIS repository's current code/files/docs")
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('do not belong here')
 })
