@@ -114,11 +114,14 @@ export const VALUE_PROTECTED_CATEGORIES = new Set(['invariant', 'integration', '
 
 > valueClass 必须非 null 的硬性原因：Web UI 的"批量拒绝未评估"按钮（`App.tsx:152`）target `priorityRank(valueClass)===2`，即 `value_class IS NULL`（`App.tsx:17` priorityRank：decision/convention=0、trap/topology=1、null=2）。若受保护业务规则拿到 null，就会被一键批量清掉--与保护初衷相反。故统一映射 `decision`（rank 0，高优先级 + 免疫批量拒绝）。语义上业务硬规则也最接近"决策/约束"。后续若想细分 valueClass 可再迭代，v1 不做。
 
-**提示词收紧**（`VALUE_JUDGE_SYSTEM_PROMPT`）：
+**提示词收紧**（`VALUE_JUDGE_SYSTEM_PROMPT`，仅做定义澄清，不加 keep/discard 指令）：
 
-- `derivable` 重定义："可从**本仓库当前源码/文档**不依赖本次对话重推导。**若候选描述的是被开发代码库自身的实现**（文件路径、函数/符号名、配置默认值、模块内部运作、文件内容），即使附带 rationale，也是 derivable。"
-- `public-knowledge` 收紧："通用公开文档/标准约 10 秒可得（语言语法、stdlib、通用算法、公开标准）。**项目专属业务规则、合约、SLA 不是 public-knowledge。**"
-- 显式条款："业务规则、invariant、集成合约、合规约束**永非** public-knowledge / derivable，必保留。"
+> 硬约束：`tests/valueFilter.test.ts:83` 的 neutrality 测试禁止提示词出现 `keep/discard/reject/avoid/important/valuable/unsure/cautious/careful/don't/dangerous` 等引导词。valueFilter 的 prompt 必须保持中性分类器。**业务规则的保护完全靠上面的代码逻辑门，不靠 prompt 引导。** prompt 只负责让分类更准（让代码复述被正确判为 derivable、让项目专属规则不被误判为 public-knowledge）。
+
+- `derivable` 重定义："可从**本仓库当前源码/文档**不依赖本次对话重推导。**若候选描述的是被开发代码库自身的实现**（文件路径、函数/符号名、配置默认值、模块内部运作、文件内容），即使附带 rationale，也属于 derivable。"
+- `public-knowledge` 收紧："通用公开文档/标准约 10 秒可得（语言语法、stdlib、通用算法、公开标准）。项目专属的业务规则、合约、SLA 不属于 public-knowledge。"
+
+不新增任何"必保留/永不丢弃"类指令--那会违反 neutrality，且与逻辑门重复。
 
 ### 3.6 dedup 修复（`src/memory/dedup.ts` + `src/scheduler.ts`）
 
@@ -209,7 +212,7 @@ CLAUDE.md 要求纯函数层足量覆盖 + 运行时层少量集成断言。
 ### 提示词源码层断言（兜底）
 
 - `DISTILLER_SYSTEM_PROMPT` 含"被开发仓库自身源码的实现细节"REJECT 条款。
-- `VALUE_JUDGE_SYSTEM_PROMPT` 含"项目专属业务规则…不是 public-knowledge"与"永非 derivable"条款。
+- `VALUE_JUDGE_SYSTEM_PROMPT` 含"被开发代码库自身的实现…属于 derivable"与"项目专属…不属于 public-knowledge"定义澄清；且 neutrality 测试（`valueFilter.test.ts:83`，禁词列表）仍通过。
 - `DEDUP_SYSTEM_PROMPT` 含"同批兄弟"比对要求。
 
 ### 回归
