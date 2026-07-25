@@ -87,3 +87,34 @@ test('DISTILLER_SYSTEM_PROMPT contains JSON template with example values', () =>
   expect(DISTILLER_SYSTEM_PROMPT).toContain('"scope": "project"')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('仅示范结构')
 })
+
+test('distillTranscript filters file-source Read results out of the LLM prompt', async () => {
+  let captured = ''
+  await distillTranscript({
+    turns: [
+      { role: 'user', content: 'read the file' },
+      { role: 'tool', content: 'SECRET_SOURCE_CODE_LINE'.repeat(200), toolName: 'Read', toolInputPath: '/a.ts' },
+    ],
+    runtime: 'claude-code', cwd: '/r',
+    callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ candidates: [] }) },
+  })
+  expect(captured).toContain('[file: /a.ts')
+  expect(captured).not.toContain('SECRET_SOURCE_CODE_LINE')
+})
+
+test('detectErrorSignals still sees original (unfiltered) tool failure', async () => {
+  let captured = ''
+  await distillTranscript({
+    turns: [
+      { role: 'tool', content: 'boom', toolName: 'Bash', isError: true },
+    ],
+    runtime: 'claude-code', cwd: '/r',
+    callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ candidates: [] }) },
+  })
+  expect(captured).toContain('"toolFailures":1')
+  expect(captured).toContain('boom')
+})
+
+test('DISTILLER_SYSTEM_PROMPT rejects codebase implementation details', () => {
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('被开发仓库自身源码的实现细节')
+})
