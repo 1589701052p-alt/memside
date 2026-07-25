@@ -104,6 +104,20 @@ test('judgeValue parses fence-wrapped JSON (regression: harden silent-failure)',
   expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
 })
 
+test('judgeValue retries on invalid category then accepts valid one', async () => {
+  // TDD: valueShouldRetry must force a retry when a verdict's category is not one
+  // of the 6 VALID_CATEGORIES; on the next attempt the LLM returns a valid category
+  // and judgeValue maps it correctly (proves the shouldRetry feedback loop works).
+  let calls = 0
+  const v = await judgeValue([cand('a')], async () => {
+    calls++
+    if (calls === 1) return verdictsJson({ index: 0, category: 'nonsense' })
+    return verdictsJson({ index: 0, category: 'decision' })
+  })
+  expect(calls).toBe(2)
+  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+})
+
 const prot = (cat: string) => cand(`[category:${cat}] some business rule`, 'b')
 
 test('parseCategory extracts lowercased category', () => {

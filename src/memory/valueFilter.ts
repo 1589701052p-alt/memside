@@ -100,11 +100,12 @@ export async function judgeValue(
   const n = candidates.length
   if (n === 0) return []
   const keepNull = (): ValueVerdict[] =>
-    candidates.map((c, i) =>
-      (parseCategory(c.title) && VALUE_PROTECTED_CATEGORIES.has(parseCategory(c.title)!))
+    candidates.map((c, i) => {
+      const cat = parseCategory(c.title)
+      return (cat && VALUE_PROTECTED_CATEGORIES.has(cat))
         ? { index: i, keep: true, valueClass: 'decision' as ValueClass }
-        : { index: i, keep: true, valueClass: null },
-    )
+        : { index: i, keep: true, valueClass: null }
+    })
   try {
     const parsed = await callWithRetry({
       call: callLLM,
@@ -129,7 +130,8 @@ export async function judgeValue(
       }
     }
     return candidates.map((c, i) => {
-      if ((parseCategory(c.title) && VALUE_PROTECTED_CATEGORIES.has(parseCategory(c.title)!))) {
+      const cat = parseCategory(c.title)
+      if (cat && VALUE_PROTECTED_CATEGORIES.has(cat)) {
         return { index: i, keep: true, valueClass: 'decision' as ValueClass }
       }
       return byIndex.get(i) ?? { index: i, keep: true, valueClass: null }
