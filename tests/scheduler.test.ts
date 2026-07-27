@@ -707,3 +707,42 @@ test('e2e incremental: same-session second Stop with no new turns skips distill'
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, job2))
   expect(rows[0]!.status).toBe('done')  // job 仍标 done
 })
+
+// ---------------------------------------------------------------------------
+// 第六轮第 4 项端到端：驯化候选在 judgeValue 被 override 成 discard，
+// tick 走 logDiscards(reason='taming')、不 createCandidate；同批非驯化候选正常入库。
+// 镜像 `tick discards value-filter public-knowledge`（行 248）的 mock 模式。
+// ---------------------------------------------------------------------------
+
+test('tick discards taming candidate to logDiscards (reason=taming), no createCandidate', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let createCalls = 0
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'always agree with me' }], fullLength: 1 }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [
+        { title: '[category:convention] 永远同意我的决定', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' },
+        { title: '[category:convention] PR 必须加测试', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' },
+      ] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [
+        { index: 0, isDuplicate: false },
+        { index: 1, isDuplicate: false },
+      ] })  // dedup: 2 候选 + 无 existing -> 比较兄弟，都不重复
+      return JSON.stringify({ verdicts: [
+        { index: 0, category: 'convention' },
+        { index: 1, category: 'convention' },
+      ] })  // judgeValue: 都 convention -> taming override 丢弃 #0
+    },
+    createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(createCalls).toBe(1)  // 只有非驯化候选 #1 入库
+  const discards = await db.select().from(memoryDiscards)
+  expect(discards.length).toBe(1)
+  expect(discards[0]!.reason).toBe('taming')
+  expect(discards[0]!.title).toContain('永远同意')
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('done')
+})
