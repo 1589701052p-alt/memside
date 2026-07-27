@@ -136,3 +136,35 @@ test('migration adds value_class to pre-existing db, idempotent, no backfill', (
   expect((reopened.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]).some((c) => c.name === 'value_class')).toBe(true)
   reopened.$client.close()
 })
+
+test('fresh db has memory_session_offsets table', () => {
+  db = openDb(join(dir, 'mso.db'))
+  const tables = db.$client.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_session_offsets'").all() as { name: string }[]
+  expect(tables.length).toBe(1)
+  const cols = db.$client.prepare('PRAGMA table_info(memory_session_offsets)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'session_id')).toBe(true)
+  expect(cols.some((c) => c.name === 'last_turn_offset')).toBe(true)
+  expect(cols.some((c) => c.name === 'updated_at')).toBe(true)
+})
+
+test('fresh db has session_id column on memory_distill_jobs', () => {
+  db = openDb(join(dir, 'sid.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'session_id')).toBe(true)
+})
+
+test('migration adds session_id to pre-existing memory_distill_jobs, idempotent', () => {
+  const dbPath = join(dir, 'oldsid.db')
+  // 旧形态库：memory_distill_jobs 无 session_id 列（第四轮及之前形态）
+  const old = new Database(dbPath)
+  old.exec(`CREATE TABLE memory_distill_jobs (id TEXT PRIMARY KEY, debounce_key TEXT NOT NULL, source_event_id TEXT NOT NULL, runtime TEXT NOT NULL, cwd TEXT, scope_resolved_json TEXT, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_run_at INTEGER NOT NULL, last_error TEXT, created_at INTEGER NOT NULL, finished_at INTEGER)`)
+  old.close()
+  const migrated = openDb(dbPath)
+  const cols = migrated.$client.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'session_id')).toBe(true)
+  migrated.$client.close()
+  // 幂等：reopen 不抛（guard 跳过 ALTER，否则 duplicate column 报错）
+  const reopened = openDb(dbPath)
+  expect((reopened.$client.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]).some((c) => c.name === 'session_id')).toBe(true)
+  reopened.$client.close()
+})
