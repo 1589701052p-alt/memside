@@ -1063,12 +1063,13 @@ test('tick: protected invariant candidate survives with valueClass=decision (e2e
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
-      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+      // dedup short-circuits (1 candidate, no existing) -> call 2 is judgeValue;
       // judgeValue LLM wrongly says derivable -> logic gate must override to keep+decision
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
     },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
+  expect(callCount).toBe(2) // distill + judgeValue; dedup skipped LLM (short-circuit)
   expect(captured).not.toBeNull()
   expect(captured.valueClass).toBe('decision') // non-null -> immune to 批量拒绝未评估
   const rows = await db.select().from(memoryDiscards)
