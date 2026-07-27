@@ -3,11 +3,11 @@ import { judgeDuplicates, DEDUP_SYSTEM_PROMPT, type ExistingMemoryForDedup } fro
 import type { DistillCandidate } from '@/memory/distiller'
 
 const existing: ExistingMemoryForDedup[] = [
-  { id: 'A', title: '[category:invariant] refund within 14 days', scopeType: 'project', scopeId: '/r', status: 'approved' },
+  { id: 'A', title: '[category:invariant] refund within 14 days', bodyMd: '14d refund window', scopeType: 'project', scopeId: '/r', status: 'approved' },
 ]
 const newCand: DistillCandidate = {
   title: '[category:process] 退款必须在发货后14天内', bodyMd: '14天退款窗口',
-  scopeType: 'project', runtime: null, distillAction: 'new',
+  scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain',
 }
 
 test('judgeDuplicates marks duplicate with valid duplicateOfId', async () => {
@@ -140,8 +140,8 @@ test('DEDUP_SYSTEM_PROMPT is neutral (no unsure tie-breaker)', () => {
 })
 
 test('judgeDuplicates merges same-batch sibling (new-j duplicateOf)', async () => {
-  const a: DistillCandidate = { title: '[category:invariant] 退款14天', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' }
-  const b: DistillCandidate = { title: '[category:invariant] 退款须在14天内', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' }
+  const a: DistillCandidate = { title: '[category:invariant] 退款14天', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const b: DistillCandidate = { title: '[category:invariant] 退款须在14天内', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
   const v = await judgeDuplicates({
     newCandidates: [a, b], existing: [],
     callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: true, duplicateOfId: 'new-0' }] }),
@@ -185,4 +185,35 @@ test('user prompt includes new-i ids for sibling comparison', async () => {
 test('DEDUP_SYSTEM_PROMPT mentions sibling comparison + new-id duplicateOf', () => {
   expect(DEDUP_SYSTEM_PROMPT).toContain('siblings')
   expect(DEDUP_SYSTEM_PROMPT).toContain('new-')
+})
+
+test('renderUserPrompt includes existing bodyMd (cross-batch dedup has full context)', async () => {
+  // TDD（第二轮）：跨批比对原本只发 title，同义候选 title 强调不同侧面时 LLM 看不出
+  // 重复。existing 必须带 bodyMd 让 LLM 有完整上下文。根因见 spec §1.1 第 2 点。
+  let captured = ''
+  await judgeDuplicates({
+    newCandidates: [newCand], existing,
+    callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }) },
+  })
+  expect(captured).toContain('14d refund window') // existing 的 bodyMd
+})
+
+test('DEDUP_SYSTEM_PROMPT mentions same-rule-different-facet = duplicate', () => {
+  expect(DEDUP_SYSTEM_PROMPT).toContain('不同角度')
+  expect(DEDUP_SYSTEM_PROMPT).toContain('只保留最完整的一条')
+})
+
+test('judgeDuplicates merges same-rule-different-facet siblings', async () => {
+  // TDD：同一规则从"为什么/实现/触发"不同角度各写一条，prompt 指引 + 完整 body
+  // 应让 LLM 判为重复，只留第一条。
+  const a: DistillCandidate = { title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14天退款窗口', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const b: DistillCandidate = { title: '[category:invariant] 退款规则的14天期限不可被丢弃', bodyMd: '退款期限是14天', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const v = await judgeDuplicates({
+    newCandidates: [a, b], existing: [],
+    callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: true, duplicateOfId: 'new-0' }] }),
+  })
+  expect(v).toEqual([
+    { index: 0, duplicate: false },
+    { index: 1, duplicate: true, duplicateOfId: 'new-0' },
+  ])
 })
