@@ -36,8 +36,8 @@ export interface AppDeps {
  *      the handler returns 202 synchronously while a fire-and-forget IIFE
  *      (never awaited in the hot path) reads the JSONL file via
  *      `parseTranscriptFile`, persists the turns into `memory_distill_events`,
- *      and enqueues a distill job. `sourceKind` is `'error'` for `PostToolUse`
- *      (error-signal transcript path) and `'conversation'` otherwise.
+ *      and enqueues a distill job. `sourceKind` is `'conversation'` (PostToolUse
+ *      is skipped entirely - see the early return in the route handler).
  *
  * 2. Injector (`POST /inject`) - programmatic seam (the SessionStart hook
  *    itself goes through the collector branch above). Delegates to
@@ -83,7 +83,15 @@ export function createApp(deps: AppDeps) {
       return c.json({ ok: true })
     }
 
-    // Stop / SubagentStop / PostToolUse (C3 fix): claude code pipes
+    // PostToolUse 不蒸馏（第四轮）：transcript 是累积式全量，与 Stop transcript
+    // 前缀重叠，每次 tool call 一个 job 会导致同一段会话被重复蒸馏（同义候选爆炸）。
+    // Stop/SubagentStop transcript 已含全部 tool_result（含 error），错误信号由
+    // distiller 内的 detectErrorSignals 从 Stop transcript 提取，PostToolUse 无独有价值。
+    if (event === 'PostToolUse') {
+      return c.json({ ok: true }, 202)
+    }
+
+    // Stop / SubagentStop (C3 fix): claude code pipes
     // `transcript_path` (a JSONL file path, NOT an inline array). The old code
     // read `body.transcript` (inline) which is always undefined in production
     // -> turns=[] -> empty payload stored -> distiller got nothing. Tests
@@ -92,7 +100,7 @@ export function createApp(deps: AppDeps) {
     const transcriptPath: string = body.transcript_path ?? ''
     const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
     const debounceKey = `${cwd}:${event}`
-    const sourceKind = event === 'PostToolUse' ? 'error' : 'conversation'
+    const sourceKind = 'conversation'
     // The in-memory adapter.pushCapture queue is intentionally NOT fed here:
     // the real data path is the memory_distill_events DB row written by the
     // fire-and-forget IIFE below (C1 fix). pushCapture/capture stay on the
