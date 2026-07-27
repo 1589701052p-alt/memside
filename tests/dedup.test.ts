@@ -179,6 +179,7 @@ test('user prompt includes new-i ids for sibling comparison', async () => {
   })
   expect(captured).toContain('id=new-0')
   expect(captured).toContain('id=new-1')
+  expect(captured).toContain('(none)')
 })
 
 test('DEDUP_SYSTEM_PROMPT mentions sibling comparison + new-id duplicateOf', () => {

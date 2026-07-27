@@ -47,7 +47,7 @@ function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingM
  * Validate parsed dedup output for retry-worthiness. Returns an error message
  * to retry, or null to accept. Checks: parsed has a `verdicts` array, each
  * verdict has a numeric `index`, and any `isDuplicate:true` verdict references
- * a `duplicateOfId` in `existingIds`. Exhausted retries fall through to the
+ * a `duplicateOfId` that is either an existing id or a valid `new-j` (j < index). Exhausted retries fall through to the
  * existing per-verdict hallucination->new logic.
  */
 function isValidDuplicateOf(id: string, index: number, existingIds: Set<string>): boolean {
@@ -82,7 +82,8 @@ function dedupShouldRetry(existingIds: Set<string>): (parsed: unknown) => string
  * Conservative fallback (never throws, never drops info): on LLM error, non-JSON,
  * missing `verdicts`, missing indices, or a hallucinated `duplicateOfId` not in
  * `existing`, the affected candidate is treated as `duplicate:false` (kept). When
- * `existing` is empty or `newCandidates` is empty, the LLM is not called at all.
+ * `existing` is empty AND `newCandidates` has <= 1 candidate, or `newCandidates` is empty,
+ * the LLM is not called; with >= 2 candidates and no existing, it is called to compare siblings.
  */
 export async function judgeDuplicates(input: DedupInput): Promise<DedupVerdict[]> {
   const n = input.newCandidates.length
