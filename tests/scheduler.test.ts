@@ -108,7 +108,7 @@ test('tick filters duplicate candidates (dedup marks duplicate, not persisted)',
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:process] 14天退款', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
-      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+      // callCount === 2: dedup marks dup of existing -> candidate removed -> judgeValue skipped (0 candidates)
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: ex.id }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
@@ -128,8 +128,8 @@ test('tick keeps all candidates when dedup LLM throws (conservative, job still d
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
-      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
-      throw new Error('dedup api down')
+      if (callCount === 2) throw new Error('dedup api down')
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
@@ -168,8 +168,8 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
-      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
-      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
@@ -237,12 +237,11 @@ test('dedupCandidates bubbles listForDedupByScope DB errors (spec §8)', async (
 })
 
 // ---------------------------------------------------------------------------
-// Value-filter integration: tick inserts judgeValue + logDiscards BETWEEN
-// distill and dedup. judgeValue classifies each candidate (rules 1-6);
-// public-knowledge/derivable => discard (audit-logged to memory_discards),
-// decision/convention/trap/topology => keep with valueClass, no valid
-// classification => keep valueClass=null. valueClass is carried alongside
-// each candidate and re-attached after dedup by object reference.
+// Value-filter integration: tick runs dedup BEFORE judgeValue, so judgeValue +
+// logDiscards only see dedup survivors. judgeValue classifies each survivor
+// (rules 1-6); public-knowledge/derivable => discard (audit-logged to
+// memory_discards), decision/convention/trap/topology => keep with valueClass,
+// no valid classification => keep valueClass=null.
 // ---------------------------------------------------------------------------
 
 test('tick discards value-filter public-knowledge, logs to memory_discards, no createCandidate', async () => {
@@ -308,7 +307,7 @@ test('tick keeps all as valueClass=null when judgeValue LLM throws, job still do
   expect(rows[0]!.status).toBe('done')
 })
 
-test('tick runs judgeValue before dedup (3-phase call order)', async () => {
+test('tick runs dedup before judgeValue (3-phase call order)', async () => {
   // Pre-position an existing memory so dedup actually calls the LLM (without
   // existing memories, judgeDuplicates short-circuits and the 3rd phase is
   // never reached, making the call-order assertion untestable).
@@ -323,10 +322,33 @@ test('tick runs judgeValue before dedup (3-phase call order)', async () => {
     callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) { phases.push('distill'); return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) }
-      if (callCount === 2) { phases.push('judgeValue'); return JSON.stringify({ verdicts: [{ index: 0, category: 'trap' }] }) }
-      phases.push('dedup'); return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+      if (callCount === 2) { phases.push('dedup'); return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }) }
+      phases.push('judgeValue'); return JSON.stringify({ verdicts: [{ index: 0, category: 'trap' }] })
     },
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
   })
-  expect(phases).toEqual(['distill', 'judgeValue', 'dedup'])
+  expect(phases).toEqual(['distill', 'dedup', 'judgeValue'])
+})
+
+test('tick: protected invariant candidate survives with valueClass=decision (e2e gate + bulk-reject immunity)', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'refunds only within 14 days' }],
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
+      // dedup short-circuits (1 candidate, no existing) -> call 2 is judgeValue;
+      // judgeValue LLM wrongly says derivable -> logic gate must override to keep+decision
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(callCount).toBe(2) // distill + judgeValue; dedup skipped LLM (short-circuit)
+  expect(captured).not.toBeNull()
+  expect(captured.valueClass).toBe('decision') // non-null -> immune to 批量拒绝未评估
+  const rows = await db.select().from(memoryDiscards)
+  expect(rows.length).toBe(0) // not discarded despite LLM saying derivable
 })

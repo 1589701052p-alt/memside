@@ -58,7 +58,7 @@ test('judgeDuplicates treats hallucinated duplicateOfId as new', async () => {
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })
 
-test('judgeDuplicates skips LLM and returns all new when existing is empty', async () => {
+test('judgeDuplicates skips LLM when existing empty AND <=1 candidate', async () => {
   let called = 0
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing: [],
@@ -137,4 +137,52 @@ test('DEDUP_SYSTEM_PROMPT is neutral (no unsure tie-breaker)', () => {
   // 锁中性：删 "When unsure, emit isDuplicate:false." 后不得回退
   const lower = DEDUP_SYSTEM_PROMPT.toLowerCase()
   expect(lower).not.toContain('unsure')
+})
+
+test('judgeDuplicates merges same-batch sibling (new-j duplicateOf)', async () => {
+  const a: DistillCandidate = { title: '[category:invariant] 退款14天', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' }
+  const b: DistillCandidate = { title: '[category:invariant] 退款须在14天内', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' }
+  const v = await judgeDuplicates({
+    newCandidates: [a, b], existing: [],
+    callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: true, duplicateOfId: 'new-0' }] }),
+  })
+  expect(v).toEqual([{ index: 0, duplicate: false }, { index: 1, duplicate: true, duplicateOfId: 'new-0' }])
+})
+
+test('judgeDuplicates calls LLM for sibling comparison when existing empty but >1 candidate', async () => {
+  let called = 0
+  await judgeDuplicates({
+    newCandidates: [newCand, { ...newCand, title: '[category:x] sibling' }], existing: [],
+    callLLM: async () => { called++; return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: false }] }) },
+  })
+  expect(called).toBe(1)
+})
+
+test('judgeDuplicates rejects duplicateOf new-j with j>=i (retry)', async () => {
+  let calls = 0
+  const v = await judgeDuplicates({
+    newCandidates: [newCand, { ...newCand, title: '[category:x] s' }], existing: [],
+    callLLM: async () => {
+      calls++
+      if (calls === 1) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'new-1' }] }) // j>=i illegal
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: false }] })
+    },
+  })
+  expect(calls).toBe(2)
+})
+
+test('user prompt includes new-i ids for sibling comparison', async () => {
+  let captured = ''
+  await judgeDuplicates({
+    newCandidates: [newCand, { ...newCand, title: '[category:x] s' }], existing: [],
+    callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: false }] }) },
+  })
+  expect(captured).toContain('id=new-0')
+  expect(captured).toContain('id=new-1')
+  expect(captured).toContain('(none)')
+})
+
+test('DEDUP_SYSTEM_PROMPT mentions sibling comparison + new-id duplicateOf', () => {
+  expect(DEDUP_SYSTEM_PROMPT).toContain('siblings')
+  expect(DEDUP_SYSTEM_PROMPT).toContain('new-')
 })

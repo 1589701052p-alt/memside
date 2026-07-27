@@ -76,6 +76,10 @@ export interface TranscriptTurn {
   role: 'user' | 'assistant' | 'tool' | 'system'
   content: string
   isError?: boolean
+  /** 配对自前一个 assistant 行的 tool_use 块；仅 role==='tool' 有值。 */
+  toolName?: string
+  /** 提取自 tool_use.input（file_path / notebook_path / path）；仅文件类工具有值。 */
+  toolInputPath?: string
 }
 
 export interface ErrorSignals {
@@ -159,4 +163,91 @@ export function extractJsonObject(raw: string): string {
     }
   }
   return raw.slice(start)
+}
+
+// ---------------------------------------------------------------------------
+// Distill-time transcript filtering. Pure; never throws.
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_DISTILL_INPUT_BUDGET_TOKENS = 12000
+
+const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+const TOOL_RESULT_CAP_CHARS = 1500
+const NON_TOOL_CAP_CHARS = 4000
+const CODE_FEATURE_RE = /(^|\n)\s*(import |export |function |const |class |interface |def |async |return )/
+const INDENT_RE = /\n( {4,}|\t+)\S/
+
+function looksLikeCode(s: string): boolean {
+  if (CODE_FEATURE_RE.test(s)) return true
+  return (s.match(/\n/g)?.length ?? 0) >= 4 && INDENT_RE.test(s)
+}
+
+function lineCount(s: string): number {
+  if (s.length === 0) return 0
+  return s.split('\n').length
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s
+  return s.slice(0, max) + '…[truncated]'
+}
+
+function compactToolTurn(t: TranscriptTurn): TranscriptTurn {
+  if (t.isError) return { ...t }
+  if (t.toolName && FILE_TOOLS.has(t.toolName)) {
+    return { ...t, content: `[file: ${t.toolInputPath ?? '未知路径'}, 原文 ${lineCount(t.content)} 行]` }
+  }
+  if (t.toolName) {
+    return { ...t, content: truncate(t.content, TOOL_RESULT_CAP_CHARS) }
+  }
+  // 老 payload（无 toolName）启发式
+  if (t.content.length > TOOL_RESULT_CAP_CHARS && looksLikeCode(t.content)) {
+    return { ...t, content: `[file: 未知路径, 原文 ${lineCount(t.content)} 行]` }
+  }
+  return { ...t, content: truncate(t.content, TOOL_RESULT_CAP_CHARS) }
+}
+
+function turnPriority(t: TranscriptTurn): number {
+  if (t.role === 'user') return 0
+  if (t.role === 'tool' && t.isError) return 1
+  if (t.role === 'assistant') return 2
+  if (t.role === 'tool') return 3
+  return 4
+}
+
+/**
+ * Filter a parsed transcript for distill-time input: compact file-source tool
+ * results to a one-line placeholder, cap command/test outputs, keep errors
+ * verbatim, then apply a token budget (recent + user/error prioritized).
+ *
+ * Pure + never throws (degrades to truncated/identity on any error).
+ * `detectErrorSignals` must run on the ORIGINAL turns (before this filter),
+ * since budget clipping could drop user negations / tool failures.
+ */
+export function filterTranscriptForDistill(
+  turns: readonly TranscriptTurn[],
+  budgetTokens: number = DEFAULT_DISTILL_INPUT_BUDGET_TOKENS,
+): TranscriptTurn[] {
+  if (!Array.isArray(turns)) return []
+  try {
+    const compacted = turns.map((t) =>
+      t.role === 'tool' ? compactToolTurn(t) : { ...t, content: truncate(t.content, NON_TOOL_CAP_CHARS) },
+    )
+    const used = () => compacted.reduce((s, t) => s + estimateTokens(t.content), 0)
+    if (used() <= budgetTokens) return compacted
+    const droppable = compacted
+      .map((t, i) => ({ i, p: turnPriority(t) }))
+      .filter((x) => x.p > 1) // never drop user(0) or error-tool(1)
+      .sort((a, b) => b.p - a.p || a.i - b.i) // least important first, oldest first
+    let tokens = used()
+    const drop = new Set<number>()
+    for (const x of droppable) {
+      if (tokens <= budgetTokens) break
+      drop.add(x.i)
+      tokens -= estimateTokens(compacted[x.i]!.content)
+    }
+    return compacted.filter((_, i) => !drop.has(i))
+  } catch {
+    return [...turns]
+  }
 }

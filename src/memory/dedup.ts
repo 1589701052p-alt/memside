@@ -21,22 +21,25 @@ export type DedupVerdict =
   | { index: number; duplicate: false }
   | { index: number; duplicate: true; duplicateOfId: string }
 
-export const DEDUP_SYSTEM_PROMPT = `You are memside-dedup. Decide whether each new candidate memory is a SEMANTIC DUPLICATE of any existing memory in the same scope - the same rule or fact, even if worded differently or tagged with a different [category:] prefix.
+export const DEDUP_SYSTEM_PROMPT = `You are memside-dedup. Decide whether each new candidate memory is a SEMANTIC DUPLICATE of any other item in the same scope — the same rule or fact, even if worded differently or tagged with a different [category:] prefix.
+
+Compare each new candidate against BOTH (a) the existing memories listed below, and (b) its same-batch siblings (the other new candidates). A new candidate is a duplicate if it restates the same rule as an existing memory OR as an earlier new candidate (new-j where j < i).
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
 {
   "verdicts": [
     {"index": 0, "isDuplicate": false},
-    {"index": 1, "isDuplicate": true, "duplicateOfId": "A"}
+    {"index": 1, "isDuplicate": true, "duplicateOfId": "A"},
+    {"index": 2, "isDuplicate": true, "duplicateOfId": "new-0"}
   ]
 }
-Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be one of the existing ids.`
+Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be either an existing memory id or "new-j" with j < i (an earlier new candidate). Keep the earliest member of each duplicate group.`
 
 function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingMemoryForDedup[]): string {
-  // judgeDuplicates short-circuits empty `existing` before reaching here, so the
-  // map join never runs against []. No `(none)` fallback needed.
-  const exLines = existing.map((e) => `id=${e.id} | ${e.title}`).join('\n')
-  const newLines = newCandidates.map((c, i) => `[${i}] ${c.title}\n${c.bodyMd}`).join('\n---\n')
+  const exLines = existing.length > 0
+    ? existing.map((e) => `id=${e.id} | ${e.title}`).join('\n')
+    : '(none)'
+  const newLines = newCandidates.map((c, i) => `id=new-${i} | ${c.title}\n${c.bodyMd}`).join('\n---\n')
   return `Existing memories (same scope):\n${exLines}\n\nNew candidates:\n${newLines}\n\nReturn JSON per the system instructions.`
 }
 
@@ -44,9 +47,17 @@ function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingM
  * Validate parsed dedup output for retry-worthiness. Returns an error message
  * to retry, or null to accept. Checks: parsed has a `verdicts` array, each
  * verdict has a numeric `index`, and any `isDuplicate:true` verdict references
- * a `duplicateOfId` in `existingIds`. Exhausted retries fall through to the
+ * a `duplicateOfId` that is either an existing id or a valid `new-j` (j < index). Exhausted retries fall through to the
  * existing per-verdict hallucination->new logic.
  */
+function isValidDuplicateOf(id: string, index: number, existingIds: Set<string>): boolean {
+  if (existingIds.has(id)) return true
+  const m = /^new-(\d+)$/.exec(id)
+  if (!m) return false
+  const j = Number(m[1])
+  return j >= 0 && j < index
+}
+
 function dedupShouldRetry(existingIds: Set<string>): (parsed: unknown) => string | null {
   return (parsed) => {
     if (!parsed || typeof parsed !== 'object') return '返回的不是 JSON 对象'
@@ -57,7 +68,7 @@ function dedupShouldRetry(existingIds: Set<string>): (parsed: unknown) => string
       if (!v || typeof v.index !== 'number') return `verdict ${i} 缺少 index`
       if (v.isDuplicate === true) {
         if (typeof v.duplicateOfId !== 'string') return `verdict ${v.index} 标记重复但缺少 duplicateOfId`
-        if (!existingIds.has(v.duplicateOfId)) return `verdict ${v.index} 的 duplicateOfId 不在已有记忆中`
+        if (!isValidDuplicateOf(v.duplicateOfId, v.index as number, existingIds)) return `verdict ${v.index} 的 duplicateOfId 非法`
       }
     }
     return null
@@ -71,12 +82,16 @@ function dedupShouldRetry(existingIds: Set<string>): (parsed: unknown) => string
  * Conservative fallback (never throws, never drops info): on LLM error, non-JSON,
  * missing `verdicts`, missing indices, or a hallucinated `duplicateOfId` not in
  * `existing`, the affected candidate is treated as `duplicate:false` (kept). When
- * `existing` is empty or `newCandidates` is empty, the LLM is not called at all.
+ * `existing` is empty AND `newCandidates` has <= 1 candidate, or `newCandidates` is empty,
+ * the LLM is not called; with >= 2 candidates and no existing, it is called to compare siblings.
  */
 export async function judgeDuplicates(input: DedupInput): Promise<DedupVerdict[]> {
   const n = input.newCandidates.length
   if (n === 0) return []
-  if (input.existing.length === 0) {
+  // Skip the LLM only when there is nothing to compare against: no existing
+  // AND at most one new candidate (no siblings to compare). With >=2 new
+  // candidates and no existing, we still call to compare siblings.
+  if (input.existing.length === 0 && input.newCandidates.length <= 1) {
     return input.newCandidates.map((_, i) => ({ index: i, duplicate: false }))
   }
   const existingIds = new Set(input.existing.map((e) => e.id))
@@ -95,7 +110,7 @@ export async function judgeDuplicates(input: DedupInput): Promise<DedupVerdict[]
       if (!v || typeof v !== 'object') continue
       const o = v as { index?: unknown; isDuplicate?: unknown; duplicateOfId?: unknown }
       if (typeof o.index !== 'number' || o.index < 0 || o.index >= n) continue
-      if (o.isDuplicate === true && typeof o.duplicateOfId === 'string' && existingIds.has(o.duplicateOfId)) {
+      if (o.isDuplicate === true && typeof o.duplicateOfId === 'string' && isValidDuplicateOf(o.duplicateOfId, o.index, existingIds)) {
         byIndex.set(o.index, { index: o.index, duplicate: true, duplicateOfId: o.duplicateOfId })
       } else {
         // isDuplicate:false OR hallucinated duplicateOfId -> treat as new

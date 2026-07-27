@@ -15,8 +15,11 @@ category by these criteria:
 
 1. public-knowledge - obtainable via Google / official docs / source within ~10s
    (language syntax, stdlib, third-party API, generic algorithms, public standards).
-2. derivable - re-derivable by reading existing code/files/docs; only a file path
-   or entry point would need remembering.
+   Project-specific business rules, contracts, and SLAs do not belong here.
+2. derivable - re-derivable by reading THIS repository's current code/files/docs
+   without the conversation. If the candidate describes the codebase being worked
+   on (file paths, function/symbol names, config defaults, internal module
+   behavior, file contents), it is derivable even when rationale is given.
 3. decision - the WHY behind a choice: abandoned alternatives, constraints that
    drove the decision.
 4. convention - an unwritten team rule / reviewer preference not documented anywhere.
@@ -32,6 +35,18 @@ Pick the best-fitting category for each candidate. 输出格式如下（仅示�
   ]
 }
 Emit one verdict per candidate, keyed by index.`
+
+export function parseCategory(title: string): string | null {
+  const m = /^\s*\[category:([^\]]+)\]/i.exec(title)
+  if (!m) return null
+  return m[1]!.trim().toLowerCase()
+}
+
+/** Distill categories whose candidates valueFilter must NEVER discard:
+ *  business hard rules / external contracts / regulatory constraints.
+ *  Force-kept with valueClass='decision' (non-null -> immune to the Web UI
+ *  "批量拒绝未评估" button, which targets value_class IS NULL). */
+export const VALUE_PROTECTED_CATEGORIES = new Set(['invariant', 'integration', 'compliance'])
 
 const VALID_CATEGORIES = new Set([
   'public-knowledge', 'derivable', 'decision', 'convention', 'trap', 'topology',
@@ -85,7 +100,12 @@ export async function judgeValue(
   const n = candidates.length
   if (n === 0) return []
   const keepNull = (): ValueVerdict[] =>
-    candidates.map((_, i) => ({ index: i, keep: true, valueClass: null }))
+    candidates.map((c, i) => {
+      const cat = parseCategory(c.title)
+      return (cat && VALUE_PROTECTED_CATEGORIES.has(cat))
+        ? { index: i, keep: true, valueClass: 'decision' as ValueClass }
+        : { index: i, keep: true, valueClass: null }
+    })
   try {
     const parsed = await callWithRetry({
       call: callLLM,
@@ -109,7 +129,13 @@ export async function judgeValue(
         byIndex.set(o.index, { index: o.index, keep: true, valueClass: VALUE_CLASS_MAP[o.category] })
       }
     }
-    return candidates.map((_, i) => byIndex.get(i) ?? { index: i, keep: true, valueClass: null })
+    return candidates.map((c, i) => {
+      const cat = parseCategory(c.title)
+      if (cat && VALUE_PROTECTED_CATEGORIES.has(cat)) {
+        return { index: i, keep: true, valueClass: 'decision' as ValueClass }
+      }
+      return byIndex.get(i) ?? { index: i, keep: true, valueClass: null }
+    })
   } catch {
     return keepNull()
   }

@@ -123,45 +123,41 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         cwd: job.cwd ?? '',
         callLLM: deps.callLLM,
       })
-      // Value filter: classify each candidate (rules 1-6). public-knowledge/
-      // derivable => discard (audit-logged); decision/convention/trap/topology
-      // => keep with valueClass; no valid classification => keep valueClass=null.
-      // judgeValue swallows its own LLM errors (all keep+null), never bubbles.
-      const verdicts = await judgeValue(candidates, deps.callLLM)
+      // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter
+      // only runs on survivors (no wasted calls, no per-dupe mis-classification).
+      const deduped = await dedupCandidates(db, deps.callLLM, candidates, job.cwd ?? null)
+      // Value filter: classify each survivor. public-knowledge/derivable =>
+      // discard (audit-logged); decision/convention/trap/topology => keep with
+      // valueClass; protected categories (invariant/integration/compliance) are
+      // force-kept with valueClass='decision' inside judgeValue. judgeValue
+      // swallows its own LLM errors (all keep+null/decision), never bubbles.
+      const verdicts = await judgeValue(deduped, deps.callLLM)
       const keepWithClass: { cand: DistillCandidate; valueClass: ValueClass | null }[] = []
       const discarded: DiscardRecord[] = []
       verdicts.forEach((v, i) => {
-        const c = candidates[i]
+        const c = deduped[i]
         if (!c) return
         if (v.keep) keepWithClass.push({ cand: c, valueClass: v.valueClass })
         else discarded.push({ title: c.title, bodyMd: c.bodyMd, reason: v.reason })
       })
       if (discarded.length > 0) {
-        // Best-effort audit log: a DB failure here must not block distill or
-        // retry the job (audit is side-effect, not load-bearing).
+        // Best-effort audit log: a DB failure here must not block distill.
         try { await logDiscards(db, job.id, discarded) } catch (e) { console.warn('memside: logDiscards failed', e) }
       }
-      // Dedup survivors against same-scope existing (existing behavior).
-      const keepCandidates = keepWithClass.map((k) => k.cand)
-      const deduped = await dedupCandidates(db, deps.callLLM, keepCandidates, job.cwd ?? null)
-      // Re-attach valueClass by reference: dedupCandidates returns a same-reference
-      // subset of keepCandidates (candidates.filter(...)), so the cand object
-      // identity survives dedup and we can map back to its valueClass.
-      const classByCand = new Map(keepWithClass.map((k) => [k.cand, k.valueClass]))
-      for (const c of deduped) {
+      for (const k of keepWithClass) {
         await deps.createCandidate(db, {
-          scopeType: c.scopeType,
-          scopeId: resolveScopeId(c.scopeType, job.cwd ?? null),
-          title: c.title,
-          bodyMd: c.bodyMd,
+          scopeType: k.cand.scopeType,
+          scopeId: resolveScopeId(k.cand.scopeType, job.cwd ?? null),
+          title: k.cand.title,
+          bodyMd: k.cand.bodyMd,
           tags: [],
           sourceKind: 'conversation',
           sourceCwd: job.cwd ?? null,
-          runtime: c.runtime,
+          runtime: k.cand.runtime,
           distillJobId: job.id,
-          distillAction: c.distillAction,
+          distillAction: k.cand.distillAction,
           sourceEventId: job.sourceEventId,
-          valueClass: classByCand.get(c) ?? null,
+          valueClass: k.valueClass,
         })
       }
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() }).where(eq(memoryDistillJobs.id, job.id)).run()
