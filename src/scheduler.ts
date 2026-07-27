@@ -3,7 +3,7 @@ import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope, logDiscards, type DiscardRecord } from '@/memory/store'
+import { listForDedupByScope, logDiscards, setSessionOffset, type DiscardRecord } from '@/memory/store'
 import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass } from '@/memory/valueFilter'
 import type { MemoryInput, Memory } from '@/memory/store'
@@ -21,6 +21,7 @@ export interface EnqueueInput {
   cwd: string
   debounceKey: string
   debounceMs?: number
+  sessionId?: string  // 第五轮：会话键，用于增量偏移
 }
 
 export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
@@ -29,14 +30,16 @@ export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
   const nextRunAt = now + (input.debounceMs ?? DISTILL_DEBOUNCE_MS)
   await db.insert(memoryDistillJobs).values({
     id, debounceKey: input.debounceKey, sourceEventId: input.sourceEventId,
-    runtime: input.runtime, cwd: input.cwd, status: 'pending',
-    attempts: 0, nextRunAt, createdAt: now, finishedAt: null,
+    runtime: input.runtime, cwd: input.cwd, sessionId: input.sessionId ?? null,
+    status: 'pending', attempts: 0, nextRunAt, createdAt: now, finishedAt: null,
   })
   return { jobId: id, nextRunAt }
 }
 
 export interface TickDeps {
-  loadTranscript: (job: { id: string; cwd: string | null; sourceEventId: string }) => Promise<TranscriptTurn[]>
+  loadTranscript: (job: {
+    id: string; cwd: string | null; sourceEventId: string; sessionId: string | null
+  }) => Promise<{ turns: TranscriptTurn[]; fullLength: number }>
   callLLM: LLMCall
   /** Signature matches store.createCandidate(db, MemoryInput): Promise<Memory>. */
   createCandidate: (db: DbClient, input: MemoryInput) => Promise<Memory>
@@ -116,9 +119,19 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
     if (job.status === 'running') continue
     await db.update(memoryDistillJobs).set({ status: 'running' }).where(eq(memoryDistillJobs.id, job.id)).run()
     try {
-      const turns = await deps.loadTranscript({ id: job.id, cwd: job.cwd, sourceEventId: job.sourceEventId })
+      const { turns: newTurns, fullLength } = await deps.loadTranscript({
+        id: job.id, cwd: job.cwd, sourceEventId: job.sourceEventId, sessionId: job.sessionId ?? null,
+      })
+      // 第五轮增量切片：newTurns 为空 = 该 session 自上次蒸馏后无新增 turn，跳过蒸馏。
+      // 标 done（消费 job），不 distill / createCandidate / setSessionOffset（偏移不变）。
+      if (newTurns.length === 0) {
+        await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() })
+          .where(eq(memoryDistillJobs.id, job.id)).run()
+        processed += 1
+        continue
+      }
       const candidates: DistillCandidate[] = await distillTranscript({
-        turns,
+        turns: newTurns,  // 只喂新增 turn，不再全量
         runtime: job.runtime as 'claude-code' | 'opencode',
         cwd: job.cwd ?? '',
         callLLM: deps.callLLM,
@@ -161,6 +174,12 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         })
       }
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() }).where(eq(memoryDistillJobs.id, job.id)).run()
+      // 第五轮：本次蒸馏到 fullLength，下次该 session 从此处切。仅 job 有 sessionId 时
+      // 更新；无 sessionId（历史 job）不更新，保持全量向后兼容。失败只 warn，不阻塞 done。
+      if (job.sessionId) {
+        try { await setSessionOffset(db, job.sessionId, fullLength) }
+        catch (e) { console.warn('memside: setSessionOffset failed', e) }
+      }
       processed += 1
     } catch (err) {
       const attempts = (job.attempts as number) + 1

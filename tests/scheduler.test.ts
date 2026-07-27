@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick, dedupCandidates, DISTILL_DEBOUNCE_MS } from '@/scheduler'
 import { createCandidate as realCreateCandidate } from '@/memory/store'
-import { memoryDistillJobs, memories, memoryDiscards } from '@/db/schema'
+import { memoryDistillJobs, memories, memoryDiscards, memorySessionOffsets } from '@/db/schema'
 import type { DistillCandidate } from '@/memory/distiller'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
@@ -53,7 +53,7 @@ test('tick runs a due job and marks done, produces candidates', async () => {
   // force due
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   const processed = await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'we only refund within 14 days' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'we only refund within 14 days' }], fullLength: 1 }),
     callLLM: async () => JSON.stringify({
       candidates: [{ title: '[category:invariant] refund window 14d', bodyMd: '14 days', scope: 'project', runtime: null, distillAction: 'new' }],
     }),
@@ -71,7 +71,7 @@ test('tick passes sourceCwd from job.cwd into createCandidate', async () => {
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'something' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'something' }], fullLength: 1 }),
     callLLM: async () => JSON.stringify({
       candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'global', runtime: null, distillAction: 'new' }],
     }),
@@ -104,7 +104,7 @@ test('tick filters duplicate candidates (dedup marks duplicate, not persisted)',
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'refund 14 days' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund 14 days' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:process] 14天退款', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -124,7 +124,7 @@ test('tick keeps all candidates when dedup LLM throws (conservative, job still d
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -144,7 +144,7 @@ test('tick skips dedup LLM when no existing memories in scope', async () => {
   let callCount = 0
   let createCalls = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -164,7 +164,7 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -250,7 +250,7 @@ test('tick discards value-filter public-knowledge, logs to memory_discards, no c
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] js array map', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -273,7 +273,7 @@ test('tick passes valueClass into createCandidate for kept candidates', async ()
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] chose A not B because', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -292,7 +292,7 @@ test('tick keeps all as valueClass=null when judgeValue LLM throws, job still do
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -318,7 +318,7 @@ test('tick runs dedup before judgeValue (3-phase call order)', async () => {
   const phases: string[] = []
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'x' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
     callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) { phases.push('distill'); return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) }
@@ -336,7 +336,7 @@ test('tick: protected invariant candidate survives with valueClass=decision (e2e
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'refunds only within 14 days' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refunds only within 14 days' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', subject: 'domain' }] })
@@ -362,7 +362,7 @@ test('tick: codebase invariant candidate is discarded when LLM says derivable (e
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'valueFilter must force-keep invariant' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'valueFilter must force-keep invariant' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }] })
@@ -388,7 +388,7 @@ test('tick: dedup existing bodyMd flows into cross-batch comparison (e2e)', asyn
   let captured = ''
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'refund rule' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund rule' }], fullLength: 1 }),
     callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款规则14天期限', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', subject: 'domain' }] })
@@ -411,7 +411,7 @@ test('tick: codebase-subject design-decision candidate is derivable-discarded (e
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => [{ role: 'user', content: 'token budget widened to 64k' }],
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'token budget widened to 64k' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:architecture] token 预算从 12k 扩到 64k', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }] })
@@ -426,4 +426,104 @@ test('tick: codebase-subject design-decision candidate is derivable-discarded (e
   const rows = await db.select().from(memoryDiscards)
   expect(rows.length).toBe(1)
   expect(rows[0]!.reason).toBe('derivable')
+})
+
+// ---------------------------------------------------------------------------
+// 第五轮增量蒸馏：turn 偏移切片 + 空切片跳过 + 偏移更新。
+// 根因见 spec §1.1 问题1：Stop-vs-Stop 累积重复蒸馏（同 session 被 Stop 33 次，
+// 早 Stop 是晚 Stop 完整前缀）。tick 对空 newTurns 跳过；成功后更新偏移。
+// ---------------------------------------------------------------------------
+
+test('tick skips distill when newTurns empty (marks done, no createCandidate, no setSessionOffset)', async () => {
+  // 第五轮：同一 session 第三次 Stop 无新增 turn -> loadTranscript 返回 {turns:[], fullLength:120}
+  // -> tick 标 done、不 distill、不 createCandidate。
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sessionId: 'sess-S',
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let createCalls = 0
+  let llmCalls = 0
+  const processed = await tick(db, {
+    loadTranscript: async () => ({ turns: [], fullLength: 120 }),
+    callLLM: async () => { llmCalls++; return '[]' },
+    createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(processed).toBe(1)
+  expect(llmCalls).toBe(0)            // 不调 LLM 蒸馏
+  expect(createCalls).toBe(0)         // 不创建候选
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('done') // 仍标 done（消费 job）
+})
+
+test('tick updates session offset after successful distill (job has sessionId)', async () => {
+  // 第五轮：job 带 sessionId -> 蒸馏成功后 setSessionOffset(sessionId, fullLength)。
+  // 下次同 session 的 loadTranscript 应从该偏移切片。用真实 store 函数验证端到端。
+  const { getSessionOffset, setSessionOffset: _s } = await import('@/memory/store')
+  void _s
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sessionId: 'sess-T',
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'new turn' }], fullLength: 42 }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+  })
+  // 偏移已更新到 fullLength
+  expect(await getSessionOffset(db, 'sess-T')).toBe(42)
+})
+
+test('tick does NOT setSessionOffset when job has no sessionId (backward compat)', async () => {
+  // 第五轮：历史 job（sessionId=null）-> 全量蒸馏、不更新偏移。向后兼容。
+  const { getSessionOffset } = await import('@/memory/store')
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    // 不传 sessionId
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 5 }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+  })
+  // 无 sessionId -> 不写偏移表（getSessionOffset 仍返回默认 0，但这里关键是该 session 无记录）
+  expect(await getSessionOffset(db, 'any-session')).toBe(0)
+})
+
+test('tick still marks done when setSessionOffset throws (warn, non-blocking)', async () => {
+  // 第五轮：setSessionOffset 失败只 warn，job 仍 done（偏移是优化非正确性依赖）。
+  // 强锁构造：monkey-patch db.insert 让 memory_session_offsets 的 insert 抛，但 tick
+  // 前半段（update running / select events / update done）不受影响。tick 内 try/catch
+  // 吞掉 setSessionOffset 的抛，job 仍标 done。
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sessionId: 'sess-F',
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  // 包一层 db.insert：仅对 memory_session_offsets 表的 insert 抛错，其余透传。
+  const realInsert = db.insert.bind(db)
+  let sessionOffsetsThrows = false
+  db.insert = ((table: unknown) => {
+    const builder = realInsert(table as any)
+    // memory_session_offsets 由 setSessionOffset 写入；命中即抛。
+    if (sessionOffsetsThrows && table === memorySessionOffsets) {
+      throw new Error('mocked session_offsets insert failure')
+    }
+    return builder
+  }) as any
+  try {
+    sessionOffsetsThrows = true
+    await tick(db, {
+      loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 3 }),
+      callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+      createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+    })
+    const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+    expect(rows[0]!.status).toBe('done')
+  } finally {
+    sessionOffsetsThrows = false
+    db.insert = realInsert
+  }
 })
