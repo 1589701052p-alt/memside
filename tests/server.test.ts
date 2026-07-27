@@ -122,10 +122,12 @@ test('collector acks 202 even when enqueue rejects, and broadcasts memory.enqueu
   expect(bc.some((m: any) => m.type === 'memory.enqueue.failed' && m.sourceEventId === 'e-reject')).toBe(true)
 })
 
-test('collector PostToolUse marks sourceKind error', async () => {
-  // PostToolUse events carry error signals; the collector must tag them
-  // sourceKind='error' so the distiller routes to the error-signal prompt path.
-  // C3: writes a real JSONL fixture with a tool_result is_error=true turn.
+test('collector PostToolUse is skipped (no distill, no event, no job, no broadcast)', async () => {
+  // 第四轮：PostToolUse transcript 是累积式全量，与 Stop transcript 前缀重叠，
+  // 每次 tool call 一个 job 导致同一段会话被重复蒸馏（同义候选爆炸）。
+  // PostToolUse 不再蒸馏--Stop transcript 已含全部 tool_result（含 error），
+  // 错误信号由 distiller 内 detectErrorSignals 从 Stop transcript 提取。
+  // 即使带 transcript_path + is_error turn，也直接 202 跳过，不产生任何副作用。
   const fixturePath = writeJsonlFixture('posttool.jsonl', {
     type: 'user',
     message: {
@@ -133,21 +135,19 @@ test('collector PostToolUse marks sourceKind error', async () => {
       content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'err', is_error: true }],
     },
   })
+  const beforeEvents = await db.select().from(memoryDistillEvents)
   const r = await req('/hooks/claude/PostToolUse', {
     method: 'POST',
     body: JSON.stringify({ sourceEventId: 'e2', cwd: '/r', transcript_path: fixturePath }),
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
-  // C1 fix: sourceKind is persisted as `kind` on the memory_distill_events row
-  // (previously asserted on the vestigial adapter.pushCapture queue).
+  // 等待 fire-and-forget 路径（若误走）写出 event
   await new Promise((res) => setTimeout(res, 50))
   const events = await db.select().from(memoryDistillEvents)
-  expect(events.length).toBe(1)
-  expect(events[0]!.kind).toBe('error')
-  // C3 lock: the real tool_result turn was parsed and stored.
-  expect(events[0]!.payload).toContain('"role":"tool"')
-  expect(events[0]!.payload).toContain('"isError":true')
+  expect(events.length).toBe(beforeEvents.length)  // 不存 event
+  expect(enqueueCalls.length).toBe(0)               // 不 enqueue job
+  expect(broadcastCalls.length).toBe(0)             // 不 broadcast（连 memory.capture 都不发）
 })
 
 test('collector SessionStart returns hookSpecificOutput envelope when memories exist (C2)', async () => {
