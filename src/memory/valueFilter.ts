@@ -128,15 +128,12 @@ function valueShouldRetry(n: number): (parsed: unknown) => string | null {
 }
 
 /**
- * Classify each candidate into one of 6 categories (rules 1-6). Code maps
- * public-knowledge/derivable => discard, decision/convention/trap/topology =>
- * keep with valueClass. No valid classification (LLM error / non-JSON / missing
- * verdicts / missing index / hallucinated category / retries exhausted) => keep
- * with valueClass=null (unevaluated): discard requires a positive rule-1/2
- * classification; absent that, keep. Never throws, never blocks distill (mirrors
- * dedup's judgeDuplicates).
+ * Existing value-classification logic (rounds 1-3): keepNull fallback + LLM 6-class
+ * classify + protected-category force-keep. Behavior identical to pre-fix6 judgeValue.
+ * Extracted (fix6) so judgeValue can layer the taming override on top without touching
+ * this logic - see I3-style specific-source guard sensitivity in STATE.md.
  */
-export async function judgeValue(
+async function judgeValueBase(
   candidates: DistillCandidate[],
   callLLM: LLMCall,
 ): Promise<ValueVerdict[]> {
@@ -184,4 +181,30 @@ export async function judgeValue(
   } catch {
     return keepNull()
   }
+}
+
+/**
+ * Classify each candidate into one of 6 categories (rules 1-6) + apply taming override
+ * (fix6). Code maps public-knowledge/derivable => discard, decision/convention/trap/
+ * topology => keep with valueClass; protected categories (invariant/integration/
+ * compliance × subject=domain) are force-kept with valueClass='decision' inside
+ * judgeValueBase. judgeValueBase swallows its own LLM errors (all keep+null/decision),
+ * never bubbles. The taming override (fix6) runs last and overrides protected force-keep
+ * (safety > protection): a taming instruction is discarded even if mislabeled invariant.
+ */
+export async function judgeValue(
+  candidates: DistillCandidate[],
+  callLLM: LLMCall,
+): Promise<ValueVerdict[]> {
+  const n = candidates.length
+  if (n === 0) return []
+  const base = await judgeValueBase(candidates, callLLM)
+  // 第六轮第 4 项：taming override，最后跑，覆盖 protected force-keep（安全 > 保护）。
+  // 驯化指令即使被误标 [category:invariant] subject=domain，仍丢弃--合法 business
+  // invariant 不会含反馈压制词，无现实冲突。
+  return base.map((v, i) =>
+    detectTaming(candidates[i]!.title, candidates[i]!.bodyMd)
+      ? { index: i, keep: false, reason: 'taming' }
+      : v
+  )
 }
