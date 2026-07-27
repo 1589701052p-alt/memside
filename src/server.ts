@@ -108,7 +108,7 @@ export function createApp(deps: AppDeps) {
       return c.json({ ok: true }, 202)
     }
 
-    // Stop / SubagentStop (C3 fix): claude code pipes
+    // Stop (C3 fix): claude code pipes
     // `transcript_path` (a JSONL file path, NOT an inline array). The old code
     // read `body.transcript` (inline) which is always undefined in production
     // -> turns=[] -> empty payload stored -> distiller got nothing. Tests
