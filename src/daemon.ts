@@ -5,7 +5,7 @@ import type { DbClient } from '@/db/client'
 import { openDb } from '@/db/client'
 import { memoryDistillEvents, memoryDistillJobs } from '@/db/schema'
 import { tick, startMemoryDistillLoop, enqueueDistillJob, type TickDeps } from '@/scheduler'
-import { createCandidate } from '@/memory/store'
+import { createCandidate, getSessionOffset } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
 import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
@@ -39,7 +39,14 @@ export function makeLoadTranscript(db: DbClient): TickDeps['loadTranscript'] {
         if (Array.isArray(parsed)) for (const t of parsed) turns.push(t as TranscriptTurn)
       } catch { /* skip malformed payload */ }
     }
-    return turns
+    const fullLength = turns.length
+    // 无 sessionId（历史 job）-> 全量返回，向后兼容（不切片、不更新偏移）。
+    if (!job.sessionId) return { turns, fullLength }
+    // 有 sessionId -> 查偏移切片。getSessionOffset 失败降级全量（不阻塞蒸馏）。
+    let offset = 0
+    try { offset = await getSessionOffset(db, job.sessionId) }
+    catch (e) { console.warn('memside: getSessionOffset failed, degrading to full', e); return { turns, fullLength } }
+    return { turns: turns.slice(offset), fullLength }
   }
 }
 

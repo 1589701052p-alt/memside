@@ -18,7 +18,7 @@ let dir = ''
 let db: ReturnType<typeof openDb>
 let app: ReturnType<typeof createApp>
 let adapter: ClaudeCodeAdapter
-let enqueueCalls: { sourceEventId: string; runtime: string; cwd: string; debounceKey: string }[]
+let enqueueCalls: { sourceEventId: string; runtime: string; cwd: string; debounceKey: string; sessionId?: string }[]
 let broadcastCalls: unknown[]
 
 beforeAll(() => {
@@ -148,6 +148,62 @@ test('collector PostToolUse is skipped (no distill, no event, no job, no broadca
   expect(events.length).toBe(beforeEvents.length)  // 不存 event
   expect(enqueueCalls.length).toBe(0)               // 不 enqueue job
   expect(broadcastCalls.length).toBe(0)             // 不 broadcast（连 memory.capture 都不发）
+})
+
+test('collector SubagentStop is skipped (no distill, no event, no job, no broadcast)', async () => {
+  // 第五轮：SubagentStop 的 transcript_path 指向主会话 JSONL（不是独立子会话），
+  // 与同 session 的 Stop 蒸馏同一段会话（firstUser 一致、turns 数几乎相同），纯重复。
+  // SubagentStop 无独有价值，早返回 202 不蒸馏。与 PostToolUse 跳过对称。
+  const fixturePath = writeJsonlFixture('subagent.jsonl', {
+    type: 'user',
+    message: { role: 'user', content: 'subagent transcript is main session' },
+  })
+  const beforeEvents = await db.select().from(memoryDistillEvents)
+  const r = await req('/hooks/claude/SubagentStop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e3', cwd: '/r', transcript_path: fixturePath, session_id: 'sess-1' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  await new Promise((res) => setTimeout(res, 50))
+  const events = await db.select().from(memoryDistillEvents)
+  expect(events.length).toBe(beforeEvents.length)  // 不存 event
+  expect(enqueueCalls.length).toBe(0)               // 不 enqueue job
+  expect(broadcastCalls.length).toBe(0)             // 不 broadcast
+})
+
+test('collector Stop reads session_id and passes it to enqueueDistillJob', async () => {
+  // 第五轮：hook payload 的 session_id 是增量蒸馏的会话键。server.ts 必须读取并
+  // 传入 enqueueDistillJob，否则 tick 无法按 session 切片偏移。
+  const fixturePath = writeJsonlFixture('stop-sid.jsonl', {
+    type: 'user',
+    message: { role: 'user', content: 'stop with session id' },
+  })
+  const r = await req('/hooks/claude/Stop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e4', cwd: '/r', transcript_path: fixturePath, session_id: 'sess-abc' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  expect(enqueueCalls.length).toBe(1)
+  expect(enqueueCalls[0]!.sessionId).toBe('sess-abc')
+})
+
+test('collector Stop without session_id still enqueues (backward compat)', async () => {
+  // 第五轮：历史/无 session_id 的 Stop 仍正常 enqueue（sessionId 为空），
+  // tick 走全量蒸馏路径。向后兼容。
+  const fixturePath = writeJsonlFixture('stop-nosid.jsonl', {
+    type: 'user',
+    message: { role: 'user', content: 'stop no session id' },
+  })
+  const r = await req('/hooks/claude/Stop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e5', cwd: '/r', transcript_path: fixturePath }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  expect(enqueueCalls.length).toBe(1)
+  expect(enqueueCalls[0]!.sessionId).toBe('')  // 空 session_id -> 空串
 })
 
 test('collector SessionStart returns hookSpecificOutput envelope when memories exist (C2)', async () => {

@@ -43,6 +43,7 @@ export const memoryDistillJobs = sqliteTable(
     sourceEventId: text('source_event_id').notNull(),
     runtime: text('runtime', { enum: ['claude-code', 'opencode'] }).notNull(),
     cwd: text('cwd'), // project scope resolver input
+    sessionId: text('session_id'), // 第五轮：claude code hook payload 的 session_id，增量偏移键
     scopeResolvedJson: text('scope_resolved_json'), // {projectId, includeGlobal}
     status: text('status', {
       enum: ['pending', 'running', 'done', 'failed', 'canceled'],
@@ -56,6 +57,7 @@ export const memoryDistillJobs = sqliteTable(
   (t) => ({
     statusNextIdx: index('idx_distill_jobs_status_next').on(t.status, t.nextRunAt),
     debounceIdx: index('idx_distill_jobs_debounce').on(t.debounceKey, t.status),
+    sessionIdx: index('idx_distill_jobs_session').on(t.sessionId),
   }),
 )
 
@@ -91,4 +93,13 @@ export const memoryDiscards = sqliteTable(
   (t) => ({
     tsIdx: index('idx_discards_ts').on(t.ts),
   }),
+)
+
+export const memorySessionOffsets = sqliteTable(
+  'memory_session_offsets',
+  {
+    sessionId: text('session_id').primaryKey(),
+    lastTurnOffset: integer('last_turn_offset').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
 )

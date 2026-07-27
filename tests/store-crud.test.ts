@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDiscards } from '@/db/schema'
-import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards } from '@/memory/store'
+import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards, getSessionOffset, setSessionOffset } from '@/memory/store'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
@@ -165,4 +165,19 @@ test('logDiscards is a no-op on empty list', async () => {
   await logDiscards(db, 'j2', [])
   const rows = await db.select().from(memoryDiscards)
   expect(rows.length).toBe(0)
+})
+
+test('getSessionOffset returns 0 for unknown session (first distill = full)', async () => {
+  // 第五轮：首次蒸馏无偏移记录 -> 返回 0 -> loadTranscript 全量切片。
+  // 这是增量蒸馏的"首次全量"入口，必须默认 0 而非抛错。
+  expect(await getSessionOffset(db, 'never-seen-session')).toBe(0)
+})
+
+test('setSessionOffset UPSERTs: second write overwrites; getSessionOffset reads it back', async () => {
+  // 第五轮：同一 session 多次 Stop，每次蒸馏后偏移推进。UPSERT 保证不抛主键冲突。
+  await setSessionOffset(db, 'sess-A', 36)
+  expect(await getSessionOffset(db, 'sess-A')).toBe(36)
+  // 第二次 Stop 蒸馏到 120 -> 覆盖
+  await setSessionOffset(db, 'sess-A', 120)
+  expect(await getSessionOffset(db, 'sess-A')).toBe(120)
 })

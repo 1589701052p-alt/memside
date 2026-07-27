@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards } from './schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets } from './schema'
 
 export type DbClient = ReturnType<typeof openDb>
 
@@ -11,7 +11,7 @@ export function openDb(path: string) {
   const raw = new Database(path)
   raw.exec('PRAGMA journal_mode=WAL')
   raw.exec('PRAGMA synchronous=NORMAL')
-  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards } })
+  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets } })
   // Schema bootstrap (idempotent). DDL lives here so tests need no migration runner.
   raw.exec(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -43,6 +43,7 @@ export function openDb(path: string) {
       source_event_id TEXT NOT NULL,
       runtime TEXT NOT NULL,
       cwd TEXT,
+      session_id TEXT,
       scope_resolved_json TEXT,
       status TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0,
@@ -71,6 +72,11 @@ export function openDb(path: string) {
       ts INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_discards_ts ON memory_discards(ts);
+    CREATE TABLE IF NOT EXISTS memory_session_offsets (
+      session_id TEXT PRIMARY KEY,
+      last_turn_offset INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `)
   // Idempotent migration: add source_cwd to pre-existing memories tables.
   // CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so a column
@@ -90,6 +96,21 @@ export function openDb(path: string) {
     if (!cols.some((c) => c.name === 'value_class')) {
       raw.exec('ALTER TABLE memories ADD COLUMN value_class TEXT')
     }
+  }
+  // Idempotent migration: add session_id to pre-existing memory_distill_jobs.
+  // 第五轮增量蒸馏的会话键；历史 job 无此列 -> 升级后为 NULL -> 全量蒸馏（向后兼容）。
+  // 无 backfill（NULL 表示"未知会话"，全量蒸馏是安全默认）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'session_id')) {
+      raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN session_id TEXT')
+    }
+    // Index on session_id is created here (after the ALTER) rather than in the
+    // initial DDL block: CREATE TABLE IF NOT EXISTS is a no-op on pre-existing
+    // tables, so an index on session_id in the DDL would fail with "no such
+    // column" on round-4-and-earlier DBs before the ALTER runs. IF NOT EXISTS
+    // makes this idempotent across reopens.
+    raw.exec('CREATE INDEX IF NOT EXISTS idx_distill_jobs_session ON memory_distill_jobs(session_id)')
   }
   return db
 }

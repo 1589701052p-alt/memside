@@ -32,15 +32,19 @@ export interface AppDeps {
  *      ~ms) and returns directly - NOT fire-and-forget - because the hook's
  *      stdout IS the response body claude code reads. SessionStart is
  *      low-frequency so a few ms is fine.
- *    - `Stop` / `SubagentStop`: the <50ms ack contract holds - the handler
- *      returns 202 synchronously while a fire-and-forget IIFE
- *      (never awaited in the hot path) reads the JSONL file via
- *      `parseTranscriptFile`, persists the turns into `memory_distill_events`,
- *      and enqueues a distill job. `sourceKind` is `'conversation'`.
- *      `PostToolUse` is skipped entirely (early-returns 202 without
- *      parsing/enqueuing/broadcasting) - see the route handler. Its transcript
- *      is a cumulative prefix of Stop's, so distilling it would duplicate work;
- *      error signals still surface via detectErrorSignals on the Stop transcript.
+ *    - `Stop`: the <50ms ack contract holds - the handler returns 202
+ *      synchronously while a fire-and-forget IIFE (never awaited in the hot
+ *      path) reads the JSONL file via `parseTranscriptFile`, persists the turns
+ *      into `memory_distill_events`, and enqueues a distill job. `sourceKind`
+ *      is `'conversation'`. The hook payload's `session_id` is read and passed
+ *      to `enqueueDistillJob` so the scheduler can distill incrementally by turn
+ *      offset (round 5).
+ *      `PostToolUse` and `SubagentStop` are both skipped entirely (early-return
+ *      202 without parsing/enqueuing/broadcasting) - see the route handler.
+ *      PostToolUse's transcript is a cumulative prefix of Stop's; SubagentStop's
+ *      transcript_path points at the main session JSONL (not an isolated
+ *      sub-session), so it duplicates Stop. Error signals still surface via
+ *      detectErrorSignals on the Stop transcript.
  *
  * 2. Injector (`POST /inject`) - programmatic seam (the SessionStart hook
  *    itself goes through the collector branch above). Delegates to
@@ -60,8 +64,11 @@ export function createApp(deps: AppDeps) {
   // --- Collector ----------------------------------------------------------
   app.post('/hooks/claude/:event', async (c) => {
     const event = c.req.param('event')
-    const body = await c.req.json().catch(() => ({}) as { transcript_path?: string; cwd?: string; sourceEventId?: string })
+    const body = await c.req.json().catch(() => ({}) as {
+      transcript_path?: string; cwd?: string; sourceEventId?: string; session_id?: string
+    })
     const cwd: string = body.cwd ?? ''
+    const sessionId: string = body.session_id ?? ''
 
     // SessionStart (C2 fix): inject approved memories into the new session.
     // claude code honors ONLY the `hookSpecificOutput.additionalContext`
@@ -94,7 +101,14 @@ export function createApp(deps: AppDeps) {
       return c.json({ ok: true }, 202)
     }
 
-    // Stop / SubagentStop (C3 fix): claude code pipes
+    // SubagentStop 跳过（第五轮）：transcript_path 指向主会话 JSONL（不是独立子会话），
+    // 与同 session 的 Stop 蒸馏同一段会话（firstUser 一致、turns 数几乎相同），纯重复。
+    // SubagentStop 无独有价值，早返回 202 不蒸馏。
+    if (event === 'SubagentStop') {
+      return c.json({ ok: true }, 202)
+    }
+
+    // Stop (C3 fix): claude code pipes
     // `transcript_path` (a JSONL file path, NOT an inline array). The old code
     // read `body.transcript` (inline) which is always undefined in production
     // -> turns=[] -> empty payload stored -> distiller got nothing. Tests
@@ -124,7 +138,7 @@ export function createApp(deps: AppDeps) {
     void (async () => {
       try {
         const turns = transcriptPath ? parseTranscriptFile(transcriptPath) : []
-        const { jobId } = await deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey })
+        const { jobId } = await deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey, sessionId })
         await deps.db.insert(memoryDistillEvents).values({
           distillJobId: jobId,
           attemptIndex: 0,

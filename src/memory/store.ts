@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDiscards } from '@/db/schema'
+import { memories, memoryDiscards, memorySessionOffsets } from '@/db/schema'
 import {
   canTransition,
   type InjectableMemorySet,
@@ -346,4 +346,22 @@ export async function logDiscards(
       id: ulid(), distillJobId, title: d.title, bodyMd: d.bodyMd, reason: d.reason, ts,
     })),
   )
+}
+
+// ---------------------------------------------------------------------------
+// 第五轮：会话级 turn 偏移（增量蒸馏）。getSessionOffset 无记录返回 0（首次全量）；
+// setSessionOffset UPSERT（同 session 二次写覆盖）。偏移是优化非正确性依赖：
+// 读写失败由调用方（loadTranscript / tick）catch 降级，不阻塞蒸馏。
+// ---------------------------------------------------------------------------
+
+export async function getSessionOffset(db: DbClient, sessionId: string): Promise<number> {
+  const rows = await db.select().from(memorySessionOffsets)
+    .where(eq(memorySessionOffsets.sessionId, sessionId)).limit(1)
+  return rows.length > 0 ? (rows[0]!.lastTurnOffset as number) : 0
+}
+
+export async function setSessionOffset(db: DbClient, sessionId: string, offset: number): Promise<void> {
+  const now = Date.now()
+  await db.insert(memorySessionOffsets).values({ sessionId, lastTurnOffset: offset, updatedAt: now })
+    .onConflictDoUpdate({ target: memorySessionOffsets.sessionId, set: { lastTurnOffset: offset, updatedAt: now } })
 }
