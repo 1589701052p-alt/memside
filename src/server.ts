@@ -32,12 +32,15 @@ export interface AppDeps {
  *      ~ms) and returns directly - NOT fire-and-forget - because the hook's
  *      stdout IS the response body claude code reads. SessionStart is
  *      low-frequency so a few ms is fine.
- *    - `Stop` / `SubagentStop` / `PostToolUse`: the <50ms ack contract holds -
- *      the handler returns 202 synchronously while a fire-and-forget IIFE
+ *    - `Stop` / `SubagentStop`: the <50ms ack contract holds - the handler
+ *      returns 202 synchronously while a fire-and-forget IIFE
  *      (never awaited in the hot path) reads the JSONL file via
  *      `parseTranscriptFile`, persists the turns into `memory_distill_events`,
- *      and enqueues a distill job. `sourceKind` is `'conversation'` (PostToolUse
- *      is skipped entirely - see the early return in the route handler).
+ *      and enqueues a distill job. `sourceKind` is `'conversation'`.
+ *      `PostToolUse` is skipped entirely (early-returns 202 without
+ *      parsing/enqueuing/broadcasting) - see the route handler. Its transcript
+ *      is a cumulative prefix of Stop's, so distilling it would duplicate work;
+ *      error signals still surface via detectErrorSignals on the Stop transcript.
  *
  * 2. Injector (`POST /inject`) - programmatic seam (the SessionStart hook
  *    itself goes through the collector branch above). Delegates to
