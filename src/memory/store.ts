@@ -131,16 +131,17 @@ export const DEDUP_EXISTING_LIMIT = 50
 /**
  * Load same-scope candidate + approved memories for dedup comparison. project =
  * exact scopeId match; global = scopeId IS NULL. Returns approved (all) + candidate
- * (createdAt DESC LIMIT DEDUP_EXISTING_LIMIT), de-duped by id, projecting only
- * {id,title,scopeType,scopeId,status} (no body/runtime, to keep the dedup prompt
- * small). Other statuses (archived/rejected/superseded) excluded.
+ * (createdAt DESC LIMIT DEDUP_EXISTING_LIMIT), de-duped by id, projecting
+ * {id,title,bodyMd,scopeType,scopeId,status} (no runtime; bodyMd now included so
+ * cross-batch dedup sees full context per spec §3.4). Other statuses
+ * (archived/rejected/superseded) excluded.
  */
 export async function listForDedupByScope(
   db: DbClient,
   opts: { scopeType: MemoryScope; scopeId: string | null },
 ): Promise<ExistingMemoryForDedup[]> {
   const scopeClause = opts.scopeId === null ? isNull(memories.scopeId) : eq(memories.scopeId, opts.scopeId)
-  const cols = { id: memories.id, title: memories.title, scopeType: memories.scopeType, scopeId: memories.scopeId, status: memories.status }
+  const cols = { id: memories.id, title: memories.title, bodyMd: memories.bodyMd, scopeType: memories.scopeType, scopeId: memories.scopeId, status: memories.status }
   const approvedRows = await db.select(cols).from(memories).where(
     and(eq(memories.scopeType, opts.scopeType), scopeClause, eq(memories.status, 'approved')),
   ).orderBy(desc(memories.createdAt)).all()
@@ -152,7 +153,7 @@ export async function listForDedupByScope(
   for (const r of [...approvedRows, ...candidateRows]) {
     if (seen.has(r.id)) continue
     seen.add(r.id)
-    out.push({ id: r.id, title: r.title, scopeType: r.scopeType as MemoryScope, scopeId: r.scopeId, status: r.status as MemoryStatus })
+    out.push({ id: r.id, title: r.title, bodyMd: r.bodyMd, scopeType: r.scopeType as MemoryScope, scopeId: r.scopeId, status: r.status as MemoryStatus })
   }
   return out
 }

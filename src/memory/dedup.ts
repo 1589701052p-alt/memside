@@ -6,6 +6,7 @@ import type { LLMCall } from '@/llm'
 export interface ExistingMemoryForDedup {
   id: string
   title: string
+  bodyMd: string
   scopeType: MemoryScope
   scopeId: string | null
   status: MemoryStatus
@@ -23,6 +24,11 @@ export type DedupVerdict =
 
 export const DEDUP_SYSTEM_PROMPT = `You are memside-dedup. Decide whether each new candidate memory is a SEMANTIC DUPLICATE of any other item in the same scope — the same rule or fact, even if worded differently or tagged with a different [category:] prefix.
 
+同一规则从"为什么这么做 / 实现要点 / 触发条件"等不同角度各写一条，仍是重复--只保留最完整的一条。例如以下三条都表达同一规则，只有第一条应保留：
+  [category:invariant] 退款须在发货后14天内
+  [category:invariant] 退款规则的14天期限不可被LLM以derivable丢弃
+  [category:compliance] 14天退款窗口必须强制保留并标记valueClass
+
 Compare each new candidate against BOTH (a) the existing memories listed below, and (b) its same-batch siblings (the other new candidates). A new candidate is a duplicate if it restates the same rule as an existing memory OR as an earlier new candidate (new-j where j < i).
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
@@ -37,7 +43,7 @@ Emit one verdict per new candidate, keyed by its index. duplicateOfId MUST be ei
 
 function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingMemoryForDedup[]): string {
   const exLines = existing.length > 0
-    ? existing.map((e) => `id=${e.id} | ${e.title}`).join('\n')
+    ? existing.map((e) => `id=${e.id} | ${e.title}\n${e.bodyMd}`).join('\n')
     : '(none)'
   const newLines = newCandidates.map((c, i) => `id=new-${i} | ${c.title}\n${c.bodyMd}`).join('\n---\n')
   return `Existing memories (same scope):\n${exLines}\n\nNew candidates:\n${newLines}\n\nReturn JSON per the system instructions.`

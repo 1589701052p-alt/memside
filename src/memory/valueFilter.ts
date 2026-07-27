@@ -102,7 +102,8 @@ export async function judgeValue(
   const keepNull = (): ValueVerdict[] =>
     candidates.map((c, i) => {
       const cat = parseCategory(c.title)
-      return (cat && VALUE_PROTECTED_CATEGORIES.has(cat))
+      const subj = c.subject === 'domain' ? 'domain' : 'codebase'
+      return (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain')
         ? { index: i, keep: true, valueClass: 'decision' as ValueClass }
         : { index: i, keep: true, valueClass: null }
     })
@@ -131,7 +132,8 @@ export async function judgeValue(
     }
     return candidates.map((c, i) => {
       const cat = parseCategory(c.title)
-      if (cat && VALUE_PROTECTED_CATEGORIES.has(cat)) {
+      const subj = c.subject === 'domain' ? 'domain' : 'codebase'
+      if (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain') {
         return { index: i, keep: true, valueClass: 'decision' as ValueClass }
       }
       return byIndex.get(i) ?? { index: i, keep: true, valueClass: null }

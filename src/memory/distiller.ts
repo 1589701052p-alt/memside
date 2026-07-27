@@ -10,7 +10,7 @@ Aggressively favor durable BUSINESS and ARCHITECTURE knowledge over fleeting wor
 
 Write a matching category as a "[category:xxx]" prefix on each candidate title:
 1. [category:domain-glossary] - concept definitions specific to this product or domain
-2. [category:invariant] - hard business rules / constraints that must always hold
+2. [category:invariant] - hard business rules about the user's DOMAIN (NOT about this codebase's own implementation) that must always hold
 3. [category:process] - business workflows, state machines, ordering / dependency constraints
 4. [category:architecture] - technical / design decisions WITH rationale ("why" is load-bearing)
 5. [category:integration] - external system contracts, SLAs, idempotency / retry conventions
@@ -19,6 +19,15 @@ Write a matching category as a "[category:xxx]" prefix on each candidate title:
 8. [category:anti-pattern] - known failure modes / what NOT to do (from tool failures / user corrections)
 9. [category:convention] - stable team / reviewer preferences a future agent should respect
 10. [category:quality-bar] - what counts as "done" in this project
+
+对每条候选标记 subject：
+- codebase = 这条规则描述的是当前仓库自身的代码、配置、模块行为或实现逻辑。
+  判据：规则的主语是仓库内的具体组件/符号/流程（如 valueFilter、daemon、scheduler、
+  某个函数的调用约定）。脱离这个仓库，规则就失去所指对象。
+- domain = 这条规则描述的是仓库之外的东西：用户的业务规则、外部系统契约、法规约束、
+  跨项目的领域知识。判据：换一个仓库这条规则依然成立、依然有意义。
+
+拿不准时标 codebase。
 
 Cross-cutting properties:
 - atomic and generalizable; survives outside the event that produced it.
@@ -38,7 +47,8 @@ Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部�
       "bodyMd": "项目约定：PR 合并前需在 CHANGELOG.md 的 Unreleased 段落补充变更条目。",
       "scope": "project",
       "runtime": "claude-code",
-      "distillAction": "new"
+      "distillAction": "new",
+      "subject": "codebase"
     }
   ]
 }`
@@ -49,6 +59,10 @@ export interface DistillCandidate {
   scopeType: MemoryScope
   runtime: RuntimeTag
   distillAction: 'new' | 'update_of' | 'duplicate_of' | 'conflict_with'
+  /** 瞬态：规则对象是当前仓库自身代码(codebase) 还是外部业务领域(domain)。
+   *  valueFilter 条件门据此决定是否强制保留 protected category。不入库。
+   *  distiller 漏标/非法时默认 'codebase'（精度优先：不保护）。 */
+  subject: 'codebase' | 'domain'
 }
 
 export interface DistillInput {
@@ -88,6 +102,10 @@ function distillShouldRetry(parsed: unknown): string | null {
     if (!c.title.includes('[category:')) {
       return `候选 ${i} 的 title 缺少 [category:xxx] 前缀`
     }
+    const subj = (c as { subject?: unknown }).subject
+    if (subj !== undefined && subj !== 'codebase' && subj !== 'domain') {
+      return `候选 ${i} 的 subject 非法（必须是 codebase 或 domain）`
+    }
   }
   return null
 }
@@ -118,12 +136,16 @@ export async function distillTranscript(input: DistillInput): Promise<DistillCan
         o.distillAction === 'conflict_with'
           ? o.distillAction
           : 'new'
+      const rawSubject = o.subject
+      const subject: 'codebase' | 'domain' =
+        rawSubject === 'domain' ? 'domain' : 'codebase'
       out.push({
         title: o.title,
         bodyMd: o.bodyMd,
         scopeType: scope,
         runtime: rt as RuntimeTag,
         distillAction: action,
+        subject,
       })
     }
     return out

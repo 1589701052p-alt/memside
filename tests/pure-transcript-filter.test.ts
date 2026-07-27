@@ -21,10 +21,10 @@ test('Read tool result (isError) -> content unchanged', () => {
   expect(out[0]!.content).toBe(src)
 })
 
-test('Bash tool result -> truncated to 1500 + suffix', () => {
-  const src = 'x'.repeat(3000)
+test('Bash tool result -> truncated to 3000 + suffix', () => {
+  const src = 'x'.repeat(5000)
   const out = filterTranscriptForDistill([tool({ content: src, toolName: 'Bash' })])
-  expect(out[0]!.content.length).toBe(1500 + '…[truncated]'.length)
+  expect(out[0]!.content.length).toBe(3000 + '…[truncated]'.length)
   expect(out[0]!.content).toContain('…[truncated]')
 })
 
@@ -40,14 +40,14 @@ test('old payload (no toolName) long + no code feature -> truncated', () => {
   expect(out[0]!.content).toContain('…[truncated]')
 })
 
-test('user/assistant over 4000 chars -> truncated', () => {
-  const big = 'u'.repeat(5000)
+test('user/assistant over 8000 chars -> truncated', () => {
+  const big = 'u'.repeat(10000)
   const out = filterTranscriptForDistill([
     { role: 'user', content: big },
     { role: 'assistant', content: big },
   ])
-  expect(out[0]!.content.length).toBe(4000 + '…[truncated]'.length)
-  expect(out[1]!.content.length).toBe(4000 + '…[truncated]'.length)
+  expect(out[0]!.content.length).toBe(8000 + '…[truncated]'.length)
+  expect(out[1]!.content.length).toBe(8000 + '…[truncated]'.length)
 })
 
 test('budget: drops oldest lowest-priority first; user + error kept; recent kept over old', () => {
@@ -72,6 +72,20 @@ test('never throws on weird input', () => {
   expect(() => filterTranscriptForDistill([])).not.toThrow()
 })
 
-test('DEFAULT_DISTILL_INPUT_BUDGET_TOKENS is 12000', () => {
-  expect(DEFAULT_DISTILL_INPUT_BUDGET_TOKENS).toBe(12000)
+test('DEFAULT_DISTILL_INPUT_BUDGET_TOKENS is 64000 (second-round widen)', () => {
+  // TDD（第二轮）：用户确认不省 token，预算 12k->64k 给 distiller 更完整上下文判
+  // subject/category。见 spec §3.5。
+  expect(DEFAULT_DISTILL_INPUT_BUDGET_TOKENS).toBe(64000)
+})
+
+test('per-turn caps widened: non-tool 8000, tool 3000', async () => {
+  // TDD：cap 翻倍。非文件 tool 结果截断到 3000；user/assistant 截断到 8000。
+  const longTool = 'x'.repeat(5000)
+  const longUser = 'y'.repeat(10000)
+  const out = filterTranscriptForDistill([
+    { role: 'tool', content: longTool, toolName: 'Bash' },
+    { role: 'user', content: longUser },
+  ])
+  expect(out[0]!.content.length).toBeLessThanOrEqual(3000 + '…[truncated]'.length)
+  expect(out[1]!.content.length).toBeLessThanOrEqual(8000 + '…[truncated]'.length)
 })
