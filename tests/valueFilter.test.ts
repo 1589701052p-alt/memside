@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VALUE_PROTECTED_CATEGORIES } from '@/memory/valueFilter'
+import { detectTaming, judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VALUE_PROTECTED_CATEGORIES } from '@/memory/valueFilter'
 import type { DistillCandidate } from '@/memory/distiller'
 
 const cand = (title: string, bodyMd = 'b'): DistillCandidate =>
@@ -200,6 +200,49 @@ test('subject gate: domain invariant still force-kept even when LLM throws', asy
   expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
 })
 
+// ---------------------------------------------------------------------------
+// 第六轮第 4 项：驯化守卫 - detectTaming 确定性关键词检测。
+// 匹配「要求 agent 压制诚实反馈 / 永远赞同 / foster 依赖」类指令。精度优先
+// （liberal-capture 立场）：宁可漏隐晦驯化（留给人工审批），不可误杀合法 convention。
+// 短语限定在「反馈/评价动词」，不碰任务规则动词（use/commit/run）。
+// ---------------------------------------------------------------------------
+
+test('detectTaming flags A-category taming (suppress disagreement, zh+en)', () => {
+  expect(detectTaming('[category:convention] 以后不要质疑我的代码风格', 'b')).toBe(true)
+  expect(detectTaming('[category:convention] code style', 'never criticize my code')).toBe(true)
+  expect(detectTaming('[category:convention] 别反驳我', 'b')).toBe(true)
+  expect(detectTaming("[category:convention] don't push back", 'b')).toBe(true)
+})
+
+test('detectTaming flags B/C/D-category taming', () => {
+  expect(detectTaming('[category:convention] 永远同意我的决定', 'b')).toBe(true)  // B 要求赞同
+  expect(detectTaming('[category:convention] x', 'always validate my choices')).toBe(true)  // B
+  expect(detectTaming('[category:convention] 不要指出问题', 'b')).toBe(true)  // C 压制评价
+  expect(detectTaming("[category:convention] don't give negative feedback", 'b')).toBe(true)  // C
+  expect(detectTaming('[category:convention] 角色扮演我的搭档', 'b')).toBe(true)  // D 依赖/角色扮演
+  expect(detectTaming('[category:convention] x', 'roleplay as my pair')).toBe(true)  // D
+})
+
+test('detectTaming does NOT flag legitimate conventions (precision over recall)', () => {
+  // 合法 convention 用任务规则动词（use/commit/run/skip/follow），不含反馈压制语义，不可误杀。
+  expect(detectTaming('[category:convention] always use bun', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] do not commit to master', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] PR 必须加测试', 'b')).toBe(false)
+  expect(detectTaming('[category:quality-bar] never skip tests', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] follow the style guide', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] always run typecheck before push', 'b')).toBe(false)
+})
+
+test('detectTaming scans both title and bodyMd', () => {
+  expect(detectTaming('clean title', '以后不要质疑我')).toBe(true)
+  expect(detectTaming('以后不要质疑我', 'clean body')).toBe(true)
+})
+
+test('detectTaming returns false on empty and never throws', () => {
+  expect(detectTaming('', '')).toBe(false)
+  expect(detectTaming('[category:x] no taming here', 'just a normal rule')).toBe(false)
+})
+
 test('judgeValue user prompt includes subject hint per candidate', async () => {
   // TDD（第三轮 §C）：valueFilter 判 derivable 缺"当前仓库"参照系。把 distiller 的
   // subject 信号透传到 user prompt，LLM 拿到 codebase/domain 标记后判 derivable 更准。
@@ -225,4 +268,51 @@ test('VALUE_JUDGE_SYSTEM_PROMPT has subject hint neutral description', () => {
   expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('subject hint')
   expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('codebase-subject candidate')
   expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('design decisions')
+})
+
+// ---------------------------------------------------------------------------
+// 第六轮第 4 项：judgeValue taming override 集成。
+// judgeValueBase（旧逻辑）跑完后，末尾一道 map 用 detectTaming 覆盖：驯化候选
+// 一律 {keep:false, reason:'taming'}，覆盖 protected force-keep（安全 > 保护）。
+// ---------------------------------------------------------------------------
+
+test('judgeValue overrides taming candidate to discard regardless of LLM verdict', async () => {
+  // LLM 可能把驯化指令判成 convention(keep)；judgeValue override 成 discard。
+  const c: DistillCandidate = { title: '[category:convention] 以后不要质疑我的代码风格', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'convention' }))
+  expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
+})
+
+test('judgeValue taming + non-taming mixed batch: taming discarded, rest classified', async () => {
+  const taming: DistillCandidate = { title: '[category:convention] 永远同意我', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const normal: DistillCandidate = { title: '[category:convention] PR 必须加测试', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const v = await judgeValue([taming, normal], async () => verdictsJson(
+    { index: 0, category: 'convention' },
+    { index: 1, category: 'convention' },
+  ))
+  expect(v).toEqual([
+    { index: 0, keep: false, reason: 'taming' },
+    { index: 1, keep: true, valueClass: 'convention' },
+  ])
+})
+
+test('judgeValue taming overrides protected force-keep (safety > protection)', async () => {
+  // 关键回归：驯化指令即使被误标 [category:invariant] subject=domain，protected
+  // force-keep 本会救回（keep+decision），但 taming override 覆盖它 -> 丢弃。
+  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
+  expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
+})
+
+test('judgeValue taming overrides keepNull protected path (LLM throw)', async () => {
+  // keepNull 路径（LLM throw）的 protected force-keep 也被 taming override 覆盖。
+  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const v = await judgeValue([c], async () => { throw new Error('down') })
+  expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
+})
+
+test('judgeValue non-taming protected invariant still force-kept (no regression)', async () => {
+  // 回归：非驯化的 protected invariant 仍 force-keep（title 不含 taming 短语，override 不触发）。
+  const v = await judgeValue([prot('invariant')], async () => verdictsJson({ index: 0, category: 'derivable' }))
+  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
 })

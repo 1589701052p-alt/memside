@@ -326,7 +326,7 @@ export async function unarchiveMemory(db: DbClient, id: string): Promise<Memory>
 export interface DiscardRecord {
   title: string
   bodyMd: string
-  reason: 'public-knowledge' | 'derivable'
+  reason: 'public-knowledge' | 'derivable' | 'taming'
 }
 
 /**

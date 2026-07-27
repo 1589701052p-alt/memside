@@ -48,8 +48,16 @@ Cross-cutting properties:
 - includes the *why* whenever rationale appears in the event.
 - bodyMd at most ~400 characters; title <= 120 chars including the prefix.
 
-REJECT (emit nothing) if the content is a fleeting status update, mood, or one-off acknowledgement.
-Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部实现、配置默认值、符号名）--这些可从仓库源码重新推导，不是持久记忆。把记忆锚定到用户或领域明确陈述的规则、决策与约束；不要总结 agent 读到的文件内容。
+Origin discipline（[stated] 起源判定）：只记用户或领域在会话中明确陈述的持久事实、规则、决策与约束。REJECT (emit nothing) 以下六类非陈述内容--它们不是用户/领域陈述的事实，不该当作记忆：
+1. 你自己推出的结论或推断（用户没明说，是你脑补的因果、意图或规律）。
+2. 前瞻状态、待办、下一步计划（"以后要 X"、"接下来做 Y"）--这些是意图、非已成事实，会过期。
+3. 研究输出：搜索结果、文档摘录、你给出的建议或方案（agent 产出，非用户陈述）。
+4. 对用户原话的丰富化或升级（用户说"用 bun"，你写成"用户强烈推崇 bun 生态"）。
+5. 道听途说（"听说 X"、"人们说 Y"），非用户直接陈述。
+6. 你自己的推理或建议过程（即使被用户采纳，记用户的最终决策，不记你的推理链）。
+
+REJECT fleeting status updates, moods, one-off acknowledgements.
+Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部实现、配置默认值、符号名）--这些可从仓库源码重新推导，不是持久记忆。不要总结 agent 读到的文件内容。
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，不要 markdown 围栏，不要在 JSON 前后加任何解释文字，键与字符串值用双引号，最后一个属性后无逗号，不要用单引号）：
 {

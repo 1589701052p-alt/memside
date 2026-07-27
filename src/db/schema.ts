@@ -87,7 +87,7 @@ export const memoryDiscards = sqliteTable(
       .references(() => memoryDistillJobs.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
     bodyMd: text('body_md').notNull(),
-    reason: text('reason').notNull(), // 'public-knowledge' | 'derivable'
+    reason: text('reason').notNull(), // 'public-knowledge' | 'derivable' | 'taming'
     ts: integer('ts').notNull(),
   },
   (t) => ({

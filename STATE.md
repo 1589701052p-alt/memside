@@ -191,3 +191,18 @@ review 通过,0 Critical)。`bun run typecheck && bun test` 247/247 全绿。
 5. dedupCandidates 可加注释说明为何无需特判 new-j(j<i + 留最早使普通过滤已正确)。
 
 DB 膨胀 / events 保留策略仍为独立后续 issue(见上方 2026-07-23 审计第 1 项)。
+
+## 记忆质量修复第六轮(2026-07-27)
+
+对照 `OPUS-5.md`(Claude 内置记忆 `<memory_filesystem>` 设计)提炼出四项改进,用户确认做第 1、4 项;第 2 项(校准)、第 3 项(隐私)砍掉--用户立场「单次观察见到一次就该记录」,memside 有人工审批兜底,liberal 捕获 + 用户把关,与 Claude 内置记忆(无审批、自动应用)的保守校准取向不同。
+
+1. **[stated] 起源判定**(`src/memory/distiller.ts` REJECT 扩展):显式排除 6 类非陈述内容(推断 / 前瞻状态 / 研究输出 / 丰富化 / 道听途说 / agent 自己的推理建议)。仅 prompt 层,不动 category / subject / JSON 模板段。与 liberal-capture 不冲突:这六类是「非观察 / 非陈述」,不是「单次观察」。
+2. **驯化守卫**(`src/memory/valueFilter.ts`):纯函数 `detectTaming(title, bodyMd)`(确定性关键词集,精度优先,限定反馈 / 评价动词,不碰任务规则动词,避免误杀 `always use bun`)+ `judgeValue` 拆 `judgeValueBase`(旧逻辑逐字不动)+ 末尾 taming override map(覆盖 protected force-keep,安全 > 保护)。`DiscardReason` 加 `'taming'`;taming 丢弃走 tick 现有 `logDiscards` 审计。无 schema 迁移(`memory_discards.reason` 自由 text)。
+
+执行:subagent-driven(4 任务各 implementer + reviewer;终审 opus whole-branch review verdict=Ready to merge=Yes)。`bun run typecheck && bun test` 304/304 全绿。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-07-27-memory-quality-fix6*`。
+
+### 终审 deferred minor(非阻塞)
+
+1. `detectTaming` 的 try/catch 实际不可达(`${}`/`.toLowerCase()`/`.includes()` 对 string 不抛),属 spec §3.2 既定防御形态。
+2. 缺大写 taming 短语测试(`NEVER CRITICIZE`)--大小写不敏感已实现(lowercase 双侧),未显式锁定。
+3. 个别 borderline pattern(`never argue` / `always agree` / `roleplay`)可能误杀合法 convention--spec §6 既定精度权衡,靠 `memory_discards WHERE reason='taming'` 审计数据后续调参。
