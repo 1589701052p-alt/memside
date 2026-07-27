@@ -529,6 +529,58 @@ test('tick still marks done when setSessionOffset throws (warn, non-blocking)', 
   }
 })
 
+test('makeLoadTranscript degrades to full when getSessionOffset throws (read-failure non-blocking)', async () => {
+  // 第五轮 final review 补的读侧降级锁。daemon.ts makeLoadTranscript 内 getSessionOffset
+  // 失败时 try/catch 降级全量返回（不阻塞蒸馏）。写侧对账（setSessionOffset throws ->
+  // job still done）已由上一测试覆盖；本测试锁住读侧：偏移表有 offset=2（正常会 slice(2)
+  // 只给 1 turn），但 db.select 对 memory_session_offsets 抛错 -> getSessionOffset throw
+  // -> makeLoadTranscript 降级返回全量 3 turns，不切片。计划 Global Constraints 第 19 行
+  // "getSessionOffset 失败降级全量" 的强锁（与上一测试互为读/写降级锚点）。
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sessionId: 'sess-D',
+  })
+  await db.insert(memoryDistillEvents).values({
+    distillJobId: jobId, attemptIndex: 0, ts: 1, kind: 'conversation',
+    payload: JSON.stringify([
+      { role: 'user', content: 'turn A' },
+      { role: 'user', content: 'turn B' },
+      { role: 'user', content: 'turn C' },
+    ]),
+  })
+  // 预置偏移 = 2：若 getSessionOffset 正常返回，makeLoadTranscript 会 slice(2) 只给 1 turn。
+  // 降级路径必须绕过此偏移、返回全量 3 turns。
+  await db.insert(memorySessionOffsets).values({
+    sessionId: 'sess-D', lastTurnOffset: 2, updatedAt: Date.now(),
+  })
+  // 包一层 db.select：仅对 .from(memorySessionOffsets) 抛错，其余表（如 memoryDistillEvents）
+  // 透传。与上一测试（setSessionOffset throws -> 包 db.insert）同模式：monkey-patch + flag
+  // + finally 还原；区别是 db.select 的表名在 .from(table) 而非 db.select(table)，故返回
+  // 一个仅拦截 .from 的适配对象（不 mutate 真 builder，避免 drizzle 内部单例被重复包装）。
+  const realSelect = db.select.bind(db)
+  let sessionOffsetsThrows = false
+  db.select = (() => ({
+    from: (table: unknown) => {
+      if (sessionOffsetsThrows && table === memorySessionOffsets) {
+        throw new Error('mocked session_offsets select failure')
+      }
+      return realSelect().from(table as any)
+    },
+  })) as any
+  try {
+    sessionOffsetsThrows = true
+    const loadTranscript = makeLoadTranscript(db)
+    const result = await loadTranscript({ id: jobId, cwd: '/r', sourceEventId: 'e1', sessionId: 'sess-D' })
+    // 降级全量：3 turns（不是 slice(2) 的 1 turn），fullLength = 3。
+    expect(result.turns.length).toBe(3)
+    expect(result.fullLength).toBe(3)
+    expect(result.turns.map((t) => t.content)).toEqual(['turn A', 'turn B', 'turn C'])
+  } finally {
+    sessionOffsetsThrows = false
+    db.select = realSelect
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 第五轮 e2e：真实 makeLoadTranscript（不 mock）+ 真实 store 偏移。
 // 同 session 两次 Stop：第一次全量蒸馏 + 更新偏移；第二次只蒸馏新增 turn。
