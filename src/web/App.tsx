@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, type MemoryItem, type MemsideStatus } from './api'
+import { formatMemoryTime, sortCandidatesByTime } from './ui-utils'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -72,9 +73,9 @@ export default function App() {
     void refresh()
   }
 
-  const candidates = items
-    .filter((i) => i.status === 'candidate')
-    .sort((a, b) => priorityRank(a.valueClass) - priorityRank(b.valueClass))
+  // 候选按 createdAt 倒序（newest first），完全替换 PR #9 的价值优先级排序。
+  // 价值徽标仍显示，只是不再决定顺序。priorityRank 仍被 bulkRejectUnevaluated 用。
+  const candidates = sortCandidatesByTime(items.filter((i) => i.status === 'candidate'))
   const jobs = status?.jobs ?? {}
   const running = (jobs.running ?? 0) + (jobs.pending ?? 0)
 
@@ -193,6 +194,7 @@ function MemoryCard({
     : m.sourceKind === 'manual'
       ? '手动'
       : '未知'
+  const time = formatMemoryTime(m.createdAt)
   async function save() {
     setEditError(null)
     try {
@@ -227,6 +229,7 @@ function MemoryCard({
           {m.bodyMd && <p style={{ color: '#555' }}>{m.bodyMd}</p>}
           <small>
             {m.scopeType} · {m.runtime ?? '任意 runtime'} · 来源: <span title={m.sourceCwd ?? ''}>{sourceLabel}</span>
+            {time ? ` · ${time}` : ''}
           </small>
           <div style={{ marginTop: 8 }}>
             <button onClick={onApprove} style={{ marginRight: 8 }}>
