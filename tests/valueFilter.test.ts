@@ -3,7 +3,7 @@ import { judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VALUE_PROTECTED_C
 import type { DistillCandidate } from '@/memory/distiller'
 
 const cand = (title: string, bodyMd = 'b'): DistillCandidate =>
-  ({ title, bodyMd, scopeType: 'project', runtime: null, distillAction: 'new' })
+  ({ title, bodyMd, scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' })
 
 const verdictsJson = (...vs: object[]) => JSON.stringify({ verdicts: vs })
 
@@ -163,4 +163,39 @@ test('non-protected category still discards normally', async () => {
 test('VALUE_JUDGE_SYSTEM_PROMPT has sharpened derivable + public-knowledge definitions', () => {
   expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain("THIS repository's current code/files/docs")
   expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('do not belong here')
+})
+
+test('subject gate: codebase invariant is discarded when LLM says derivable', async () => {
+  // TDD（第二轮核心）：逻辑门不再无条件保护 protected category。codebase 类的
+  // invariant（如 valueFilter 必须强制保留 invariant）是代码复述，LLM 判 derivable
+  // 时必须丢弃，不能被门救回。根因见 spec §1.1。
+  const c: DistillCandidate = { title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
+  expect(v).toEqual([{ index: 0, keep: false, reason: 'derivable' }])
+})
+
+test('subject gate: missing subject defaults to codebase (not protected)', async () => {
+  // TDD：subject 缺失/非法一律视为 codebase（精度优先）。直接构造一个缺 subject
+  // 的候选（绕过 cand helper）模拟 distiller 漏标。
+  const c = { title: '[category:invariant] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' } as DistillCandidate
+  const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
+  expect(v).toEqual([{ index: 0, keep: false, reason: 'derivable' }])
+})
+
+test('subject gate: codebase protected categories also discarded (integration/compliance)', async () => {
+  const cc = (cat: string): DistillCandidate => ({ title: `[category:${cat}] codebase rule`, bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' })
+  const v = await judgeValue([cc('integration'), cc('compliance')], async () => verdictsJson(
+    { index: 0, category: 'derivable' },
+    { index: 1, category: 'public-knowledge' },
+  ))
+  expect(v).toEqual([
+    { index: 0, keep: false, reason: 'derivable' },
+    { index: 1, keep: false, reason: 'public-knowledge' },
+  ])
+})
+
+test('subject gate: domain invariant still force-kept even when LLM throws', async () => {
+  // 回归：domain 类 protected 仍受保护（keepNull 路径也按 subject 判定）。
+  const v = await judgeValue([prot('invariant')], async () => { throw new Error('down') })
+  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
 })
