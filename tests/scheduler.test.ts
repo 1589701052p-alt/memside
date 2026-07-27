@@ -400,3 +400,30 @@ test('tick: dedup existing bodyMd flows into cross-batch comparison (e2e)', asyn
   expect(captured).toContain('14天退款窗口') // existing bodyMd 进了 dedup prompt
   expect(createCalls).toBe(0) // 新候选被判重复，不创建
 })
+
+test('tick: codebase-subject design-decision candidate is derivable-discarded (e2e subject-driven derivable)', async () => {
+  // TDD（第三轮 §D）：dogfood 场景下"关于当前仓库自身设计决策"的候选被 LLM 当 decision
+  // 保留。现在 distiller 标 subject=codebase，valueFilter prompt 带 subject 标记 +
+  // 中性描述关联 derivable -> LLM 判 derivable -> 丢弃。锁住 subject 信号端到端流转。
+  // 根因见 spec §1.2（valueFilter 判 derivable 缺仓库参照系，靠 distiller subject 补强）。
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let createCalls = 0
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => [{ role: 'user', content: 'token budget widened to 64k' }],
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:architecture] token 预算从 12k 扩到 64k', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }] })
+      // dedup short-circuits (1 candidate, no existing) -> call 2 is judgeValue;
+      // subject=codebase + 仓库自身设计决策 -> derivable
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
+    },
+    createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(callCount).toBe(2) // distill + judgeValue; dedup short-circuits
+  expect(createCalls).toBe(0) // discarded, not created
+  const rows = await db.select().from(memoryDiscards)
+  expect(rows.length).toBe(1)
+  expect(rows[0]!.reason).toBe('derivable')
+})

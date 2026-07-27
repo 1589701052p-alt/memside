@@ -199,3 +199,30 @@ test('subject gate: domain invariant still force-kept even when LLM throws', asy
   const v = await judgeValue([prot('invariant')], async () => { throw new Error('down') })
   expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
 })
+
+test('judgeValue user prompt includes subject hint per candidate', async () => {
+  // TDD（第三轮 §C）：valueFilter 判 derivable 缺"当前仓库"参照系。把 distiller 的
+  // subject 信号透传到 user prompt，LLM 拿到 codebase/domain 标记后判 derivable 更准。
+  let captured = ''
+  const cCodebase: DistillCandidate = { title: '[category:architecture] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const cDomain: DistillCandidate = { title: '[category:invariant] y', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  await judgeValue([cCodebase, cDomain], async (_sys, user) => { captured = user; return verdictsJson({ index: 0, category: 'derivable' }, { index: 1, category: 'decision' }) })
+  expect(captured).toContain('(subject: codebase)')
+  expect(captured).toContain('(subject: domain)')
+})
+
+test('judgeValue user prompt defaults missing subject to codebase hint', async () => {
+  // TDD（第三轮 §C）：subject 缺失时 prompt 标记应为 codebase（与 gate defaulting 一致）。
+  let captured = ''
+  const c = { title: '[category:x] y', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' } as DistillCandidate
+  await judgeValue([c], async (_sys, user) => { captured = user; return verdictsJson({ index: 0, category: 'decision' }) })
+  expect(captured).toContain('(subject: codebase)')
+})
+
+test('VALUE_JUDGE_SYSTEM_PROMPT has subject hint neutral description', () => {
+  // TDD（第三轮 §C）：system prompt 加中性描述关联 subject 与 derivable。neutrality
+  // 约束：不得含 keep/discard/reject/avoid/important/valuable/unsure/cautious/careful/don't/dangerous。
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('subject hint')
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('codebase-subject candidate')
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('design decisions')
+})

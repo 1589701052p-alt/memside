@@ -27,6 +27,8 @@ category by these criteria:
 6. topology - a cross-boundary connection (cross-module/service/team/repo) invisible
    from any single vantage point.
 
+Each candidate is marked with a subject hint: codebase (describes the current repository's own code/config/modules) or domain (describes something outside the repository). Apply the 6 categories above as written - a codebase-subject candidate that describes this repository's own design decisions, implementation rules, or internal behavior is derivable.
+
 Pick the best-fitting category for each candidate. 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
 {
   "verdicts": [
@@ -57,7 +59,7 @@ const VALUE_CLASS_MAP: Record<string, ValueClass> = {
 }
 
 function renderUserPrompt(candidates: DistillCandidate[]): string {
-  return candidates.map((c, i) => `[${i}] ${c.title}\n${c.bodyMd}`).join('\n---\n')
+  return candidates.map((c, i) => `[${i}] (subject: ${c.subject ?? 'codebase'}) ${c.title}\n${c.bodyMd}`).join('\n---\n')
 }
 
 /**
