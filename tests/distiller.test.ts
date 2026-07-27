@@ -193,3 +193,16 @@ test('DISTILLER_SYSTEM_PROMPT subject examples do not hardcode real memory symbo
     expect(exampleSection).not.toContain(real)
   }
 })
+
+test('DISTILLER_SYSTEM_PROMPT has [stated] origin discipline with 6 exclusions', () => {
+  // 第六轮第 1 项：[stated] 起源判定。distiller 只记用户/领域明确陈述的持久事实，
+  // 显式排除六类非陈述内容（推断/前瞻/研究输出/丰富化/道听途说/自己的推理）。
+  // 源码层文本断言锁 prompt 契约（LLM 遵循度由 dogfood 验证，非单测范围）。
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('Origin discipline')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('推断')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('前瞻')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('研究输出')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('丰富化')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('道听途说')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('推理或建议')
+})
