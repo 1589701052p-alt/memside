@@ -3,7 +3,7 @@ import type { LLMCall } from '@/llm'
 import { callWithRetry } from './retry'
 
 export type ValueClass = 'decision' | 'convention' | 'trap' | 'topology'
-export type DiscardReason = 'public-knowledge' | 'derivable'
+export type DiscardReason = 'public-knowledge' | 'derivable' | 'taming'
 
 export type ValueVerdict =
   | { index: number; keep: false; reason: DiscardReason }
@@ -42,6 +42,47 @@ export function parseCategory(title: string): string | null {
   const m = /^\s*\[category:([^\]]+)\]/i.exec(title)
   if (!m) return null
   return m[1]!.trim().toLowerCase()
+}
+
+const TAMING_PATTERNS: readonly string[] = [
+  // A 压制异议/批评/质疑
+  '不要质疑', '别质疑', '不准质疑', '不要反驳', '别反驳', '不要反对', '别反对',
+  '不要批评', '别批评', '不要指责', '不要唱反调', '不要提反对', '不要质疑我', '不要质疑用户',
+  'never question', "don't question", 'never criticize', "don't criticize",
+  'never criticise', "don't criticise", 'never disagree', "don't disagree",
+  'never challenge', "don't challenge", 'never push back', "don't push back",
+  'never argue', "don't argue", 'never correct me', "don't correct me", "don't contradict",
+  // B 要求赞同/肯定
+  '永远同意', '总是同意', '无条件同意', '永远赞同', '总是赞同', '永远支持我', '总是支持我',
+  '不要否定', '别否定', '永远肯定', '永远站在我这边',
+  'always agree', 'always validate', 'always affirm', 'always support me',
+  'never say no', 'always say yes', 'always be agreeable',
+  // C 压制诚实评价
+  '不要指出问题', '别指出问题', '不要挑毛病', '别挑毛病', '不要给负面', '不要泼冷水',
+  '不要给批评性',
+  "don't point out problems", 'never point out problems',
+  "don't give negative feedback", 'never give negative feedback',
+  "don't be critical", 'never be critical',
+  // D 依赖/角色扮演（dev 罕见，仅高精度标记）
+  '角色扮演', 'roleplay', 'role-play', '永远陪伴', '一直陪着我', 'always be here for me',
+]
+
+/**
+ * 确定性驯化检测（第 4 项）：匹配「要求 agent 压制诚实反馈 / 永远赞同 / foster 依赖」类
+ * 指令。命中即丢弃（valueFilter taming override）。精度优先（liberal-capture 立场）：
+ * 宁可漏隐晦驯化（留给人工审批），不可误杀合法 convention。短语限定在「反馈/评价动词」，
+ * 不碰任务规则动词（use/commit/run），避免误杀 `always use bun` / `don't commit to master`。
+ *
+ * 纯函数、永不抛：兜底返回 false（不误杀）。关键词在代码里、不进 LLM system prompt，
+ * 故不影响 valueFilter 的 neutrality 硬约束。
+ */
+export function detectTaming(title: string, bodyMd: string): boolean {
+  try {
+    const text = `${title}\n${bodyMd}`.toLowerCase()
+    return TAMING_PATTERNS.some((p) => text.includes(p.toLowerCase()))
+  } catch {
+    return false  // 兜底：不误杀，走正常 LLM 分类
+  }
 }
 
 /** Distill categories whose candidates valueFilter must NEVER discard:

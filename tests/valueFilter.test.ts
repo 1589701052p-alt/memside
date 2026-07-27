@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VALUE_PROTECTED_CATEGORIES } from '@/memory/valueFilter'
+import { detectTaming, judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VALUE_PROTECTED_CATEGORIES } from '@/memory/valueFilter'
 import type { DistillCandidate } from '@/memory/distiller'
 
 const cand = (title: string, bodyMd = 'b'): DistillCandidate =>
@@ -198,6 +198,49 @@ test('subject gate: domain invariant still force-kept even when LLM throws', asy
   // 回归：domain 类 protected 仍受保护（keepNull 路径也按 subject 判定）。
   const v = await judgeValue([prot('invariant')], async () => { throw new Error('down') })
   expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+})
+
+// ---------------------------------------------------------------------------
+// 第六轮第 4 项：驯化守卫 - detectTaming 确定性关键词检测。
+// 匹配「要求 agent 压制诚实反馈 / 永远赞同 / foster 依赖」类指令。精度优先
+// （liberal-capture 立场）：宁可漏隐晦驯化（留给人工审批），不可误杀合法 convention。
+// 短语限定在「反馈/评价动词」，不碰任务规则动词（use/commit/run）。
+// ---------------------------------------------------------------------------
+
+test('detectTaming flags A-category taming (suppress disagreement, zh+en)', () => {
+  expect(detectTaming('[category:convention] 以后不要质疑我的代码风格', 'b')).toBe(true)
+  expect(detectTaming('[category:convention] code style', 'never criticize my code')).toBe(true)
+  expect(detectTaming('[category:convention] 别反驳我', 'b')).toBe(true)
+  expect(detectTaming("[category:convention] don't push back", 'b')).toBe(true)
+})
+
+test('detectTaming flags B/C/D-category taming', () => {
+  expect(detectTaming('[category:convention] 永远同意我的决定', 'b')).toBe(true)  // B 要求赞同
+  expect(detectTaming('[category:convention] x', 'always validate my choices')).toBe(true)  // B
+  expect(detectTaming('[category:convention] 不要指出问题', 'b')).toBe(true)  // C 压制评价
+  expect(detectTaming("[category:convention] don't give negative feedback", 'b')).toBe(true)  // C
+  expect(detectTaming('[category:convention] 角色扮演我的搭档', 'b')).toBe(true)  // D 依赖/角色扮演
+  expect(detectTaming('[category:convention] x', 'roleplay as my pair')).toBe(true)  // D
+})
+
+test('detectTaming does NOT flag legitimate conventions (precision over recall)', () => {
+  // 合法 convention 用任务规则动词（use/commit/run/skip/follow），不含反馈压制语义，不可误杀。
+  expect(detectTaming('[category:convention] always use bun', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] do not commit to master', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] PR 必须加测试', 'b')).toBe(false)
+  expect(detectTaming('[category:quality-bar] never skip tests', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] follow the style guide', 'b')).toBe(false)
+  expect(detectTaming('[category:convention] always run typecheck before push', 'b')).toBe(false)
+})
+
+test('detectTaming scans both title and bodyMd', () => {
+  expect(detectTaming('clean title', '以后不要质疑我')).toBe(true)
+  expect(detectTaming('以后不要质疑我', 'clean body')).toBe(true)
+})
+
+test('detectTaming returns false on empty and never throws', () => {
+  expect(detectTaming('', '')).toBe(false)
+  expect(detectTaming('[category:x] no taming here', 'just a normal rule')).toBe(false)
 })
 
 test('judgeValue user prompt includes subject hint per candidate', async () => {
