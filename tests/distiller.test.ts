@@ -163,3 +163,33 @@ test('DISTILLER_SYSTEM_PROMPT contains subject field + DOMAIN-not-codebase invar
   expect(DISTILLER_SYSTEM_PROMPT).toContain('domain = ')
   expect(DISTILLER_SYSTEM_PROMPT).toContain("DOMAIN (NOT about this codebase's own implementation)")
 })
+
+test('DISTILLER_SYSTEM_PROMPT has subject judgement heuristic (grep-able concrete things)', () => {
+  // TDD（第三轮 §B）：dogfood 场景 subject 偏 domain，加判定启发让 LLM 区分
+  // "仓库内能 grep 到的具体东西" vs "仓库外业务概念"。
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('grep')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('具体东西')
+})
+
+test('DISTILLER_SYSTEM_PROMPT has generic placeholder subject examples', () => {
+  // TDD（第三轮 §B）：通用占位符示例（X 模块的 Y 函数 / W 配置为值 V 等），
+  // 示判定模式而非具体答案。
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('X 模块的 Y 函数')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('W 配置为值 V')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('外部系统 X 的 SLA 要求 Y')
+})
+
+test('DISTILLER_SYSTEM_PROMPT subject examples do not hardcode real memory symbols (anti-overfitting)', () => {
+  // TDD（第三轮 §B 防过拟合硬约束）：示例不得针对已有记忆。断言 prompt 的示例区
+  // 不含当前 dogfood 产物的真实符号--否则等于 hardcode 答案，换仓库就失效。
+  // 注意：主体 prompt 仍会提到 valueFilter/daemon 等（作为 category 说明），这里只
+  // 断言"通用示例"这一段不含这些词。取 subject 示例段（"通用示例"到段尾）校验。
+  const prompt = DISTILLER_SYSTEM_PROMPT
+  const exampleStart = prompt.indexOf('通用示例')
+  expect(exampleStart).toBeGreaterThan(-1)
+  const exampleSection = prompt.slice(exampleStart)
+  // 真实记忆符号不得出现在示例段
+  for (const real of ['valueFilter', 'token 预算', 'dedup', '64k', '条件门']) {
+    expect(exampleSection).not.toContain(real)
+  }
+})

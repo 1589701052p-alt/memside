@@ -29,6 +29,18 @@ Write a matching category as a "[category:xxx]" prefix on each candidate title:
 
 拿不准时标 codebase。
 
+判定时问自己：这条规则的主语，是这个仓库里能 grep 到的具体东西（文件、函数、配置项、模块名、某个常量值），还是一个仓库之外的业务/领域概念？
+- 如果主语是仓库内的具体东西，即使规则本身听起来像"通用经验"，它也是 codebase--因为脱离这个仓库它就失去所指对象，或可从源码重新读出。
+- 如果主语是仓库外的业务/领域概念（用户业务规则、外部系统契约、法规、跨项目共识），且换一个仓库依然成立，才是 domain。
+
+通用示例（仅示判定模式，勿照抄内容）：
+  codebase: "X 模块的 Y 函数以 Z 方式调用" -- 主语是仓库内符号
+  codebase: "本项目把 W 配置为值 V" -- 主语是仓库内配置项
+  codebase: "A 组件的 B 行为在 C 条件下触发" -- 主语是仓库内组件
+  domain: "用户业务的退款须在发货后 N 天内" -- 主语是外部业务规则
+  domain: "外部系统 X 的 SLA 要求 Y" -- 主语是仓库外契约
+  domain: "法规要求 Z" -- 主语是仓库外法规
+
 Cross-cutting properties:
 - atomic and generalizable; survives outside the event that produced it.
 - names a clear binding scope: "project" (specific to this codebase) or "global" (any project).
