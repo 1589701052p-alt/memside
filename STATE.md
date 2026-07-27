@@ -162,3 +162,32 @@ minor 经判定 defer(非阻塞,记此追踪):
 3. **长 transcript vs context window** - `src/daemon.ts:28` 的 `makeLoadTranscript` 全量加载不截断(已知最大单条 payload 660KB,见上方 candidate-queue debt 第 1 项)。codeagent 后端 context 可能小于直连 haiku,长 transcript 超限 / 被截。需在 codeagent 模式下加预算裁剪(复用 `clipByBudget` 思路)。
 4. **system prompt 可能被 codeagent 覆盖 / 拼接** - 公司封装常强制注入企业合规 / 审计 system prompt,稀释 distiller "ONLY a JSON object" 指令 -> 输出格式乱 -> 回到第 1 项。备选 fallback:把 system prompt 拼进 user prompt 开头(user prompt 一般不被覆盖)。
 5. **hooks 兼容性(闭环层面,独立于 distill)** - capture / inject 依赖 `~/.claude/settings.json` 的 hooks(`src/install.ts`)。若 codeagent 用别的配置目录(如 `~/.codeagent/`)或不读 claude hooks,hooks 装不上 -> capture 抓不到 transcript、inject 注不进新会话,整个闭环断。需验证 codeagent 配置路径 + 可能适配 `installHooks` 的 `baseDir`。**此项决定产品能否闭环,优先级高于 2-4。**
+
+## 记忆质量修复(PR #13,2026-07-27)
+
+针对"留存候选 ~82% 复述 memside 自身源码、输入 98% 是 tool I/O、同义重复严重"
+的质量问题,落地七项修复(设计 spec / 计划见 `docs/superpowers/specs|plans/
+2026-07-24-memory-quality-fix*`):
+
+1. `filterTranscriptForDistill`(pure.ts)— 文件类工具结果替换为占位、其余工具
+   截断 1500、单条 cap 4000、12000 token 预算裁剪(user / error 必留)。
+2. `parseTranscriptFile` 配对 tool_use↔tool_result(toolName/toolInputPath)。
+3. distiller 先过滤再渲染 prompt;REJECT 被开发仓库自身实现细节。
+4. valueFilter 逻辑门:invariant/integration/compliance 强制 keep +
+   valueClass='decision'(免疫"批量拒绝未评估");derivable/public-knowledge 定义收紧。
+5. dedup 一次 LLM 调用覆盖同批兄弟 + 跨批 existing;失败保守全留。
+6. tick 重排为 distill→dedup→judgeValue;删除 valueClass 重挂 hack。
+7. e2e 门禁测试锁定受保护候选在 LLM 误判时仍入库且不进 discards。
+
+执行方式:subagent-driven(每任务独立 implementer + reviewer;终审 whole-branch
+review 通过,0 Critical)。`bun run typecheck && bun test` 247/247 全绿。
+
+### 终审 deferred minor(后续 issue)
+
+1. transcript.ts FIFO 配对未按 tool_use_id  keyed;pendingToolUses 跨 assistant 行不清空。
+2. pure.ts catch-all 降级返回未截断原 turns(更稳的降级应仍套单条 cap)。
+3. parseCategory(行首锚定)与 distillShouldRetry(.includes)对"有 category"判定不一致。
+4. Edit/Write/MultiEdit 占位文案"原文 N 行"对短确认结果不准确(仅措辞)。
+5. dedupCandidates 可加注释说明为何无需特判 new-j(j<i + 留最早使普通过滤已正确)。
+
+DB 膨胀 / events 保留策略仍为独立后续 issue(见上方 2026-07-23 审计第 1 项)。
