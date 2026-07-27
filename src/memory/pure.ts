@@ -169,11 +169,11 @@ export function extractJsonObject(raw: string): string {
 // Distill-time transcript filtering. Pure; never throws.
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_DISTILL_INPUT_BUDGET_TOKENS = 12000
+export const DEFAULT_DISTILL_INPUT_BUDGET_TOKENS = 64000
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-const TOOL_RESULT_CAP_CHARS = 1500
-const NON_TOOL_CAP_CHARS = 4000
+const TOOL_RESULT_CAP_CHARS = 3000
+const NON_TOOL_CAP_CHARS = 8000
 const CODE_FEATURE_RE = /(^|\n)\s*(import |export |function |const |class |interface |def |async |return )/
 const INDENT_RE = /\n( {4,}|\t+)\S/
 
