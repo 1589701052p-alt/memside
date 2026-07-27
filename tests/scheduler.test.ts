@@ -551,20 +551,16 @@ test('e2e incremental: same-session second Stop distills only new turns', async 
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, job1))
 
-  let callCount = 0
   const loadTranscript = makeLoadTranscript(db)
   await tick(db, {
     loadTranscript,
     callLLM: async () => {
-      callCount++
-      // 捕获喂给 distiller 的 turns（distillTranscript 内部调 callLLM）
+      // 第一次 Stop：3 turns 全量蒸馏。偏移推进由下方 getSessionOffset 断言锁住
+      // （distill 的 callLLM 次数受 valueFilter 重试影响，不稳，不在此断言）。
       return JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
     },
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
   })
-  // 第一次：3 turns 全量蒸馏。用偏移断言锁住（distill callCount 不再断言：
-  // distill(1) + judgeValue 重试(3) = 4 次，受 valueFilter 重试次数影响，不稳）。
-  void callCount
   const { getSessionOffset } = await import('@/memory/store')
   expect(await getSessionOffset(db, 'sess-e2e')).toBe(3)  // 偏移推进到 3
 
