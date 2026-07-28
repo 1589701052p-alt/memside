@@ -31,7 +31,17 @@ function spawnLogged(name: string, cmd: string[]) {
 }
 
 const daemon = spawnLogged('daemon', plan.daemon.cmd)
-const web = spawnLogged('web', plan.web.cmd)
+// web spawn 若同步抛错（如 vite bin 缺失），此时信号处理尚未挂上、race 尚未
+// 到达，必须先杀已起的 daemon 再让错误传播，否则 daemon 孤儿化占端口
+// （spec §4.7 无残留契约）。
+let web: ReturnType<typeof spawnLogged>
+try {
+  web = spawnLogged('web', plan.web.cmd)
+} catch (e) {
+  daemon.kill()
+  await daemon.exited
+  throw e
+}
 
 let shuttingDown = false
 function killAll() {
