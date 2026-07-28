@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { findPortHolders, type PortCheckCtx } from '@/launch/portCheck'
+import { findPortHolders, promptReclaim, type PortCheckCtx, type ReclaimCtx } from '@/launch/portCheck'
 
 // 端口占用防呆（2026-07-28-port-reclaim-guard）：跨平台端口查询纯函数层。
 // 平台/spawn 全注入，不碰真实系统命令。
@@ -97,4 +97,36 @@ test('any platform: spawn failure degrades to empty (does not throw)', async () 
   }
   const holders = await findPortHolders([7777], ctx)
   expect(holders).toEqual([])
+})
+
+test('promptReclaim: empty holders returns true (no prompt)', async () => {
+  const ctx: ReclaimCtx = { isTTY: true, readline: async () => 'n' }
+  expect(await promptReclaim([], ctx)).toBe(true)
+})
+
+test('promptReclaim: non-TTY prints and returns false', async () => {
+  const calls: string[] = []
+  const origLog = console.log
+  console.log = (s: string) => { calls.push(s) }
+  const ctx: ReclaimCtx = { isTTY: false, readline: async () => 'y' }
+  try {
+    expect(await promptReclaim([{ port: 7777, pid: 1, cmdline: 'x' }], ctx)).toBe(false)
+  } finally {
+    console.log = origLog
+  }
+  expect(calls.some((s) => s.includes('7777'))).toBe(true)
+})
+
+test('promptReclaim: TTY y/yes returns true', async () => {
+  for (const ans of ['y', 'Y', ' yes ', 'YES']) {
+    const ctx: ReclaimCtx = { isTTY: true, readline: async () => ans }
+    expect(await promptReclaim([{ port: 7777, pid: 1, cmdline: 'x' }], ctx)).toBe(true)
+  }
+})
+
+test('promptReclaim: TTY n/empty/other returns false', async () => {
+  for (const ans of ['n', '', 'no', 'x']) {
+    const ctx: ReclaimCtx = { isTTY: true, readline: async () => ans }
+    expect(await promptReclaim([{ port: 7777, pid: 1, cmdline: 'x' }], ctx)).toBe(false)
+  }
 })

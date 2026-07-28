@@ -93,3 +93,26 @@ async function getCmdlinePosix(pid: number, ctx: PortCheckCtx): Promise<string> 
     return ''
   }
 }
+
+export interface ReclaimCtx {
+  isTTY: boolean
+  readline: () => Promise<string>
+}
+
+/**
+ * 列出占用进程并询问是否杀掉。holders 为空 -> true（继续启动）；非 TTY ->
+ * 打印列表 + 提示后返回 false；TTY -> 打印列表 + (y/N) 询问，y/yes 返回 true。
+ */
+export async function promptReclaim(holders: PortHolder[], ctx: ReclaimCtx): Promise<boolean> {
+  if (holders.length === 0) return true
+  console.log('memside: 以下端口已被占用：')
+  for (const h of holders) {
+    console.log(`  [port ${h.port}] PID ${h.pid}: ${h.cmdline || '(命令行未知)'}`)
+  }
+  if (!ctx.isTTY) {
+    console.log('memside: 非交互环境，请手动回收以上进程后重试。')
+    return false
+  }
+  const ans = (await ctx.readline()).trim().toLowerCase()
+  return ans === 'y' || ans === 'yes'
+}
