@@ -32,6 +32,7 @@ test('scripts/dev.ts reaps both children on signals and first-exit', () => {
   expect(src).toContain("process.on('SIGTERM'")
   expect(src).toContain('daemon.kill()')
   expect(src).toContain('web.kill()')
+  expect(src).toContain('process.execPath')
 })
 
 test('scripts/dev.ts prefixes child output lines with [daemon] / [web]', () => {

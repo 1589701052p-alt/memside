@@ -9,7 +9,8 @@
  */
 import { buildSpawnPlan } from '@/launch/spawnPlan'
 
-const plan = buildSpawnPlan({ MEMSIDE_PORT: process.env.MEMSIDE_PORT })
+// process.execPath = 真 bun.exe，绕开 npm .cmd shim（见 spawnPlan.ts 头注释）。
+const plan = buildSpawnPlan({ MEMSIDE_PORT: process.env.MEMSIDE_PORT }, process.execPath)
 
 function spawnLogged(name: string, cmd: string[]) {
   const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe', env: process.env })
