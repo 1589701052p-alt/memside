@@ -206,3 +206,39 @@ DB 膨胀 / events 保留策略仍为独立后续 issue(见上方 2026-07-23 审
 1. `detectTaming` 的 try/catch 实际不可达(`${}`/`.toLowerCase()`/`.includes()` 对 string 不抛),属 spec §3.2 既定防御形态。
 2. 缺大写 taming 短语测试(`NEVER CRITICIZE`)--大小写不敏感已实现(lowercase 双侧),未显式锁定。
 3. 个别 borderline pattern(`never argue` / `always agree` / `roleplay`)可能误杀合法 convention--spec §6 既定精度权衡,靠 `memory_discards WHERE reason='taming'` 审计数据后续调参。
+
+## Subject-keyed 聚合层第一期(PR #21,2026-07-28)
+
+对照 `OPUS-5.md` 特性 6(subject-keyed 聚合:一个 subject 一组事实,而非 N 条平铺)
+落地第一期「确定性分组渲染」;LLM 合成压缩为第二期(基于本次 slug 列),未做。
+设计 spec / 计划见 `docs/superpowers/specs|plans/2026-07-28-subject-keyed-aggregation*`。
+
+1. `memories.subject_slug` 新列(幂等迁移,老行 NULL = 未分组,零回填)。
+2. `normalizeSubjectSlug`(pure.ts):kebab-case 校验,非法静默 null,不 retry 不丢记忆。
+3. store 层:slug 读写 + `listSubjectSlugs`(candidate+approved、DISTINCT、LIMIT 50)
+   + `patchMemory` 校验(非法抛 MemoryConflictError → server 409)。
+4. distiller 旧瞬态字段 `subject`(codebase|domain)机械改名 `ruleObject`,为 slug 概念腾名。
+5. distiller 输出 `subjectSlug`;user prompt 附 project∪global 现有 slug 清单促复用
+   (对抗同义碎裂--本特性最大失败模式)。
+6. `formatMemoryBlock` 裁剪后按 slug 分节渲染;**clipByBudget 语义零变更**,
+   全 NULL slug 输出与旧格式逐字节一致。
+7. scheduler 接线:slug 清单失败降级空数组(distill 照常);slug 随 createCandidate 入库。
+8. Web UI:审批卡片 slug 徽标 + 可编辑输入框(留空 = 未分组);server 零改动(PATCH 透传)。
+
+执行:subagent-driven(8 任务各 implementer + reviewer;终审 opus whole-branch review
+verdict=Ready to merge=Yes,0 Critical / 0 Important)。`bun run typecheck && bun test`
+351/351 全绿。
+
+### 终审 deferred minor(后续 issue,建议打包一个 follow-up PR)
+
+1. `createCandidate` 直存 `input.subjectSlug` 未规范化(distiller/UI 路径安全,但
+   `POST /api/memories` 直接调用可写入非法 slug)→ 一行 `normalizeSubjectSlug` hardening。
+2. patch-undefined 时 slug 不变无显式测试;`listSubjectSlugs` LIMIT 50 截断无测试;
+   listSubjectSlugs-throws 降级路径(scheduler warn + 空清单)无测试。
+3. `pure-transcript-filter.test.ts:77` 注释残留 "判 subject/category";
+   `distiller.ts` 局部变量 `rawSubject` 未同步改名。
+4. LLM 显式输出 `"subjectSlug": null` 会触发一次 retry 再降级(retry 耗尽仍正常解析,
+   仅浪费一次调用);修法:shouldRetry 同时放行 null。
+5. 跨 scope 同 slug 渲染时合并为一节(spec-conformant 语义边缘,第二期 spec 考虑)。
+6. `clipByBudget` 按平铺行长度计价,分组渲染后预算略偏保守(保守方向,可接受)。
+7. patchMemory 中 `normalizeSubjectSlug` 调用两次(纯函数,冗余无害)。
