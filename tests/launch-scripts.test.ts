@@ -25,3 +25,23 @@ test('package.json exposes build/start one-click scripts', () => {
   expect(pkg.scripts.build).toBe('vite build')
   expect(pkg.scripts.start).toBe('bun run build && bun run scripts/start.ts')
 })
+
+test('scripts/dev.ts reaps both children on signals and first-exit', () => {
+  const src = readFileSync(join(repoRoot, 'scripts', 'dev.ts'), 'utf8')
+  expect(src).toContain("process.on('SIGINT'")
+  expect(src).toContain("process.on('SIGTERM'")
+  expect(src).toContain('daemon.kill()')
+  expect(src).toContain('web.kill()')
+})
+
+test('scripts/dev.ts prefixes child output lines with [daemon] / [web]', () => {
+  const src = readFileSync(join(repoRoot, 'scripts', 'dev.ts'), 'utf8')
+  expect(src).toContain('[${name}]')
+  expect(src).toContain("spawnLogged('daemon'")
+  expect(src).toContain("spawnLogged('web'")
+})
+
+test('package.json exposes dev one-click script', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
+  expect(pkg.scripts.dev).toBe('bun run scripts/dev.ts')
+})
