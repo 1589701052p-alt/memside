@@ -1,8 +1,8 @@
-import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
+﻿import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
-import { createCandidate, promoteCandidate } from '@/memory/store'
+import { createCandidate, promoteCandidate, getSourceInput } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
 import { memoryDistillJobs, memoryDistillEvents, memories } from '@/db/schema'
@@ -123,11 +123,11 @@ test('collector acks 202 even when enqueue rejects, and broadcasts memory.enqueu
 })
 
 test('collector PostToolUse is skipped (no distill, no event, no job, no broadcast)', async () => {
-  // 第四轮：PostToolUse transcript 是累积式全量，与 Stop transcript 前缀重叠，
-  // 每次 tool call 一个 job 导致同一段会话被重复蒸馏（同义候选爆炸）。
-  // PostToolUse 不再蒸馏--Stop transcript 已含全部 tool_result（含 error），
-  // 错误信号由 distiller 内 detectErrorSignals 从 Stop transcript 提取。
-  // 即使带 transcript_path + is_error turn，也直接 202 跳过，不产生任何副作用。
+  // 绗洓杞細PostToolUse transcript 鏄疮绉紡鍏ㄩ噺锛屼笌 Stop transcript 鍓嶇紑閲嶅彔锛?
+  // 姣忔 tool call 涓€涓?job 瀵艰嚧鍚屼竴娈典細璇濊閲嶅钂搁锛堝悓涔夊€欓€夌垎鐐革級銆?
+  // PostToolUse 涓嶅啀钂搁--Stop transcript 宸插惈鍏ㄩ儴 tool_result锛堝惈 error锛夛紝
+  // 閿欒淇″彿鐢?distiller 鍐?detectErrorSignals 浠?Stop transcript 鎻愬彇銆?
+  // 鍗充娇甯?transcript_path + is_error turn锛屼篃鐩存帴 202 璺宠繃锛屼笉浜х敓浠讳綍鍓綔鐢ㄣ€?
   const fixturePath = writeJsonlFixture('posttool.jsonl', {
     type: 'user',
     message: {
@@ -142,18 +142,18 @@ test('collector PostToolUse is skipped (no distill, no event, no job, no broadca
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
-  // 等待 fire-and-forget 路径（若误走）写出 event
+  // 绛夊緟 fire-and-forget 璺緞锛堣嫢璇蛋锛夊啓鍑?event
   await new Promise((res) => setTimeout(res, 50))
   const events = await db.select().from(memoryDistillEvents)
-  expect(events.length).toBe(beforeEvents.length)  // 不存 event
-  expect(enqueueCalls.length).toBe(0)               // 不 enqueue job
-  expect(broadcastCalls.length).toBe(0)             // 不 broadcast（连 memory.capture 都不发）
+  expect(events.length).toBe(beforeEvents.length)  // 涓嶅瓨 event
+  expect(enqueueCalls.length).toBe(0)               // 涓?enqueue job
+  expect(broadcastCalls.length).toBe(0)             // 涓?broadcast锛堣繛 memory.capture 閮戒笉鍙戯級
 })
 
 test('collector SubagentStop is skipped (no distill, no event, no job, no broadcast)', async () => {
-  // 第五轮：SubagentStop 的 transcript_path 指向主会话 JSONL（不是独立子会话），
-  // 与同 session 的 Stop 蒸馏同一段会话（firstUser 一致、turns 数几乎相同），纯重复。
-  // SubagentStop 无独有价值，早返回 202 不蒸馏。与 PostToolUse 跳过对称。
+  // 绗簲杞細SubagentStop 鐨?transcript_path 鎸囧悜涓讳細璇?JSONL锛堜笉鏄嫭绔嬪瓙浼氳瘽锛夛紝
+  // 涓庡悓 session 鐨?Stop 钂搁鍚屼竴娈典細璇濓紙firstUser 涓€鑷淬€乼urns 鏁板嚑涔庣浉鍚岋級锛岀函閲嶅銆?
+  // SubagentStop 鏃犵嫭鏈変环鍊硷紝鏃╄繑鍥?202 涓嶈捀棣忋€備笌 PostToolUse 璺宠繃瀵圭О銆?
   const fixturePath = writeJsonlFixture('subagent.jsonl', {
     type: 'user',
     message: { role: 'user', content: 'subagent transcript is main session' },
@@ -167,14 +167,14 @@ test('collector SubagentStop is skipped (no distill, no event, no job, no broadc
   expect(r.status).toBe(202)
   await new Promise((res) => setTimeout(res, 50))
   const events = await db.select().from(memoryDistillEvents)
-  expect(events.length).toBe(beforeEvents.length)  // 不存 event
-  expect(enqueueCalls.length).toBe(0)               // 不 enqueue job
-  expect(broadcastCalls.length).toBe(0)             // 不 broadcast
+  expect(events.length).toBe(beforeEvents.length)  // 涓嶅瓨 event
+  expect(enqueueCalls.length).toBe(0)               // 涓?enqueue job
+  expect(broadcastCalls.length).toBe(0)             // 涓?broadcast
 })
 
 test('collector Stop reads session_id and passes it to enqueueDistillJob', async () => {
-  // 第五轮：hook payload 的 session_id 是增量蒸馏的会话键。server.ts 必须读取并
-  // 传入 enqueueDistillJob，否则 tick 无法按 session 切片偏移。
+  // 绗簲杞細hook payload 鐨?session_id 鏄閲忚捀棣忕殑浼氳瘽閿€俿erver.ts 蹇呴』璇诲彇骞?
+  // 浼犲叆 enqueueDistillJob锛屽惁鍒?tick 鏃犳硶鎸?session 鍒囩墖鍋忕Щ銆?
   const fixturePath = writeJsonlFixture('stop-sid.jsonl', {
     type: 'user',
     message: { role: 'user', content: 'stop with session id' },
@@ -190,8 +190,8 @@ test('collector Stop reads session_id and passes it to enqueueDistillJob', async
 })
 
 test('collector Stop without session_id still enqueues (backward compat)', async () => {
-  // 第五轮：历史/无 session_id 的 Stop 仍正常 enqueue（sessionId 为空），
-  // tick 走全量蒸馏路径。向后兼容。
+  // 绗簲杞細鍘嗗彶/鏃?session_id 鐨?Stop 浠嶆甯?enqueue锛坰essionId 涓虹┖锛夛紝
+  // tick 璧板叏閲忚捀棣忚矾寰勩€傚悜鍚庡吋瀹广€?
   const fixturePath = writeJsonlFixture('stop-nosid.jsonl', {
     type: 'user',
     message: { role: 'user', content: 'stop no session id' },
@@ -203,7 +203,7 @@ test('collector Stop without session_id still enqueues (backward compat)', async
   })
   expect(r.status).toBe(202)
   expect(enqueueCalls.length).toBe(1)
-  expect(enqueueCalls[0]!.sessionId).toBe('')  // 空 session_id -> 空串
+  expect(enqueueCalls[0]!.sessionId).toBe('')  // 绌?session_id -> 绌轰覆
 })
 
 test('collector SessionStart returns hookSpecificOutput envelope when memories exist (C2)', async () => {
@@ -398,4 +398,45 @@ test('POST /api/memories/bulk-promote skips not-found id and continues the batch
   const after = await db.select().from(memories)
   expect(after.length).toBe(2)
   expect(after.every((m) => m.status === 'rejected')).toBe(true)
+})
+
+test('GET /api/memories/:id/source-input returns available:true with turns when snapshot exists', async () => {
+  const c = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: '[category:x] t', bodyMd: 'b', tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r', distillJobId: 'job-snap' })
+  await getSourceInput(db, 'job-snap', [{ role: 'user', content: 'the original input' }])
+  const r = await req(`/api/memories/${c.id}/source-input`)
+  expect(r.status).toBe(200)
+  expect(r.body.available).toBe(true)
+  expect(r.body.title).toContain('[category:x]')
+  expect(r.body.turnCount).toBe(1)
+  expect(r.body.turns[0]!.content).toBe('the original input')
+})
+
+test('GET /api/memories/:id/source-input returns available:false when memory has no distillJobId (manual)', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 'manual', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const r = await req(`/api/memories/${c.id}/source-input`)
+  expect(r.status).toBe(200)
+  expect(r.body.available).toBe(false)
+})
+
+test('GET /api/memories/:id/source-input returns available:false when snapshot row missing', async () => {
+  const c = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b', tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r', distillJobId: 'job-nosnap' })
+  // 涓嶅啓蹇収琛?
+  const r = await req(`/api/memories/${c.id}/source-input`)
+  expect(r.status).toBe(200)
+  expect(r.body.available).toBe(false)
+})
+
+test('GET /api/memories/:id/source-input returns 404 when memory missing', async () => {
+  const r = await req('/api/memories/nope/source-input')
+  expect(r.status).toBe(404)
+})
+
+test('GET /api/memories list response does NOT contain turns (lazy load only)', async () => {
+  const c = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b', tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r', distillJobId: 'job-list' })
+  await getSourceInput(db, 'job-list', [{ role: 'user', content: 'SHOULD_NOT_APPEAR_IN_LIST' }])
+  const r = await req('/api/memories')
+  const body = JSON.stringify(r.body)
+  expect(body).not.toContain('SHOULD_NOT_APPEAR_IN_LIST')
+  expect(body).not.toContain('turns_json')
+  expect(body).not.toContain('"turns"')
 })
