@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets } from './schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from './schema'
 
 export type DbClient = ReturnType<typeof openDb>
 
@@ -11,7 +11,7 @@ export function openDb(path: string) {
   const raw = new Database(path)
   raw.exec('PRAGMA journal_mode=WAL')
   raw.exec('PRAGMA synchronous=NORMAL')
-  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets } })
+  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs } })
   // Schema bootstrap (idempotent). DDL lives here so tests need no migration runner.
   raw.exec(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -76,6 +76,13 @@ export function openDb(path: string) {
       session_id TEXT PRIMARY KEY,
       last_turn_offset INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS memory_distill_inputs (
+      distill_job_id TEXT PRIMARY KEY,
+      turns_json     TEXT NOT NULL,
+      turn_count     INTEGER NOT NULL,
+      char_count     INTEGER NOT NULL,
+      ts             INTEGER NOT NULL
     );
   `)
   // Idempotent migration: add source_cwd to pre-existing memories tables.
