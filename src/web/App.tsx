@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, type MemoryItem, type MemsideStatus } from './api'
-import { formatMemoryTime, sortCandidatesByTime } from './ui-utils'
+import { listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput, type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn } from './api'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn } from './ui-utils'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -31,6 +31,7 @@ export default function App() {
   const [status, setStatus] = useState<MemsideStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
 
   async function refresh() {
     try {
@@ -162,6 +163,7 @@ export default function App() {
           onApprove={() => approve(m.id)}
           onReject={() => reject(m.id)}
           onEdit={(t, b, s) => edit(m.id, t, b, s)}
+          onViewSource={() => setSourceInputFor(m.id)}
         />
       ))}
       {candidates.length === 0 && !loading && !error && (
@@ -169,6 +171,9 @@ export default function App() {
           暂无候选记忆。结束一个 claude code 会话后,后台会异步提炼(distill 约 15-30s),候选记忆会自动出现在这里。上方状态栏可看后台进度。
         </p>
       )}
+      {sourceInputFor ? (
+        <SourceInputModal memoryId={sourceInputFor} onClose={() => setSourceInputFor(null)} />
+      ) : null}
     </div>
   )
 }
@@ -178,11 +183,13 @@ function MemoryCard({
   onApprove,
   onReject,
   onEdit,
+  onViewSource,
 }: {
   m: MemoryItem
   onApprove: () => void
   onReject: () => void
   onEdit: (title: string, bodyMd: string, scopeType: 'project' | 'global') => Promise<void>
+  onViewSource: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(m.title)
@@ -239,9 +246,90 @@ function MemoryCard({
               拒绝
             </button>
             <button onClick={() => { setEditError(null); setEditing(true) }}>编辑</button>
+            {m.distillJobId ? (
+              <button onClick={onViewSource} style={{ marginLeft: 8 }}>
+                查看原始输入
+              </button>
+            ) : null}
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+function SourceInputModal({ memoryId, onClose }: { memoryId: string; onClose: () => void }) {
+  const [data, setData] = useState<SourceInput | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setData(null)
+    getSourceInput(memoryId)
+      .then((d) => { if (!cancelled) setData(d) })
+      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [memoryId])
+
+  // ESC 关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+        background: 'rgba(0,0,0,0.5)', display: 'flex',
+        alignItems: 'flex-start', justifyContent: 'center', padding: 40,
+        overflow: 'auto', zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: '#fff', borderRadius: 8, maxWidth: 900, width: '100%',
+          maxHeight: '85vh', overflow: 'auto', padding: 20,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <strong>{data?.title ?? '原始输入'}</strong>
+          <button onClick={onClose} style={{ fontSize: 18, lineHeight: 1 }}>×</button>
+        </div>
+
+        {loading ? (
+          <p style={{ color: '#666' }}>加载中…</p>
+        ) : error ? (
+          <p style={{ color: '#c00' }}>无法加载原始输入: {error}</p>
+        ) : data && data.available ? (
+          <>
+            <p style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
+              蒸馏时喂给模型的过滤版（文件类工具已压缩、超长已截断）· {data.turnCount ?? 0} turn · 约 {data.charCount ?? 0} 字
+            </p>
+            {data.bodyMd ? <p style={{ color: '#555', marginBottom: 12 }}>{data.bodyMd}</p> : null}
+            <div>
+              {(data.turns ?? []).map((t: SourceTurn, i: number) => {
+                const { label, color } = formatSourceTurn(t)
+                return (
+                  <div key={i} style={{ marginBottom: 8, border: '1px solid #eee', borderRadius: 4, padding: 8 }}>
+                    <span style={{ color, fontWeight: 600, fontSize: 12 }}>[{label}]</span>
+                    <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{t.content}</pre>
+                  </div>
+                )
+              })}
+            </div>
+          </>
+        ) : (
+          <p style={{ color: '#666' }}>该记忆无原始输入快照</p>
+        )}
+      </div>
     </div>
   )
 }
