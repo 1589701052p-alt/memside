@@ -1,13 +1,14 @@
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDiscards, memorySessionOffsets } from '@/db/schema'
+import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from '@/db/schema'
 import {
   canTransition,
   type InjectableMemorySet,
   type MemoryScope,
   type MemoryStatus,
   type RuntimeTag,
+  type TranscriptTurn,
 } from './pure'
 
 import type { ExistingMemoryForDedup } from './dedup'
@@ -364,4 +365,41 @@ export async function setSessionOffset(db: DbClient, sessionId: string, offset: 
   const now = Date.now()
   await db.insert(memorySessionOffsets).values({ sessionId, lastTurnOffset: offset, updatedAt: now })
     .onConflictDoUpdate({ target: memorySessionOffsets.sessionId, set: { lastTurnOffset: offset, updatedAt: now } })
+}
+
+// ---------------------------------------------------------------------------
+// 原始输入溯源：蒸馏时把喂给模型的过滤版 turns 快照存 memory_distill_inputs
+// （按 distill_job_id，无 FK，与 events 清理债务解耦）。saveSourceInput 是
+// best-effort 写（调用方 tick 吞错）；getSourceInput 反序列化失败返回 null。
+// ---------------------------------------------------------------------------
+
+export async function saveSourceInput(
+  db: DbClient, distillJobId: string, turns: TranscriptTurn[],
+): Promise<void> {
+  const turnsJson = JSON.stringify(turns)
+  const turnCount = turns.length
+  const charCount = turns.reduce((s, t) => s + t.content.length, 0)
+  const now = Date.now()
+  await db.insert(memoryDistillInputs).values({
+    distillJobId, turnsJson, turnCount, charCount, ts: now,
+  }).onConflictDoUpdate({
+    target: memoryDistillInputs.distillJobId,
+    set: { turnsJson, turnCount, charCount, ts: now },
+  })
+}
+
+export async function getSourceInput(
+  db: DbClient, distillJobId: string,
+): Promise<{ turns: TranscriptTurn[]; turnCount: number; charCount: number } | null> {
+  const rows = await db.select().from(memoryDistillInputs)
+    .where(eq(memoryDistillInputs.distillJobId, distillJobId)).limit(1)
+  if (rows.length === 0) return null
+  const r = rows[0]!
+  try {
+    const parsed = JSON.parse(r.turnsJson)
+    if (!Array.isArray(parsed)) return null
+    return { turns: parsed as TranscriptTurn[], turnCount: r.turnCount, charCount: r.charCount }
+  } catch {
+    return null
+  }
 }
