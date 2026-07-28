@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick, dedupCandidates, DISTILL_DEBOUNCE_MS } from '@/scheduler'
-import { createCandidate as realCreateCandidate } from '@/memory/store'
+import { createCandidate, createCandidate as realCreateCandidate, promoteCandidate } from '@/memory/store'
 import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from '@/db/schema'
 import type { DistillCandidate } from '@/memory/distiller'
 import { makeLoadTranscript } from '@/daemon'
@@ -815,4 +815,46 @@ test('tick still marks done when saveSourceInput throws (warn, non-blocking)', a
     inputsThrows = false
     db.insert = realInsert
   }
+})
+
+// ---------------------------------------------------------------------------
+// Task 7：subject-keyed 聚合接线 —— tick 查 project∪global slug 清单喂 distiller，
+// distiller 产出的 subjectSlug 随 createCandidate 入库。
+// ---------------------------------------------------------------------------
+
+test('tick: existing slugs (project + global union) reach the distiller prompt; subjectSlug persisted', async () => {
+  // spec §4.6：tick 查 listSubjectSlugs 并集喂 distiller；候选的 subjectSlug 随 createCandidate 入库。
+  const db = openDb(join(dir, 'slug.db'))
+  // 预置：project 域一个 slug、global 域一个 slug
+  const proj = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/repo', title: 't', bodyMd: 'b', tags: [],
+    sourceKind: 'manual', runtime: null, subjectSlug: 'refund-policy',
+  })
+  await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [],
+    sourceKind: 'manual', runtime: null, subjectSlug: 'global-topic',
+  })
+  await promoteCandidate(db, proj.id, { action: 'approve' })
+  const { enqueueDistillJob, tick } = await import('@/scheduler')
+  await enqueueDistillJob(db, { sourceEventId: 'se1', runtime: 'claude-code', cwd: '/repo', debounceKey: 'dk', debounceMs: 0 })
+  let distillUserPrompt = ''
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user' as const, content: 'refund rule' }], fullLength: 1 }),
+    callLLM: async (_sys, user) => {
+      callCount++
+      if (callCount === 1) {
+        distillUserPrompt = user
+        return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款14天', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: 'refund-policy' }] })
+      }
+      // dedup / judgeValue：保守全留
+      return JSON.stringify({ verdicts: [] })
+    },
+    createCandidate,
+  })
+  expect(distillUserPrompt).toContain('refund-policy')
+  expect(distillUserPrompt).toContain('global-topic')
+  const rows = await db.select().from(memories).where(eq(memories.title, '[category:invariant] 退款14天'))
+  expect(rows[0]!.subjectSlug).toBe('refund-policy')
+  db.$client.close()
 })
