@@ -3,8 +3,9 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDiscards } from '@/db/schema'
-import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards, getSessionOffset, setSessionOffset } from '@/memory/store'
+import { memories, memoryDistillJobs, memoryDiscards, memoryDistillInputs } from '@/db/schema'
+import type { TranscriptTurn } from '@/memory/pure'
+import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards, getSessionOffset, setSessionOffset, saveSourceInput, getSourceInput } from '@/memory/store'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
@@ -180,4 +181,42 @@ test('setSessionOffset UPSERTs: second write overwrites; getSessionOffset reads 
   // 第二次 Stop 蒸馏到 120 -> 覆盖
   await setSessionOffset(db, 'sess-A', 120)
   expect(await getSessionOffset(db, 'sess-A')).toBe(120)
+})
+
+test('saveSourceInput inserts a row, getSourceInput reads it back', async () => {
+  const turns = [
+    { role: 'user' as const, content: 'hello' },
+    { role: 'assistant' as const, content: 'hi there' },
+  ]
+  await saveSourceInput(db, 'job-1', turns)
+  const snap = await getSourceInput(db, 'job-1')
+  expect(snap).not.toBeNull()
+  expect(snap!.turnCount).toBe(2)
+  expect(snap!.charCount).toBe('hello'.length + 'hi there'.length)
+  expect(snap!.turns.length).toBe(2)
+  expect(snap!.turns[0]!.content).toBe('hello')
+})
+
+test('saveSourceInput UPSERT overwrites on same distillJobId (no duplicate rows)', async () => {
+  await saveSourceInput(db, 'job-2', [{ role: 'user' as const, content: 'first' }])
+  await saveSourceInput(db, 'job-2', [{ role: 'user' as const, content: 'second' }, { role: 'user' as const, content: 'third' }])
+  const rows = await db.select().from(memoryDistillInputs).where(eq(memoryDistillInputs.distillJobId, 'job-2'))
+  expect(rows.length).toBe(1)  // UPSERT 覆盖，不产生两行
+  const snap = await getSourceInput(db, 'job-2')
+  expect(snap!.turnCount).toBe(2)  // 第二次的值
+  expect(snap!.turns[0]!.content).toBe('second')
+})
+
+test('getSourceInput returns null for missing job', async () => {
+  const snap = await getSourceInput(db, 'no-such-job')
+  expect(snap).toBeNull()
+})
+
+test('getSourceInput returns null on malformed turns_json (deser failure, no crash)', async () => {
+  // 直接写一行坏 JSON，模拟历史/损坏数据
+  db.insert(memoryDistillInputs).values({
+    distillJobId: 'job-bad', turnsJson: 'not-valid-json{', turnCount: 0, charCount: 0, ts: 1,
+  }).run()
+  const snap = await getSourceInput(db, 'job-bad')
+  expect(snap).toBeNull()
 })

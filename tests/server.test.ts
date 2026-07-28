@@ -2,7 +2,7 @@ import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
-import { createCandidate, promoteCandidate } from '@/memory/store'
+import { createCandidate, promoteCandidate, saveSourceInput } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
 import { memoryDistillJobs, memoryDistillEvents, memories } from '@/db/schema'
@@ -398,4 +398,45 @@ test('POST /api/memories/bulk-promote skips not-found id and continues the batch
   const after = await db.select().from(memories)
   expect(after.length).toBe(2)
   expect(after.every((m) => m.status === 'rejected')).toBe(true)
+})
+
+test('GET /api/memories/:id/source-input returns available:true with turns when snapshot exists', async () => {
+  const c = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: '[category:x] t', bodyMd: 'b', tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r', distillJobId: 'job-snap' })
+  await saveSourceInput(db, 'job-snap', [{ role: 'user', content: 'the original input' }])
+  const r = await req(`/api/memories/${c.id}/source-input`)
+  expect(r.status).toBe(200)
+  expect(r.body.available).toBe(true)
+  expect(r.body.title).toContain('[category:x]')
+  expect(r.body.turnCount).toBe(1)
+  expect(r.body.turns[0]!.content).toBe('the original input')
+})
+
+test('GET /api/memories/:id/source-input returns available:false when memory has no distillJobId (manual)', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 'manual', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const r = await req(`/api/memories/${c.id}/source-input`)
+  expect(r.status).toBe(200)
+  expect(r.body.available).toBe(false)
+})
+
+test('GET /api/memories/:id/source-input returns available:false when snapshot row missing', async () => {
+  const c = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b', tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r', distillJobId: 'job-nosnap' })
+  // 不写快照行
+  const r = await req(`/api/memories/${c.id}/source-input`)
+  expect(r.status).toBe(200)
+  expect(r.body.available).toBe(false)
+})
+
+test('GET /api/memories/:id/source-input returns 404 when memory missing', async () => {
+  const r = await req('/api/memories/nope/source-input')
+  expect(r.status).toBe(404)
+})
+
+test('GET /api/memories list response does NOT contain turns (lazy load only)', async () => {
+  const c = await createCandidate(db, { scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b', tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r', distillJobId: 'job-list' })
+  await saveSourceInput(db, 'job-list', [{ role: 'user', content: 'SHOULD_NOT_APPEAR_IN_LIST' }])
+  const r = await req('/api/memories')
+  const body = JSON.stringify(r.body)
+  expect(body).not.toContain('SHOULD_NOT_APPEAR_IN_LIST')
+  expect(body).not.toContain('turns_json')
+  expect(body).not.toContain('"turns"')
 })

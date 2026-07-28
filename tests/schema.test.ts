@@ -168,3 +168,21 @@ test('migration adds session_id to pre-existing memory_distill_jobs, idempotent'
   expect((reopened.$client.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]).some((c) => c.name === 'session_id')).toBe(true)
   reopened.$client.close()
 })
+
+test('fresh db has memory_distill_inputs table with required columns', () => {
+  db = openDb(join(dir, 'mdi.db'))
+  const tables = db.$client.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_distill_inputs'").all() as { name: string }[]
+  expect(tables.length).toBe(1)
+  const cols = db.$client.prepare('PRAGMA table_info(memory_distill_inputs)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'distill_job_id')).toBe(true)
+  expect(cols.some((c) => c.name === 'turns_json')).toBe(true)
+  expect(cols.some((c) => c.name === 'turn_count')).toBe(true)
+  expect(cols.some((c) => c.name === 'char_count')).toBe(true)
+  expect(cols.some((c) => c.name === 'ts')).toBe(true)
+})
+
+test('memory_distill_inputs has no FK to memory_distill_jobs (decoupled cleanup)', () => {
+  db = openDb(join(dir, 'mdifk.db'))
+  const fks = db.$client.prepare('PRAGMA foreign_key_list(memory_distill_inputs)').all()
+  expect(fks.length).toBe(0)
+})

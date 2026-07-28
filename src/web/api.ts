@@ -21,6 +21,7 @@ export interface MemoryItem {
   runtime?: string | null
   sourceCwd?: string | null
   sourceKind?: string
+  distillJobId?: string | null
   createdAt?: number
   version?: number
   valueClass?: string | null
@@ -95,4 +96,34 @@ export async function bulkPromote(
     headers: { 'content-type': 'application/json' },
   })
   return (await res.json()) as { rejected: number }
+}
+
+export interface SourceTurn {
+  role: string
+  content: string
+  isError?: boolean
+  toolName?: string
+  toolInputPath?: string
+}
+
+export interface SourceInput {
+  available: boolean
+  title?: string
+  bodyMd?: string
+  valueClass?: string | null
+  sourceCwd?: string | null
+  createdAt?: number
+  turnCount?: number
+  charCount?: number
+  turns?: SourceTurn[]
+}
+
+/**
+ * GET /api/memories/:id/source-input - 懒加载产生这条记忆的「蒸馏时喂模型的过滤版
+ * transcript」。遮罩层点击时拉取；不进列表轮询。available:false 表示无快照
+ * （手动记忆 / 历史记忆 / 写失败）。
+ */
+export async function getSourceInput(id: string, fetchFn: FetchLike = fetch): Promise<SourceInput> {
+  const res = await fetchFn(`/api/memories/${id}/source-input`)
+  return (await res.json()) as SourceInput
 }

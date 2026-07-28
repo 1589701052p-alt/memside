@@ -3,7 +3,7 @@ import { desc } from 'drizzle-orm'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput } from '@/memory/store'
 import { parseTranscriptFile } from '@/claude/transcript'
 import type { EnqueueInput } from '@/scheduler'
 
@@ -192,6 +192,29 @@ export function createApp(deps: AppDeps) {
     const got = await getMemoryById(deps.db, c.req.param('id'))
     if (!got) return c.json({ error: 'not found' }, 404)
     return c.json(got)
+  })
+
+  // 原始输入溯源：懒加载产生这条记忆的「蒸馏时喂模型的过滤版 transcript」。
+  // 不塞进列表接口（避免 3s 轮询响应膨胀）。无 distillJobId（手动/历史）或无快照行
+  // -> available:false（不回填、不撒谎）；有快照 -> 返回 turns + memory 摘要。
+  app.get('/api/memories/:id/source-input', async (c) => {
+    const got = await getMemoryById(deps.db, c.req.param('id'))
+    if (!got) return c.json({ error: 'not found' }, 404)
+    const m = got.memory
+    if (!m.distillJobId) return c.json({ available: false })
+    const snap = await getSourceInput(deps.db, m.distillJobId)
+    if (!snap) return c.json({ available: false })
+    return c.json({
+      available: true,
+      title: m.title,
+      bodyMd: m.bodyMd,
+      valueClass: m.valueClass,
+      sourceCwd: m.sourceCwd,
+      createdAt: m.createdAt,
+      turnCount: snap.turnCount,
+      charCount: snap.charCount,
+      turns: snap.turns,
+    })
   })
 
   app.post('/api/memories/:id/promote', async (c) => {

@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { listMemories, promoteMemory, patchMemory } from '@/web/api'
+import { listMemories, promoteMemory, patchMemory, getSourceInput } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
 // not unit-tested; this client is the testable seam — a `fetchFn` param lets
@@ -46,4 +46,17 @@ test('patchMemory throws on non-OK response with server error message', async ()
   const fetchFn = (async () =>
     new Response(JSON.stringify({ error: 'project scope requires a sourceCwd' }), { status: 409 })) as any
   await expect(patchMemory('1', { scopeType: 'project' }, fetchFn)).rejects.toThrow('sourceCwd')
+})
+
+test('getSourceInput calls GET /api/memories/:id/source-input', async () => {
+  let captured: { url: string; method: string } | null = null
+  const fetchFn = (async (url: string, init: any) => {
+    captured = { url, method: init?.method ?? 'GET' }
+    return new Response(JSON.stringify({ available: true, title: 't', turns: [{ role: 'user', content: 'x' }], turnCount: 1, charCount: 1 }), { status: 200 })
+  }) as any
+  const data = await getSourceInput('42', fetchFn)
+  expect(captured!.url).toBe('/api/memories/42/source-input')
+  expect(captured!.method).toBe('GET')
+  expect(data.available).toBe(true)
+  expect(data.turns!.length).toBe(1)
 })

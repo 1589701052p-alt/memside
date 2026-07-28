@@ -29,3 +29,17 @@ test('App.tsx renders valueClass badge labels and bulk-reject button (source tex
   // 批量拒绝未评估按钮
   expect(src).toContain('批量拒绝未评估')
 })
+
+// 原始输入溯源（2026-07-28）：卡片「查看原始输入」按钮 + 遮罩层组件。
+// React 组件不单测，源码文本断言锁住 UI 锚点，refactor 删除即变红。
+test('App.tsx has source-input view button + modal (source text)', () => {
+  expect(src).toContain('查看原始输入')
+  expect(src).toContain('SourceInputModal')
+})
+
+test('App.tsx source-input modal shows unavailable / loading / error states', () => {
+  // 状态可见性（CLAUDE.md 硬规则）：不得静默 stall
+  expect(src).toContain('无原始输入快照')
+  expect(src).toContain('加载中')
+  expect(src).toContain('无法加载原始输入')
+})

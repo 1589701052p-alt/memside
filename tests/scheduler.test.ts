@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick, dedupCandidates, DISTILL_DEBOUNCE_MS } from '@/scheduler'
 import { createCandidate as realCreateCandidate } from '@/memory/store'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from '@/db/schema'
 import type { DistillCandidate } from '@/memory/distiller'
 import { makeLoadTranscript } from '@/daemon'
 
@@ -745,4 +745,74 @@ test('tick discards taming candidate to logDiscards (reason=taming), no createCa
   expect(discards[0]!.title).toContain('永远同意')
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(rows[0]!.status).toBe('done')
+})
+
+// ---------------------------------------------------------------------------
+// 原始输入溯源：tick 在有候选入库时 best-effort 写 memory_distill_inputs 快照。
+// 0 候选入库不写；写失败只 warn、job 仍 done。
+// ---------------------------------------------------------------------------
+
+test('tick writes source-input snapshot when candidates are kept', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'we refund within 14 days' }], fullLength: 1 }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] refund 14d', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+  })
+  const snaps = await db.select().from(memoryDistillInputs).where(eq(memoryDistillInputs.distillJobId, jobId))
+  expect(snaps.length).toBe(1)
+  expect(snaps[0]!.turnCount).toBe(1)
+  expect(snaps[0]!.turnsJson).toContain('we refund within 14 days')
+})
+
+test('tick does NOT write source-input snapshot when 0 candidates kept (all discarded)', async () => {
+  // 与既有 public-knowledge 丢弃测试（行 248）同 mock 模式：1 候选 + 无 existing ->
+  // dedup 短路（不调 LLM），judgeValue 判 public-knowledge -> 丢弃，0 候选入库。
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] js array map', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, category: 'public-knowledge' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+    },
+    createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+  })
+  const snaps = await db.select().from(memoryDistillInputs).where(eq(memoryDistillInputs.distillJobId, jobId))
+  expect(snaps.length).toBe(0)  // 0 候选入库，不写快照
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('done')
+})
+
+test('tick still marks done when saveSourceInput throws (warn, non-blocking)', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  // 包一层 db.insert：仅对 memory_distill_inputs 表的 insert 抛错，其余透传。
+  // 与既有 setSessionOffset-throws 测试（行 506-530）同模式：monkey-patch + flag + finally 还原。
+  const realInsert = db.insert.bind(db)
+  let inputsThrows = false
+  db.insert = ((table: unknown) => {
+    const builder = realInsert(table as any)
+    if (inputsThrows && table === memoryDistillInputs) {
+      throw new Error('mocked distill_inputs insert failure')
+    }
+    return builder
+  }) as any
+  try {
+    inputsThrows = true
+    await tick(db, {
+      loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+      callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+      createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+    })
+    const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+    expect(rows[0]!.status).toBe('done')  // 写失败可吞，job 仍 done
+  } finally {
+    inputsThrows = false
+    db.insert = realInsert
+  }
 })

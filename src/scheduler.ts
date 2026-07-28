@@ -3,7 +3,7 @@ import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope, logDiscards, setSessionOffset, type DiscardRecord } from '@/memory/store'
+import { listForDedupByScope, logDiscards, setSessionOffset, saveSourceInput, type DiscardRecord } from '@/memory/store'
 import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass } from '@/memory/valueFilter'
 import type { MemoryInput, Memory } from '@/memory/store'
@@ -130,7 +130,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         processed += 1
         continue
       }
-      const candidates: DistillCandidate[] = await distillTranscript({
+      const { candidates, filteredTurns } = await distillTranscript({
         turns: newTurns,  // 只喂新增 turn，不再全量
         runtime: job.runtime as 'claude-code' | 'opencode',
         cwd: job.cwd ?? '',
@@ -172,6 +172,12 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           sourceEventId: job.sourceEventId,
           valueClass: k.valueClass,
         })
+      }
+      // 原始输入溯源：有候选入库时 best-effort 快照喂给模型的过滤版 turns。
+      // 失败只 warn、不阻塞 done（与 logDiscards / setSessionOffset 同级）。
+      if (keepWithClass.length > 0) {
+        try { await saveSourceInput(db, job.id, filteredTurns) }
+        catch (e) { console.warn('memside: saveSourceInput failed', e) }
       }
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() }).where(eq(memoryDistillJobs.id, job.id)).run()
       // 第五轮：本次蒸馏到 fullLength，下次该 session 从此处切。仅 job 有 sessionId 时

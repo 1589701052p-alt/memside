@@ -103,3 +103,14 @@ export const memorySessionOffsets = sqliteTable(
     updatedAt: integer('updated_at').notNull(),
   },
 )
+
+export const memoryDistillInputs = sqliteTable(
+  'memory_distill_inputs',
+  {
+    distillJobId: text('distill_job_id').primaryKey(),
+    turnsJson: text('turns_json').notNull(),
+    turnCount: integer('turn_count').notNull(),
+    charCount: integer('char_count').notNull(),
+    ts: integer('ts').notNull(),
+  },
+)

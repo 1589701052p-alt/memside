@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -73,4 +73,38 @@ test('sortCandidatesByTime: 负数 ts 按数值大小参与排序', () => {
   ]
   const sorted = sortCandidatesByTime(items)
   expect(sorted.map((i) => i.id)).toEqual(['c', 'a', 'b'])
+})
+
+// --- formatSourceTurn ---
+// 原始输入遮罩层按 role 分色渲染的纯映射。CLAUDE.md「首选可断言面」：抽纯函数层测，
+// React 组件不单测，靠 tests/web-ui.test.ts 源码文本兜底。
+
+test('formatSourceTurn: user -> 蓝色标签', () => {
+  const r = formatSourceTurn({ role: 'user', content: 'x' })
+  expect(r.label).toBe('user')
+  expect(r.color).toBe('#1565c0')
+})
+
+test('formatSourceTurn: assistant -> 深色标签', () => {
+  const r = formatSourceTurn({ role: 'assistant', content: 'x' })
+  expect(r.label).toBe('assistant')
+  expect(r.color).toBe('#222')
+})
+
+test('formatSourceTurn: tool (non-error) -> 灰色标签', () => {
+  const r = formatSourceTurn({ role: 'tool', content: 'x' })
+  expect(r.label).toBe('tool')
+  expect(r.color).toBe('#666')
+})
+
+test('formatSourceTurn: tool error -> 红色标签', () => {
+  const r = formatSourceTurn({ role: 'tool', content: 'boom', isError: true })
+  expect(r.label).toBe('tool')
+  expect(r.color).toBe('#c00')
+})
+
+test('formatSourceTurn: unknown role -> 灰色 + 原角色名', () => {
+  const r = formatSourceTurn({ role: 'system', content: 'x' })
+  expect(r.label).toBe('system')
+  expect(r.color).toBe('#666')
 })

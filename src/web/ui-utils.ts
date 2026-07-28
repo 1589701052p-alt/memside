@@ -27,3 +27,19 @@ export function formatMemoryTime(ts: number | undefined | null): string {
 export function sortCandidatesByTime<T extends { createdAt?: number }>(items: T[]): T[] {
   return [...items].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
 }
+
+/**
+ * 原始输入遮罩层：把一个 transcript turn 映射成 { label, color }，供按 role 分色渲染。
+ * user 蓝、assistant 深、tool 灰（error 红）、其余灰 + 原角色名。纯函数，可单测。
+ *
+ * 设计依据：docs/superpowers/specs/2026-07-28-source-input-traceability-design.md §7。
+ *
+ * 参数类型放宽 content?：测试与遮罩层都直接喂 SourceTurn 形状的字面量（含 content），
+ * 列出 content? 让对象字面量通过 TS excess-property 检查，函数本身只读 role / isError。
+ */
+export function formatSourceTurn(turn: { role: string; content?: string; isError?: boolean }): { label: string; color: string } {
+  if (turn.role === 'user') return { label: 'user', color: '#1565c0' }
+  if (turn.role === 'assistant') return { label: 'assistant', color: '#222' }
+  if (turn.role === 'tool') return { label: 'tool', color: turn.isError ? '#c00' : '#666' }
+  return { label: turn.role, color: '#666' }
+}
