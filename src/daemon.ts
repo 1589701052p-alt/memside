@@ -19,6 +19,9 @@ export interface DaemonOpts {
   dbPath?: string
   port?: number
   installClaudeHooks?: boolean
+  /** 一键启动（生产模式）：vite build 产物目录，透传为 createApp 的
+   * staticDir。不传则 daemon 不托管静态文件（裸 daemon 语义不变）。 */
+  serveStaticDir?: string
 }
 
 /**
@@ -136,7 +139,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
 
   const adapter = new ClaudeCodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
-  const app = createApp({ db, adapter, enqueueDistillJob, broadcast })
+  const app = createApp({ db, adapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {

@@ -9,7 +9,10 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "dev:web": "vite"
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "bun run build && bun run scripts/start.ts",
+    "dev": "bun run scripts/dev.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

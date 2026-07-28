@@ -26,17 +26,15 @@ AI agent (目前仅支持Claude Code) 的本地记忆 sidecar。它监听你的 
 ```bash
 git clone <this-repo> memside && cd memside
 bun install
-
-# 启动 daemon + 装 claude code hooks(每台机器一次)
-bun run src/cli.ts start-and-install
-
-# 起 web UI(另开一个终端)
-bun run dev:web   # -> http://localhost:5173
+bun run start   # 构建前端 + 启动 daemon + 装 hooks -> http://localhost:7777
 ```
 
-跑完上面三步,memside 就在后台工作了。然后**正常用 claude code**即可--不用改你的使用习惯。
+跑完上面两步,memside 就在后台工作了:浏览器开 `http://localhost:7777`
+就是审批 UI。然后**正常用 claude code**即可--不用改你的使用习惯。
 
-> 上面的 `bun run src/cli.ts <命令>` 是 clone 后直接就能用的方式。如果你执行过 `bun link`,也可以用全局命令 `memside <命令>`,两者完全等价(见下面 [CLI 命令](#cli-命令))。本文统一用 `bun run src/cli.ts`,省去 link 步骤。
+> 开发调试想保留前端热更新,用 `bun run dev`(daemon + vite dev 双进程,
+> UI 在 5173)。旧的分布命令(`bun run src/cli.ts start-and-install` +
+> `bun run dev:web`)仍然可用。
 
 ---
 
@@ -44,23 +42,19 @@ bun run dev:web   # -> http://localhost:5173
 
 这一节手把手带你走完一次完整循环:**产生记忆 → 审批 → 下次自动注入**。花 2 分钟走一遍,你就懂日常怎么用了。
 
-### 第 1 步:确认 daemon 在跑 + hooks 已装
+### 第 1 步:一键启动 + 打开 web UI
 
 ```bash
-bun run src/cli.ts start-and-install
+bun run start
 ```
 
-输出 `memside daemon on http://127.0.0.1:7777 (hooks installed)` 就对了。如果提示端口占用,说明 daemon 已经在跑了,改用 `bun run src/cli.ts install` 只补装 hooks 即可。
+输出 `memside on http://127.0.0.1:7777 (UI + API, hooks installed)` 就对了
+(daemon 在跑、hooks 已装、UI 已托管)。如果提示端口占用,说明 daemon 已经
+在跑了,改用 `bun run src/cli.ts install` 只补装 hooks 即可。
 
-### 第 2 步:打开 web UI
+浏览器开 `http://localhost:7777`。此时审批队列是空的--还没有候选记忆。
 
-```bash
-bun run dev:web
-```
-
-浏览器开 `http://localhost:5173`。此时审批队列是空的--还没有候选记忆。
-
-### 第 3 步:用 claude code 聊点"值得记住"的事
+### 第 2 步:用 claude code 聊点"值得记住"的事
 
 在**任意 repo** 开一个 claude code 会话,聊点带约定/规则/教训的内容,比如:
 
@@ -70,7 +64,7 @@ bun run dev:web
 
 会话结束时 `Stop` hook 触发,memside 在后台把这次对话的 transcript 抓走、送去 LLM 提炼。
 
-### 第 4 步:等 ~30 秒,回 web UI 看候选记忆
+### 第 3 步:等 ~30 秒,回 web UI 看候选记忆
 
 distill 是后台异步的(debounce 5s + LLM 往返 ~15-30s)。稍等片刻刷新 web UI,会出现一条候选记忆,类似:
 
@@ -78,14 +72,14 @@ distill 是后台异步的(debounce 5s + LLM 往返 ~15-30s)。稍等片刻刷�
 
 如果聊的是踩坑(比如工具报错、你纠正了 claude),会标成 `[category:anti-pattern]`。
 
-### 第 5 步:审批
+### 第 4 步:审批
 
 在 web UI 里:
 - 觉得有用 → 点 **approve**(进入注入池)
 - 觉得是噪音 → 点 **reject**(不会再出现)
 - 想改措辞 → 点 **edit** 改 title/bodyMd 后保存,再 approve
 
-### 第 6 步:开新会话,验证注入
+### 第 5 步:开新会话,验证注入
 
 在**同一个 repo** 开一个新的 claude code 会话。`SessionStart` hook 会把刚 approve 的记忆作为 `additionalContext` 注入。会话的 context 开头会有:
 
@@ -111,6 +105,14 @@ claude 会把它当成软约定参考。(注:这是注入到 context 里的,clau
 - **project 记忆**:绑到你开会话时的 cwd,只在该项目注入。
 - **global 记忆**:在所有会话注入(在 web UI 手动创建记忆时可选 global)。
 - **错误信号**:工具失败(`PostToolUse` + `is_error`)、你纠正 claude,会被标成 `[category:anti-pattern]`,下次避免重蹈覆辙。
+
+## 一键脚本(推荐日常入口)
+
+| 命令 | 作用 |
+|---|---|
+| `bun run start` | 生产模式:构建前端 + daemon 单端口(7777)同时服务 UI/API + 幂等装 hooks |
+| `bun run dev` | 开发模式:daemon(7777) + vite dev(5173) 双进程,日志带 `[daemon]`/`[web]` 前缀,Ctrl+C 一并回收 |
+| `bun run build` | 只构建前端到 `src/web/dist/`(`bun run start` 每次都会先跑它) |
 
 ## CLI 命令
 
@@ -167,7 +169,7 @@ memside 直接读 claude code 自己的 settings,所以 claude code 能跑,disti
 
 **hook / demo 返回 `502 Bad Gateway`。** 系统代理拦截了 loopback 调用。装的 hook 已自带 `--noproxy` 绕过;跑 demo 或手动 `curl` 要前置 `NO_PROXY=127.0.0.1,localhost`。
 
-**会话变慢/卡顿。** daemon 没跑,每个 hook 都吃满 2s 超时。启动它:`bun run src/cli.ts start`(或 `start-and-install`)。确认存活:`curl -s http://127.0.0.1:7777/api/memories`。
+**会话变慢/卡顿。** daemon 没跑,每个 hook 都吃满 2s 超时。启动它:`bun run start`(构建+daemon+hooks 一条命令;不想重新构建就用 `bun run src/cli.ts start`)。确认存活:`curl -s http://127.0.0.1:7777/api/memories`。
 
 **没有候选记忆产出。** distiller 调不通 LLM。查 `~/.memside/memside.db` 里 `memory_distill_jobs.last_error`,确认凭证可用(claude code 自己能跑是个好信号)。常见原因:`ANTHROPIC_DEFAULT_HAIKU_MODEL` 的 model id 在你的代理上不可达--换成代理支持的 haiku 档 model。
 
@@ -178,9 +180,10 @@ memside 直接读 claude code 自己的 settings,所以 claude code 能跑,disti
 ## 开发
 
 ```bash
-bun test              # 100 个测试
+bun test              # 测试套件
 bun run typecheck     # tsc --noEmit
-bun run dev:web       # vite dev server(5173,代理到 :7777)
+bun run dev           # 一键双进程:daemon(7777) + vite dev(5173,代理到 :7777)
+bun run dev:web       # 只起 vite dev(5173)——需要 daemon 已单独在跑
 ```
 
 代码库 TDD 驱动,每个 fix 都带回归测试。构建状态见 `STATE.md`。memside 的存储、distiller、审批状态机借鉴自上游 agent-workflow 项目的 RFC-041。
