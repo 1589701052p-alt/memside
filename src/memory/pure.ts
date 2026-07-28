@@ -251,3 +251,23 @@ export function filterTranscriptForDistill(
     return [...turns]
   }
 }
+
+// ---------------------------------------------------------------------------
+// Subject-keyed 聚合（spec §4.1）：slug 规范化。纯函数、永不抛。
+// ---------------------------------------------------------------------------
+
+export const SUBJECT_SLUG_MAX_LEN = 48
+
+const SUBJECT_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
+
+/**
+ * 规范化 subject slug：trim + 转小写后校验 kebab-case（最长 48）；非法一律
+ * 返回 null（= 未分组），永不抛。slug 是增强信号，任何非法输入都静默降级，
+ * 不阻塞蒸馏 / 审批闭环（spec D6）。
+ */
+export function normalizeSubjectSlug(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim().toLowerCase()
+  if (s.length === 0 || s.length > SUBJECT_SLUG_MAX_LEN) return null
+  return SUBJECT_SLUG_RE.test(s) ? s : null
+}
