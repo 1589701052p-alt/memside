@@ -80,7 +80,7 @@ OPUS-5 的模型是"一个 subject 一个文件，事实往里堆"：同一主�
 
 ### 4.6 Scheduler（`src/scheduler.ts`）
 
-- tick 在调 `distillTranscript` 前，按 job 的 scope（project: `job.cwd`；global: null）调 `listSubjectSlugs`，作为 `existingSlugs` 传入。查询失败 → 传空数组（distill 照常）。
+- tick 在调 `distillTranscript` 前，分别查 `listSubjectSlugs` 的 project（`job.cwd`）与 global 两份清单取**并集**（去重、字母序）作为 `existingSlugs` 传入——同一 job 的候选可能被标成 project 或 global，两份清单都要给模型看。查询失败 → 传空数组（distill 照常）。
 - 候选入库时把 `subjectSlug` 透传给 `createCandidate`。
 
 ### 4.7 Web UI（`src/web/App.tsx` + `src/server.ts`）
@@ -114,7 +114,7 @@ Stop hook → capture → scheduler.tick
 | 迁移 `ALTER TABLE` 失败 | 与现有列迁移行为一致：`openDb` 内同步执行，失败即 `openDb` 抛错、daemon 启动失败并显式报错（不静默降级）。slug 是无回填的纯增量列，失败面与 `value_class` 迁移相同 |
 | slug 同义碎裂（模型无视清单） | 残留风险：组碎成多个一条一组。缓解：D3 清单 + 用户审批时可改 slug 归并 |
 | 老行 NULL slug | 渲染逐字节兼容现状 |
-| UI PATCH 非法 slug | server 400（MemoryConflictError），UI 显示错误 |
+| UI PATCH 非法 slug | server 409（`MemoryConflictError`，与现有 PATCH 错误路径一致），UI 显示错误 |
 
 ## 7. 测试策略
 
