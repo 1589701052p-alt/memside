@@ -11,6 +11,8 @@ export interface InjectableMemoryRow {
   createdAt: number
   version: number
   tags: string[]
+  /** 主题归组键（spec §4.5）；null/缺省 = 未分组，平铺渲染。 */
+  subjectSlug?: string | null
 }
 
 export interface InjectableMemorySet {

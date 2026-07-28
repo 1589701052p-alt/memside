@@ -1,9 +1,10 @@
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from '@/db/schema'
 import {
   canTransition,
+  normalizeSubjectSlug,
   type InjectableMemorySet,
   type MemoryScope,
   type MemoryStatus,
@@ -27,6 +28,8 @@ export interface MemoryInput {
   distillJobId?: string | null
   distillAction?: 'new' | 'update_of' | 'duplicate_of' | 'conflict_with' | null
   valueClass?: ValueClass | null
+  /** 主题归组键（spec §4.4）；缺省/null = 未分组。 */
+  subjectSlug?: string | null
 }
 
 export interface Memory {
@@ -49,6 +52,7 @@ export interface Memory {
   createdAt: number
   version: number
   valueClass: ValueClass | null
+  subjectSlug: string | null
 }
 
 function parseTags(s: string): string[] {
@@ -70,6 +74,7 @@ function rowToMemory(r: any): Memory {
     supersedesId: r.supersedesId ?? null, supersededById: r.supersededById ?? null,
     approvedAt: r.approvedAt ?? null, createdAt: r.createdAt, version: r.version,
     valueClass: (r.valueClass ?? null) as ValueClass | null,
+    subjectSlug: r.subjectSlug ?? null,
   }
 }
 
@@ -84,13 +89,15 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null,
     approvedAt: null, createdAt: now, version: 1, valueClass: input.valueClass ?? null,
+    subjectSlug: input.subjectSlug ?? null,
   })
   return rowToMemory({ id, scopeType: input.scopeType, scopeId: input.scopeId, runtime: input.runtime,
     title: input.title, bodyMd: input.bodyMd, tags: JSON.stringify(input.tags), status: 'candidate',
     sourceKind: input.sourceKind, sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null, approvedAt: null,
-    createdAt: now, version: 1, valueClass: input.valueClass ?? null })
+    createdAt: now, version: 1, valueClass: input.valueClass ?? null,
+    subjectSlug: input.subjectSlug ?? null })
 }
 
 export async function getMemoryById(db: DbClient, id: string): Promise<{ memory: Memory } | null> {
@@ -118,6 +125,7 @@ export async function listApprovedByScope(
   const toRow = (r: any) => ({
     id: r.id, scopeType: r.scopeType as MemoryScope, scopeId: r.scopeId, runtime: (r.runtime ?? null) as RuntimeTag,
     title: r.title, bodyMd: r.bodyMd, createdAt: r.createdAt, version: r.version, tags: parseTags(r.tags),
+    subjectSlug: r.subjectSlug ?? null,
   })
   return {
     byScope: {
@@ -128,6 +136,30 @@ export async function listApprovedByScope(
 }
 
 export const DEDUP_EXISTING_LIMIT = 50
+
+export const SUBJECT_SLUG_LIST_LIMIT = 50
+
+/**
+ * 列出某 scope 下候选+已审批记忆已用的 subject slug（去重、字母序、LIMIT 50）。
+ * scheduler 蒸馏前注入 distiller prompt，促进模型复用既有主题、对抗同义碎裂
+ * （spec D3）。project = 精确 scopeId；global = scopeId IS NULL
+ * （与 listForDedupByScope 同规则）。
+ */
+export async function listSubjectSlugs(
+  db: DbClient,
+  opts: { scopeType: MemoryScope; scopeId: string | null },
+): Promise<string[]> {
+  const scopeClause = opts.scopeId === null ? isNull(memories.scopeId) : eq(memories.scopeId, opts.scopeId)
+  const rows = await db.selectDistinct({ slug: memories.subjectSlug }).from(memories).where(
+    and(
+      eq(memories.scopeType, opts.scopeType),
+      scopeClause,
+      inArray(memories.status, ['candidate', 'approved']),
+      isNotNull(memories.subjectSlug),
+    ),
+  ).orderBy(asc(memories.subjectSlug)).limit(SUBJECT_SLUG_LIST_LIMIT).all()
+  return rows.map((r) => r.slug).filter((s): s is string => typeof s === 'string')
+}
 
 /**
  * Load same-scope candidate + approved memories for dedup comparison. project =
@@ -232,6 +264,8 @@ export interface PatchInput {
   title?: string
   bodyMd?: string
   tags?: string[]
+  /** 传 string 校验格式（非法抛 MemoryConflictError）；传 null 移出分组；不传不改。 */
+  subjectSlug?: string | null
 }
 
 export async function patchMemory(
@@ -284,6 +318,16 @@ export async function patchMemory(
       const cur = parseTags(row.tags as string)
       const same = input.tags.length === cur.length && [...input.tags].sort().join() === [...cur].sort().join()
       if (!same) { changed.push('tags'); set.tags = JSON.stringify(input.tags) }
+    }
+    if (input.subjectSlug !== undefined) {
+      if (input.subjectSlug !== null && normalizeSubjectSlug(input.subjectSlug) === null) {
+        throw new MemoryConflictError(`invalid subjectSlug: ${JSON.stringify(input.subjectSlug)}`)
+      }
+      const nextSlug = input.subjectSlug === null ? null : normalizeSubjectSlug(input.subjectSlug)
+      if (nextSlug !== (row.subjectSlug ?? null)) {
+        changed.push('subjectSlug')
+        set.subjectSlug = nextSlug
+      }
     }
     // Idempotent no-op: return unchanged row, no version bump, no write, no WS.
     if (changed.length === 0) return { memory: rowToMemory(row), changedFields: [] }
