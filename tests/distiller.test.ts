@@ -21,7 +21,7 @@ test('distillTranscript parses candidates from mocked API JSON', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'we only refund within 14 days' }],
     runtime: 'claude-code',
-    cwd: '/repo',
+    cwd: '/repo', existingSlugs: [],
     callLLM: async () => JSON.stringify(fakeResponse),
   })
   expect(result.candidates.length).toBe(1)
@@ -32,7 +32,7 @@ test('distillTranscript parses candidates from mocked API JSON', async () => {
 test('distillTranscript returns [] on malformed response', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'hi' }],
-    runtime: 'claude-code', cwd: '/repo',
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
     callLLM: async () => 'not json',
   })
   expect(result.candidates).toEqual([])
@@ -41,7 +41,7 @@ test('distillTranscript returns [] on malformed response', async () => {
 test('distillTranscript never throws (swallows API errors)', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'hi' }],
-    runtime: 'claude-code', cwd: '/repo',
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
     callLLM: async () => { throw new Error('api down') },
   })
   expect(result.candidates).toEqual([])
@@ -51,7 +51,7 @@ test('distillTranscript parses fence-wrapped JSON (regression)', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'we only refund within 14 days' }],
     runtime: 'claude-code',
-    cwd: '/repo',
+    cwd: '/repo', existingSlugs: [],
     callLLM: async () => '```json\n{"candidates":[{"title":"[category:invariant] refunds within 14 days","bodyMd":"14d","scope":"project","runtime":null,"distillAction":"new"}]}\n```',
   })
   expect(result.candidates.length).toBe(1)
@@ -62,7 +62,7 @@ test('distillTranscript retries when candidate lacks [category: prefix', async (
   let calls = 0
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo',
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
     callLLM: async () => {
       calls++
       if (calls === 1) return JSON.stringify({ candidates: [{ title: 'no prefix here', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -77,7 +77,7 @@ test('distillTranscript retries when candidate lacks [category: prefix', async (
 test('distillTranscript returns [] when retry exhausted', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo',
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
     callLLM: async () => 'not json',
   })
   expect(result.candidates).toEqual([])
@@ -96,7 +96,7 @@ test('distillTranscript filters file-source Read results out of the LLM prompt',
       { role: 'user', content: 'read the file' },
       { role: 'tool', content: 'SECRET_SOURCE_CODE_LINE'.repeat(200), toolName: 'Read', toolInputPath: '/a.ts' },
     ],
-    runtime: 'claude-code', cwd: '/r',
+    runtime: 'claude-code', cwd: '/r', existingSlugs: [],
     callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ candidates: [] }) },
   })
   expect(captured).toContain('[file: /a.ts')
@@ -109,7 +109,7 @@ test('detectErrorSignals still sees original (unfiltered) tool failure', async (
     turns: [
       { role: 'tool', content: 'boom', toolName: 'Bash', isError: true },
     ],
-    runtime: 'claude-code', cwd: '/r',
+    runtime: 'claude-code', cwd: '/r', existingSlugs: [],
     callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ candidates: [] }) },
   })
   expect(captured).toContain('"toolFailures":1')
@@ -125,7 +125,7 @@ test('distillTranscript defaults missing ruleObject to codebase', async () => {
   // 必须默认 codebase（精度优先：不保护，走 derivable 判定）。
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo',
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
   })
   expect(result.candidates.length).toBe(1)
@@ -135,7 +135,7 @@ test('distillTranscript defaults missing ruleObject to codebase', async () => {
 test('distillTranscript parses explicit ruleObject=domain', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo',
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] }),
   })
   expect(result.candidates.length).toBe(1)
@@ -147,7 +147,7 @@ test('distillTranscript retries when ruleObject is invalid', async () => {
   let calls = 0
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo',
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
     callLLM: async () => {
       calls++
       if (calls === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'bogus' }] })
@@ -218,7 +218,7 @@ test('distillTranscript returns filteredTurns equal to filterTranscriptForDistil
     { role: 'assistant', content: 'ok' },
   ]
   const result = await distillTranscript({
-    turns, runtime: 'claude-code', cwd: '/r',
+    turns, runtime: 'claude-code', cwd: '/r', existingSlugs: [],
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
   })
   expect(result.filteredTurns).toEqual(filterTranscriptForDistill(turns))
@@ -230,9 +230,57 @@ test('distillTranscript returns filteredTurns equal to filterTranscriptForDistil
 test('distillTranscript failure degrades to empty filteredTurns', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'hi' }],
-    runtime: 'claude-code', cwd: '/r',
+    runtime: 'claude-code', cwd: '/r', existingSlugs: [],
     callLLM: async () => { throw new Error('api down') },
   })
   expect(result.candidates).toEqual([])
   expect(result.filteredTurns).toEqual([])
+})
+
+// subject-keyed 聚合（spec §4.3）：subjectSlug 解析 + existingSlugs 清单进 prompt。
+
+test('distillTranscript includes existingSlugs in user prompt', async () => {
+  let captured = ''
+  await distillTranscript({
+    turns: [{ role: 'user', content: 'x' }],
+    runtime: 'claude-code', cwd: '/repo',
+    existingSlugs: ['refund-policy', 'hook-install'],
+    callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ candidates: [] }) },
+  })
+  expect(captured).toContain('refund-policy')
+  expect(captured).toContain('hook-install')
+})
+
+test('distillTranscript parses legal subjectSlug', async () => {
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'x' }],
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: 'refund-policy' }] }),
+  })
+  expect(result.candidates[0]!.subjectSlug).toBe('refund-policy')
+})
+
+test('distillTranscript degrades illegal subjectSlug to null WITHOUT retry', async () => {
+  let calls = 0
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'x' }],
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => { calls++; return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subjectSlug: 'refund policy' }] }) },
+  })
+  expect(calls).toBe(1) // 不重试（spec D6）
+  expect(result.candidates[0]!.subjectSlug).toBeNull()
+})
+
+test('distillTranscript defaults missing subjectSlug to null', async () => {
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'x' }],
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+  })
+  expect(result.candidates[0]!.subjectSlug).toBeNull()
+})
+
+test('DISTILLER_SYSTEM_PROMPT documents subjectSlug rules + reuse instruction', () => {
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('subjectSlug')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('kebab-case')
 })

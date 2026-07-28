@@ -1,4 +1,4 @@
-import { detectErrorSignals, filterTranscriptForDistill, type TranscriptTurn, type MemoryScope, type RuntimeTag } from './pure'
+import { detectErrorSignals, filterTranscriptForDistill, normalizeSubjectSlug, type TranscriptTurn, type MemoryScope, type RuntimeTag } from './pure'
 import type { LLMCall } from '@/llm'
 import { callWithRetry } from './retry'
 
@@ -41,6 +41,11 @@ Write a matching category as a "[category:xxx]" prefix on each candidate title:
   domain: "外部系统 X 的 SLA 要求 Y" -- 主语是仓库外契约
   domain: "法规要求 Z" -- 主语是仓库外法规
 
+对每条候选标记 subjectSlug：这条记忆的主题标识（kebab-case，2~4 个英文小写
+单词，如 refund-policy、hook-install）。同一主题的记忆必须共用同一个 slug--
+优先从 user prompt 的 "Existing subject slugs" 清单里复用；只有确实是清单
+没有的新主题才造新 slug。拿不准主题可以不输出该字段。
+
 Cross-cutting properties:
 - atomic and generalizable; survives outside the event that produced it.
 - names a clear binding scope: "project" (specific to this codebase) or "global" (any project).
@@ -68,7 +73,8 @@ Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部�
       "scope": "project",
       "runtime": "claude-code",
       "distillAction": "new",
-      "ruleObject": "codebase"
+      "ruleObject": "codebase",
+      "subjectSlug": "refund-policy"
     }
   ]
 }`
@@ -83,12 +89,16 @@ export interface DistillCandidate {
    *  valueFilter 条件门据此决定是否强制保留 protected category。不入库。
    *  distiller 漏标/非法时默认 'codebase'（精度优先：不保护）。 */
   ruleObject: 'codebase' | 'domain'
+  /** 主题归组键（spec §4.3）。LLM 漏标/非法时 normalizeSubjectSlug 降级为 null。 */
+  subjectSlug: string | null
 }
 
 export interface DistillInput {
   turns: TranscriptTurn[]
   runtime: 'claude-code' | 'opencode'
   cwd: string
+  /** 该 scope 现有 slug 清单（scheduler 查询注入），prompt 附给模型促复用（spec D3）。 */
+  existingSlugs: string[]
   /** Injected seam; production wires the real Anthropic call, tests pass a mock. */
   callLLM: LLMCall
 }
@@ -103,9 +113,11 @@ function renderUserPrompt(
   runtime: string,
   cwd: string,
   signals: ReturnType<typeof detectErrorSignals>,
+  existingSlugs: string[],
 ): string {
   const transcript = turns.map((t) => `[${t.role}] ${t.content}`).join('\n')
-  return `Runtime: ${runtime}\nCwd: ${cwd}\nError signals detected: ${JSON.stringify(signals)}\n\nTranscript:\n${transcript}\n\nExtract candidate memories as JSON per the system instructions.`
+  const slugs = existingSlugs.length > 0 ? existingSlugs.join(', ') : '(none)'
+  return `Runtime: ${runtime}\nCwd: ${cwd}\nError signals detected: ${JSON.stringify(signals)}\nExisting subject slugs (reuse these when a candidate matches an existing subject): ${slugs}\n\nTranscript:\n${transcript}\n\nExtract candidate memories as JSON per the system instructions.`
 }
 
 /**
@@ -131,6 +143,10 @@ function distillShouldRetry(parsed: unknown): string | null {
     if (subj !== undefined && subj !== 'codebase' && subj !== 'domain') {
       return `候选 ${i} 的 ruleObject 非法（必须是 codebase 或 domain）`
     }
+    const slug = (c as { subjectSlug?: unknown }).subjectSlug
+    if (slug !== undefined && typeof slug !== 'string') {
+      return `候选 ${i} 的 subjectSlug 必须是字符串`
+    }
   }
   return null
 }
@@ -139,7 +155,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
   try {
     const signals = detectErrorSignals(input.turns)
     const filtered = filterTranscriptForDistill(input.turns)
-    const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals)
+    const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals, input.existingSlugs)
     // callWithRetry swallows callLLM throws (returns undefined after exhausting
     // retries). Track whether the underlying call threw so the !parsed branch can
     // distinguish "API failure" (can't trust what was sent -> empty filteredTurns,
@@ -185,6 +201,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         runtime: rt as RuntimeTag,
         distillAction: action,
         ruleObject,
+        subjectSlug: normalizeSubjectSlug(o.subjectSlug),
       })
     }
     return { candidates: out, filteredTurns: filtered }

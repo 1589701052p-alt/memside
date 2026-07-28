@@ -134,6 +134,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         turns: newTurns,  // 只喂新增 turn，不再全量
         runtime: job.runtime as 'claude-code' | 'opencode',
         cwd: job.cwd ?? '',
+        existingSlugs: [],  // Task 7 接线：按 scope 查询注入真实 slug 清单
         callLLM: deps.callLLM,
       })
       // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter
