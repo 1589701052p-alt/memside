@@ -3,7 +3,7 @@ import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope, logDiscards, setSessionOffset, saveSourceInput, type DiscardRecord } from '@/memory/store'
+import { listForDedupByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, type DiscardRecord } from '@/memory/store'
 import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass } from '@/memory/valueFilter'
 import type { MemoryInput, Memory } from '@/memory/store'
@@ -130,10 +130,23 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         processed += 1
         continue
       }
+      // subject-keyed 聚合（spec §4.6）：取 project(job.cwd) ∪ global 的现有
+      // slug 清单喂 distiller 促复用。查询失败 -> 空清单，distill 照常（spec §6）。
+      let existingSlugs: string[] = []
+      try {
+        const [projSlugs, globalSlugs] = await Promise.all([
+          listSubjectSlugs(db, { scopeType: 'project', scopeId: job.cwd ?? 'unknown' }),
+          listSubjectSlugs(db, { scopeType: 'global', scopeId: null }),
+        ])
+        existingSlugs = [...new Set([...projSlugs, ...globalSlugs])].sort()
+      } catch (e) {
+        console.warn('memside: listSubjectSlugs failed', e)
+      }
       const { candidates, filteredTurns } = await distillTranscript({
         turns: newTurns,  // 只喂新增 turn，不再全量
         runtime: job.runtime as 'claude-code' | 'opencode',
         cwd: job.cwd ?? '',
+        existingSlugs,
         callLLM: deps.callLLM,
       })
       // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter
@@ -171,6 +184,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           distillAction: k.cand.distillAction,
           sourceEventId: job.sourceEventId,
           valueClass: k.valueClass,
+          subjectSlug: k.cand.subjectSlug,
         })
       }
       // 原始输入溯源：有候选入库时 best-effort 快照喂给模型的过滤版 turns。

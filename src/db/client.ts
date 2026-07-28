@@ -33,6 +33,7 @@ export function openDb(path: string) {
       approved_at INTEGER,
       created_at INTEGER NOT NULL,
       version INTEGER NOT NULL DEFAULT 1,
+      subject_slug TEXT,
       CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL))
     );
     CREATE INDEX IF NOT EXISTS idx_memories_scope_status ON memories(scope_type, scope_id, status);
@@ -103,6 +104,18 @@ export function openDb(path: string) {
     if (!cols.some((c) => c.name === 'value_class')) {
       raw.exec('ALTER TABLE memories ADD COLUMN value_class TEXT')
     }
+  }
+  // Idempotent migration: add subject_slug to pre-existing memories tables.
+  // No backfill（NULL = 未分组，注入平铺，与旧行为一致，spec §4.2）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'subject_slug')) {
+      raw.exec('ALTER TABLE memories ADD COLUMN subject_slug TEXT')
+    }
+    // Index here (after ALTER) not in DDL: CREATE TABLE IF NOT EXISTS is a no-op
+    // on pre-existing tables, so a DDL index on subject_slug would fail with
+    // "no such column" on older DBs before the ALTER runs (idx_distill_jobs_session 先例)。
+    raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(scope_type, scope_id, subject_slug)')
   }
   // Idempotent migration: add session_id to pre-existing memory_distill_jobs.
   // 第五轮增量蒸馏的会话键；历史 job 无此列 -> 升级后为 NULL -> 全量蒸馏（向后兼容）。

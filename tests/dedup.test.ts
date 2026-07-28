@@ -7,7 +7,7 @@ const existing: ExistingMemoryForDedup[] = [
 ]
 const newCand: DistillCandidate = {
   title: '[category:process] 退款必须在发货后14天内', bodyMd: '14天退款窗口',
-  scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain',
+  scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null,
 }
 
 test('judgeDuplicates marks duplicate with valid duplicateOfId', async () => {
@@ -140,8 +140,8 @@ test('DEDUP_SYSTEM_PROMPT is neutral (no unsure tie-breaker)', () => {
 })
 
 test('judgeDuplicates merges same-batch sibling (new-j duplicateOf)', async () => {
-  const a: DistillCandidate = { title: '[category:invariant] 退款14天', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
-  const b: DistillCandidate = { title: '[category:invariant] 退款须在14天内', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const a: DistillCandidate = { title: '[category:invariant] 退款14天', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const b: DistillCandidate = { title: '[category:invariant] 退款须在14天内', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
   const v = await judgeDuplicates({
     newCandidates: [a, b], existing: [],
     callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: true, duplicateOfId: 'new-0' }] }),
@@ -206,8 +206,8 @@ test('DEDUP_SYSTEM_PROMPT mentions same-rule-different-facet = duplicate', () =>
 test('judgeDuplicates merges same-rule-different-facet siblings', async () => {
   // TDD：同一规则从"为什么/实现/触发"不同角度各写一条，prompt 指引 + 完整 body
   // 应让 LLM 判为重复，只留第一条。
-  const a: DistillCandidate = { title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14天退款窗口', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
-  const b: DistillCandidate = { title: '[category:invariant] 退款规则的14天期限不可被丢弃', bodyMd: '退款期限是14天', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const a: DistillCandidate = { title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14天退款窗口', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const b: DistillCandidate = { title: '[category:invariant] 退款规则的14天期限不可被丢弃', bodyMd: '退款期限是14天', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
   const v = await judgeDuplicates({
     newCandidates: [a, b], existing: [],
     callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: true, duplicateOfId: 'new-0' }] }),

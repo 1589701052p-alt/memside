@@ -11,6 +11,8 @@ export interface InjectableMemoryRow {
   createdAt: number
   version: number
   tags: string[]
+  /** 主题归组键（spec §4.5）；null/缺省 = 未分组，平铺渲染。 */
+  subjectSlug?: string | null
 }
 
 export interface InjectableMemorySet {
@@ -48,6 +50,38 @@ export function clipByBudget(
 }
 
 /**
+ * 渲染裁剪后的行：带相同 subjectSlug 的行归拢为一节（节标题 `[slug]`，成员行
+ * 省略 scope 前缀），NULL slug 行保持 `- [scope] title - bodyMd` 平铺。
+ * 节位置由组内最先出现的成员在序列中的位置决定；组内保持序列相对顺序。
+ * 全部 NULL slug 时输出与旧平铺格式逐字节一致（spec D5）。
+ */
+function renderRows(all: readonly InjectableMemoryRow[]): string[] {
+  const bySlug = new Map<string, InjectableMemoryRow[]>()
+  const slugOf = (m: InjectableMemoryRow): string | null =>
+    typeof m.subjectSlug === 'string' && m.subjectSlug.length > 0 ? m.subjectSlug : null
+  for (const m of all) {
+    const slug = slugOf(m)
+    if (slug === null) continue
+    if (!bySlug.has(slug)) bySlug.set(slug, [])
+    bySlug.get(slug)!.push(m)
+  }
+  const lines: string[] = []
+  const emitted = new Set<string>()
+  for (const m of all) {
+    const slug = slugOf(m)
+    if (slug === null) {
+      lines.push(`- [${m.scopeType}] ${m.title} - ${m.bodyMd}`)
+      continue
+    }
+    if (emitted.has(slug)) continue
+    emitted.add(slug)
+    lines.push(`[${slug}]`)
+    for (const g of bySlug.get(slug)!) lines.push(`- ${g.title} - ${g.bodyMd}`)
+  }
+  return lines
+}
+
+/**
  * Render the markdown block the injector returns to SessionStart. Returns null
  * when every scope is empty after the budget clip (caller skips inject, prompt
  * stays byte-identical to no-memory path). Order: project (more specific) first.
@@ -67,7 +101,7 @@ export function formatMemoryBlock(
     '',
     '--- BEGIN INJECTED MEMORY ---',
   ]
-  for (const m of all) lines.push(`- [${m.scopeType}] ${m.title} - ${m.bodyMd}`)
+  for (const line of renderRows(all)) lines.push(line)
   lines.push('--- END INJECTED MEMORY ---')
   return lines.join('\n')
 }
@@ -250,4 +284,24 @@ export function filterTranscriptForDistill(
   } catch {
     return [...turns]
   }
+}
+
+// ---------------------------------------------------------------------------
+// Subject-keyed 聚合（spec §4.1）：slug 规范化。纯函数、永不抛。
+// ---------------------------------------------------------------------------
+
+export const SUBJECT_SLUG_MAX_LEN = 48
+
+const SUBJECT_SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
+
+/**
+ * 规范化 subject slug：trim + 转小写后校验 kebab-case（最长 48）；非法一律
+ * 返回 null（= 未分组），永不抛。slug 是增强信号，任何非法输入都静默降级，
+ * 不阻塞蒸馏 / 审批闭环（spec D6）。
+ */
+export function normalizeSubjectSlug(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim().toLowerCase()
+  if (s.length === 0 || s.length > SUBJECT_SLUG_MAX_LEN) return null
+  return SUBJECT_SLUG_RE.test(s) ? s : null
 }

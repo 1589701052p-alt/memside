@@ -60,8 +60,8 @@ export default function App() {
     await promoteMemory(id, { action: 'reject' })
     void refresh()
   }
-  async function edit(id: string, title: string, bodyMd: string, scopeType: 'project' | 'global') {
-    await patchMemory(id, { title, bodyMd, scopeType })
+  async function edit(id: string, title: string, bodyMd: string, scopeType: 'project' | 'global', subjectSlug: string | null) {
+    await patchMemory(id, { title, bodyMd, scopeType, subjectSlug })
     void refresh()
   }
 
@@ -162,7 +162,7 @@ export default function App() {
           m={m}
           onApprove={() => approve(m.id)}
           onReject={() => reject(m.id)}
-          onEdit={(t, b, s) => edit(m.id, t, b, s)}
+          onEdit={(t, b, s, slug) => edit(m.id, t, b, s, slug)}
           onViewSource={() => setSourceInputFor(m.id)}
         />
       ))}
@@ -188,13 +188,14 @@ function MemoryCard({
   m: MemoryItem
   onApprove: () => void
   onReject: () => void
-  onEdit: (title: string, bodyMd: string, scopeType: 'project' | 'global') => Promise<void>
+  onEdit: (title: string, bodyMd: string, scopeType: 'project' | 'global', subjectSlug: string | null) => Promise<void>
   onViewSource: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(m.title)
   const [body, setBody] = useState(m.bodyMd ?? '')
   const [scope, setScope] = useState<'project' | 'global'>(m.scopeType === 'project' ? 'project' : 'global')
+  const [slug, setSlug] = useState(m.subjectSlug ?? '')
   const [editError, setEditError] = useState<string | null>(null)
   const sourceLabel = m.sourceCwd
     ? (m.sourceCwd.split(/[\\/]/).filter(Boolean).pop() ?? m.sourceCwd)
@@ -205,7 +206,7 @@ function MemoryCard({
   async function save() {
     setEditError(null)
     try {
-      await onEdit(title, body, scope)
+      await onEdit(title, body, scope, slug.trim() === '' ? null : slug.trim())
       setEditing(false)
     } catch (e) {
       setEditError(e instanceof Error ? e.message : String(e))
@@ -225,6 +226,12 @@ function MemoryCard({
           </div>
           <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: '100%', marginBottom: 8 }} />
           <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} style={{ width: '100%', marginBottom: 8 }} />
+          <input
+            value={slug}
+            onChange={(e) => setSlug(e.target.value)}
+            placeholder="subject slug（kebab-case，可留空）"
+            style={{ width: '100%', marginBottom: 8 }}
+          />
           <button onClick={save}>保存</button>
           <button onClick={() => setEditing(false)}>取消</button>
           {editError && <div style={{ color: '#c00', fontSize: 12, marginTop: 6 }}>{editError}</div>}
@@ -233,6 +240,9 @@ function MemoryCard({
         <>
           <strong>{m.title}</strong>
           <span style={{ marginLeft: 8, fontSize: 12, color: '#888' }}>{valueBadge(m.valueClass)}</span>
+          {m.subjectSlug ? (
+            <span style={{ marginLeft: 8, fontSize: 12, color: '#36c' }}>[{m.subjectSlug}]</span>
+          ) : null}
           {m.bodyMd && <p style={{ color: '#555' }}>{m.bodyMd}</p>}
           <small>
             {m.scopeType} · {m.runtime ?? '任意 runtime'} · 来源: <span title={m.sourceCwd ?? ''}>{sourceLabel}</span>

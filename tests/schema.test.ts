@@ -186,3 +186,31 @@ test('memory_distill_inputs has no FK to memory_distill_jobs (decoupled cleanup)
   const fks = db.$client.prepare('PRAGMA foreign_key_list(memory_distill_inputs)').all()
   expect(fks.length).toBe(0)
 })
+
+test('fresh db has subject_slug column + idx_memories_subject index', () => {
+  db = openDb(join(dir, 'ss.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'subject_slug')).toBe(true)
+  const idx = db.$client.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_memories_subject'").all() as { name: string }[]
+  expect(idx.length).toBe(1)
+})
+
+test('migration adds subject_slug to pre-existing db, idempotent, no backfill', () => {
+  const dbPath = join(dir, 'oldss.db')
+  // 旧形态库：有 value_class、无 subject_slug（subject-keyed 聚合之前的形态）
+  const old = new Database(dbPath)
+  old.exec(`CREATE TABLE memories (id TEXT PRIMARY KEY, scope_type TEXT NOT NULL CHECK (scope_type IN ('project','global')), scope_id TEXT, runtime TEXT, title TEXT NOT NULL, body_md TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL, source_kind TEXT NOT NULL, source_cwd TEXT, source_event_id TEXT, distill_job_id TEXT, distill_action TEXT, supersedes_id TEXT, superseded_by_id TEXT, approved_at INTEGER, created_at INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 1, value_class TEXT, CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL)))`)
+  old.exec(`INSERT INTO memories (id, scope_type, scope_id, title, body_md, tags, status, source_kind, created_at, version) VALUES ('p1','project','/r','t','b','[]','candidate','manual',1,1)`)
+  old.close()
+  const migrated = openDb(dbPath)
+  const cols = migrated.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'subject_slug')).toBe(true)
+  // no backfill: existing row stays NULL（NULL = 未分组，spec §4.2）
+  const rows = migrated.$client.prepare('SELECT id, subject_slug FROM memories').all() as { id: string; subject_slug: string | null }[]
+  expect(rows.find((r) => r.id === 'p1')!.subject_slug).toBeNull()
+  migrated.$client.close()
+  // 幂等：reopen 不抛（guard 跳过 ALTER，否则 duplicate column 报错）
+  const reopened = openDb(dbPath)
+  expect((reopened.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]).some((c) => c.name === 'subject_slug')).toBe(true)
+  reopened.$client.close()
+})

@@ -25,6 +25,7 @@ export interface MemoryItem {
   createdAt?: number
   version?: number
   valueClass?: string | null
+  subjectSlug?: string | null
 }
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
@@ -51,7 +52,7 @@ export async function promoteMemory(
 
 export async function patchMemory(
   id: string,
-  body: { title?: string; bodyMd?: string; tags?: string[]; scopeType?: 'project' | 'global'; scopeId?: string | null },
+  body: { title?: string; bodyMd?: string; tags?: string[]; scopeType?: 'project' | 'global'; scopeId?: string | null; subjectSlug?: string | null },
   fetchFn: FetchLike = fetch,
 ): Promise<MemoryItem> {
   const res = await fetchFn(`/api/memories/${id}`, {
