@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
+import { serveStatic } from 'hono/bun'
 import { desc } from 'drizzle-orm'
+import { join } from 'node:path'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
@@ -12,6 +14,10 @@ export interface AppDeps {
   adapter: ClaudeCodeAdapter
   enqueueDistillJob: (db: DbClient, input: EnqueueInput) => Promise<{ jobId: string; nextRunAt: number }>
   broadcast: (msg: unknown) => void
+  /** 一键启动（生产模式）：vite build 产物目录（src/web/dist）。提供时
+   * `GET /` 返回 index.html、`/assets/*` 走 serveStatic；不提供时行为与
+   * 之前完全一致（vite dev 模式走 5173，不需要 daemon 托管）。 */
+  staticDir?: string
 }
 
 /**
@@ -261,6 +267,14 @@ export function createApp(deps: AppDeps) {
     deps.broadcast({ type: 'memory.candidate.created', memoryId: m.id })
     return c.json({ memory: m }, 201)
   })
+
+  // --- Static hosting (one-click launch, production mode) ------------------
+  // 注册在末尾：具名路由（/api/*、/inject、/hooks/*）先匹配，静态处理只在
+  // 未命中时介入，不会抢占 API（与 CLAUDE.md 的 vite proxy 陷阱同类问题）。
+  if (deps.staticDir) {
+    app.get('/', serveStatic({ path: join(deps.staticDir, 'index.html') }))
+    app.use('/assets/*', serveStatic({ root: deps.staticDir }))
+  }
 
   return app
 }
