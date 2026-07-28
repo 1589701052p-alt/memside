@@ -1,5 +1,6 @@
 import { test, expect } from 'bun:test'
 import { distillTranscript, DISTILLER_SYSTEM_PROMPT } from '@/memory/distiller'
+import type { TranscriptTurn } from '@/memory/pure'
 
 test('system prompt biases to business/architecture and requires category prefix', () => {
   expect(DISTILLER_SYSTEM_PROMPT).toContain('[category:invariant]')
@@ -23,9 +24,9 @@ test('distillTranscript parses candidates from mocked API JSON', async () => {
     cwd: '/repo',
     callLLM: async () => JSON.stringify(fakeResponse),
   })
-  expect(result.length).toBe(1)
-  expect(result[0]!.title).toContain('[category:')
-  expect(result[0]!.scopeType).toBe('project')
+  expect(result.candidates.length).toBe(1)
+  expect(result.candidates[0]!.title).toContain('[category:')
+  expect(result.candidates[0]!.scopeType).toBe('project')
 })
 
 test('distillTranscript returns [] on malformed response', async () => {
@@ -34,7 +35,7 @@ test('distillTranscript returns [] on malformed response', async () => {
     runtime: 'claude-code', cwd: '/repo',
     callLLM: async () => 'not json',
   })
-  expect(result).toEqual([])
+  expect(result.candidates).toEqual([])
 })
 
 test('distillTranscript never throws (swallows API errors)', async () => {
@@ -43,7 +44,7 @@ test('distillTranscript never throws (swallows API errors)', async () => {
     runtime: 'claude-code', cwd: '/repo',
     callLLM: async () => { throw new Error('api down') },
   })
-  expect(result).toEqual([])
+  expect(result.candidates).toEqual([])
 })
 
 test('distillTranscript parses fence-wrapped JSON (regression)', async () => {
@@ -53,8 +54,8 @@ test('distillTranscript parses fence-wrapped JSON (regression)', async () => {
     cwd: '/repo',
     callLLM: async () => '```json\n{"candidates":[{"title":"[category:invariant] refunds within 14 days","bodyMd":"14d","scope":"project","runtime":null,"distillAction":"new"}]}\n```',
   })
-  expect(result.length).toBe(1)
-  expect(result[0]!.title).toContain('[category:')
+  expect(result.candidates.length).toBe(1)
+  expect(result.candidates[0]!.title).toContain('[category:')
 })
 
 test('distillTranscript retries when candidate lacks [category: prefix', async () => {
@@ -69,8 +70,8 @@ test('distillTranscript retries when candidate lacks [category: prefix', async (
     },
   })
   expect(calls).toBe(2)
-  expect(result.length).toBe(1)
-  expect(result[0]!.title).toContain('[category:')
+  expect(result.candidates.length).toBe(1)
+  expect(result.candidates[0]!.title).toContain('[category:')
 })
 
 test('distillTranscript returns [] when retry exhausted', async () => {
@@ -79,7 +80,7 @@ test('distillTranscript returns [] when retry exhausted', async () => {
     runtime: 'claude-code', cwd: '/repo',
     callLLM: async () => 'not json',
   })
-  expect(result).toEqual([])
+  expect(result.candidates).toEqual([])
 })
 
 test('DISTILLER_SYSTEM_PROMPT contains JSON template with example values', () => {
@@ -127,8 +128,8 @@ test('distillTranscript defaults missing subject to codebase', async () => {
     runtime: 'claude-code', cwd: '/repo',
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
   })
-  expect(result.length).toBe(1)
-  expect(result[0]!.subject).toBe('codebase')
+  expect(result.candidates.length).toBe(1)
+  expect(result.candidates[0]!.subject).toBe('codebase')
 })
 
 test('distillTranscript parses explicit subject=domain', async () => {
@@ -137,8 +138,8 @@ test('distillTranscript parses explicit subject=domain', async () => {
     runtime: 'claude-code', cwd: '/repo',
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'domain' }] }),
   })
-  expect(result.length).toBe(1)
-  expect(result[0]!.subject).toBe('domain')
+  expect(result.candidates.length).toBe(1)
+  expect(result.candidates[0]!.subject).toBe('domain')
 })
 
 test('distillTranscript retries when subject is invalid', async () => {
@@ -154,7 +155,7 @@ test('distillTranscript retries when subject is invalid', async () => {
     },
   })
   expect(calls).toBe(2)
-  expect(result[0]!.subject).toBe('domain')
+  expect(result.candidates[0]!.subject).toBe('domain')
 })
 
 test('DISTILLER_SYSTEM_PROMPT contains subject field + DOMAIN-not-codebase invariant def', () => {
@@ -205,4 +206,33 @@ test('DISTILLER_SYSTEM_PROMPT has [stated] origin discipline with 6 exclusions',
   expect(DISTILLER_SYSTEM_PROMPT).toContain('丰富化')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('道听途说')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('推理或建议')
+})
+
+test('distillTranscript returns filteredTurns equal to filterTranscriptForDistill output (snapshot fidelity)', async () => {
+  // 快照忠实：返回的 filteredTurns 必须等于内部 filterTranscriptForDistill(turns)。
+  // 存的就是当时喂给模型的，零偏差。
+  const { filterTranscriptForDistill } = await import('@/memory/pure')
+  const turns: TranscriptTurn[] = [
+    { role: 'user', content: 'read the file' },
+    { role: 'tool', content: 'X'.repeat(5000), toolName: 'Read', toolInputPath: '/a.ts' },
+    { role: 'assistant', content: 'ok' },
+  ]
+  const result = await distillTranscript({
+    turns, runtime: 'claude-code', cwd: '/r',
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+  })
+  expect(result.filteredTurns).toEqual(filterTranscriptForDistill(turns))
+  // 过滤版里文件类 tool 结果被压成占位，不再含原文
+  expect(result.filteredTurns[1]!.content).toContain('[file: /a.ts')
+  expect(result.filteredTurns[1]!.content).not.toContain('X'.repeat(100))
+})
+
+test('distillTranscript failure degrades to empty filteredTurns', async () => {
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'hi' }],
+    runtime: 'claude-code', cwd: '/r',
+    callLLM: async () => { throw new Error('api down') },
+  })
+  expect(result.candidates).toEqual([])
+  expect(result.filteredTurns).toEqual([])
 })

@@ -93,6 +93,11 @@ export interface DistillInput {
   callLLM: LLMCall
 }
 
+export interface DistillResult {
+  candidates: DistillCandidate[]
+  filteredTurns: TranscriptTurn[]   // 实际喂给模型的过滤版，零偏差快照源
+}
+
 function renderUserPrompt(
   turns: TranscriptTurn[],
   runtime: string,
@@ -130,18 +135,32 @@ function distillShouldRetry(parsed: unknown): string | null {
   return null
 }
 
-export async function distillTranscript(input: DistillInput): Promise<DistillCandidate[]> {
+export async function distillTranscript(input: DistillInput): Promise<DistillResult> {
   try {
     const signals = detectErrorSignals(input.turns)
     const filtered = filterTranscriptForDistill(input.turns)
     const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals)
+    // callWithRetry swallows callLLM throws (returns undefined after exhausting
+    // retries). Track whether the underlying call threw so the !parsed branch can
+    // distinguish "API failure" (can't trust what was sent -> empty filteredTurns,
+    // matching the catch() degrade contract) from "model returned unparseable
+    // output" (turns WERE sent -> return filtered snapshot).
+    let callThrew = false
+    const wrappedCall: LLMCall = async (sys, user, opts) => {
+      try {
+        return await input.callLLM(sys, user, opts)
+      } catch (e) {
+        callThrew = true
+        throw e
+      }
+    }
     const parsed = await callWithRetry({
-      call: input.callLLM,
+      call: wrappedCall,
       system: DISTILLER_SYSTEM_PROMPT,
       user: userPrompt,
       shouldRetry: distillShouldRetry,
     }) as { candidates?: unknown } | undefined
-    if (!parsed || !Array.isArray(parsed.candidates)) return []
+    if (!parsed || !Array.isArray(parsed.candidates)) return { candidates: [], filteredTurns: callThrew ? [] : filtered }
     const out: DistillCandidate[] = []
     for (const c of parsed.candidates) {
       if (!c || typeof c !== 'object') continue
@@ -168,9 +187,9 @@ export async function distillTranscript(input: DistillInput): Promise<DistillCan
         subject,
       })
     }
-    return out
+    return { candidates: out, filteredTurns: filtered }
   } catch {
     // Never throw: distill failures degrade to "no candidates this round".
-    return []
+    return { candidates: [], filteredTurns: [] }
   }
 }

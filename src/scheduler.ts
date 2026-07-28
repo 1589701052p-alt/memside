@@ -130,7 +130,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         processed += 1
         continue
       }
-      const candidates: DistillCandidate[] = await distillTranscript({
+      const { candidates, filteredTurns } = await distillTranscript({
         turns: newTurns,  // 只喂新增 turn，不再全量
         runtime: job.runtime as 'claude-code' | 'opencode',
         cwd: job.cwd ?? '',
