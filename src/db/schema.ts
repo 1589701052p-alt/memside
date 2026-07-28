@@ -28,10 +28,12 @@ export const memories = sqliteTable(
     createdAt: integer('created_at').notNull(),
     version: integer('version').notNull().default(1),
     valueClass: text('value_class'), // nullable: decision|convention|trap|topology; null = unevaluated
+    subjectSlug: text('subject_slug'), // nullable: kebab-case 主题归组键；null = 未分组（平铺注入）
   },
   (t) => ({
     scopeStatusIdx: index('idx_memories_scope_status').on(t.scopeType, t.scopeId, t.status),
     statusCreatedIdx: index('idx_memories_status_created').on(t.status, t.createdAt),
+    subjectIdx: index('idx_memories_subject').on(t.scopeType, t.scopeId, t.subjectSlug),
   }),
 )
 
