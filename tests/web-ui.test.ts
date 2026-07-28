@@ -41,4 +41,5 @@ test('App.tsx source-input modal shows unavailable / loading / error states', ()
   // 状态可见性（CLAUDE.md 硬规则）：不得静默 stall
   expect(src).toContain('无原始输入快照')
   expect(src).toContain('加载中')
+  expect(src).toContain('无法加载原始输入')
 })
