@@ -117,11 +117,19 @@ test('promptReclaim: non-TTY prints and returns false', async () => {
   expect(calls.some((s) => s.includes('7777'))).toBe(true)
 })
 
-test('promptReclaim: TTY y/yes returns true', async () => {
-  for (const ans of ['y', 'Y', ' yes ', 'YES']) {
-    const ctx: ReclaimCtx = { isTTY: true, readline: async () => ans }
-    expect(await promptReclaim([{ port: 7777, pid: 1, cmdline: 'x' }], ctx)).toBe(true)
+test('promptReclaim: TTY y/yes returns true and prints (y/N) prompt', async () => {
+  const calls: string[] = []
+  const origLog = console.log
+  console.log = (s: string) => { calls.push(s) }
+  try {
+    for (const ans of ['y', 'Y', ' yes ', 'YES']) {
+      const ctx: ReclaimCtx = { isTTY: true, readline: async () => ans }
+      expect(await promptReclaim([{ port: 7777, pid: 1, cmdline: 'x' }], ctx)).toBe(true)
+    }
+  } finally {
+    console.log = origLog
   }
+  expect(calls.some((s) => s.includes('(y/N)'))).toBe(true)
 })
 
 test('promptReclaim: TTY n/empty/other returns false', async () => {

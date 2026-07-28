@@ -113,6 +113,7 @@ export async function promptReclaim(holders: PortHolder[], ctx: ReclaimCtx): Pro
     console.log('memside: 非交互环境，请手动回收以上进程后重试。')
     return false
   }
+  console.log('memside: 是否杀掉以上进程并继续? (y/N)')
   const ans = (await ctx.readline()).trim().toLowerCase()
   return ans === 'y' || ans === 'yes'
 }
