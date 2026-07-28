@@ -389,14 +389,8 @@ export async function saveSourceInput(
 }
 
 export async function getSourceInput(
-  db: DbClient, distillJobId: string, turns?: TranscriptTurn[],
+  db: DbClient, distillJobId: string,
 ): Promise<{ turns: TranscriptTurn[]; turnCount: number; charCount: number } | null> {
-  // Write mode (3-arg overload): pre-position a snapshot row for tests / callers
-  // that want to write and then immediately read back. The 3-arg variant writes
-  // first via saveSourceInput, then reads the row back.
-  if (turns !== undefined) {
-    await saveSourceInput(db, distillJobId, turns)
-  }
   const rows = await db.select().from(memoryDistillInputs)
     .where(eq(memoryDistillInputs.distillJobId, distillJobId)).limit(1)
   if (rows.length === 0) return null
