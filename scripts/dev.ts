@@ -41,8 +41,17 @@ function killAll() {
   web.kill()
 }
 
-process.on('SIGINT', () => { killAll(); process.exit(130) })
-process.on('SIGTERM', () => { killAll(); process.exit(143) })
+// 信号路径：kill() 在 Windows 上不是同步终止语义，立即 process.exit 会截断
+// 终止投递（实测：dev.ts 143 退出后 daemon 子进程仍占端口）。必须先等两个
+// 子进程真的退出，再退主进程。
+async function shutdown(exitCode: number) {
+  killAll()
+  await Promise.allSettled([daemon.exited, web.exited])
+  process.exit(exitCode)
+}
+
+process.on('SIGINT', () => { void shutdown(130) })
+process.on('SIGTERM', () => { void shutdown(143) })
 
 // 先退者决定退出码；killAll 幂等，信号路径与先退路径不冲突。
 const code = await Promise.race([daemon.exited, web.exited])
