@@ -116,3 +116,25 @@ export async function promptReclaim(holders: PortHolder[], ctx: ReclaimCtx): Pro
   const ans = (await ctx.readline()).trim().toLowerCase()
   return ans === 'y' || ans === 'yes'
 }
+
+/**
+ * 杀掉 holders 里的占用进程。只杀占端口的那一个 PID（不递归父/子），同 PID
+ * 去重只杀一次。杀失败（进程已退出/权限不足）打印 warn，不抛、不中止。
+ * Windows: taskkill //PID <pid> //F；posix: process.kill(pid, 'SIGKILL')。
+ */
+export async function reclaim(holders: PortHolder[], ctx: PortCheckCtx): Promise<void> {
+  const seen = new Set<number>()
+  for (const h of holders) {
+    if (seen.has(h.pid)) continue
+    seen.add(h.pid)
+    try {
+      if (ctx.platform === 'win32') {
+        await ctx.spawn(['taskkill', '//PID', String(h.pid), '//F'])
+      } else {
+        process.kill(h.pid, 'SIGKILL')
+      }
+    } catch (e) {
+      console.warn(`memside: 杀进程 PID ${h.pid} 失败（可能已退出）：${(e as Error).message}`)
+    }
+  }
+}

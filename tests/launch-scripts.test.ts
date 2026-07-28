@@ -49,3 +49,17 @@ test('package.json exposes dev one-click script', () => {
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
   expect(pkg.scripts.dev).toBe('bun run scripts/dev.ts')
 })
+
+test('scripts/start.ts wires port-reclaim guard before startDaemon', () => {
+  const src = readFileSync(join(repoRoot, 'scripts', 'start.ts'), 'utf8')
+  expect(src).toContain('findPortHolders')
+  expect(src).toContain('promptReclaim')
+  expect(src).toContain('reclaim(')
+})
+
+test('scripts/dev.ts wires port-reclaim guard before spawn', () => {
+  const src = readFileSync(join(repoRoot, 'scripts', 'dev.ts'), 'utf8')
+  expect(src).toContain('findPortHolders')
+  expect(src).toContain('promptReclaim')
+  expect(src).toContain('reclaim(')
+})

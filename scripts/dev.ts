@@ -8,9 +8,37 @@
  * - 主进程收 SIGINT/SIGTERM -> 杀两个子进程后退出。
  */
 import { buildSpawnPlan } from '@/launch/spawnPlan'
+import { findPortHolders, promptReclaim, reclaim, type PortCheckCtx, type ReclaimCtx } from '@/launch/portCheck'
+import { createInterface } from 'node:readline'
 
 // process.execPath = 真 bun.exe，绕开 npm .cmd shim（见 spawnPlan.ts 头注释）。
 const plan = buildSpawnPlan({ MEMSIDE_PORT: process.env.MEMSIDE_PORT }, process.execPath)
+
+// 端口防呆：spawn 前检测 daemon 端口 + 5173，被占则列出占用进程并询问是否杀掉。
+const spawnReal: PortCheckCtx['spawn'] = async (cmd: string[]) => {
+  const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe' })
+  const stdout = await new Response(proc.stdout).text()
+  await proc.exited
+  return { stdout, exitCode: proc.exitCode }
+}
+function readLineStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin })
+    rl.question('', (ans) => { rl.close(); resolve(ans) })
+  })
+}
+const ctx: PortCheckCtx & ReclaimCtx = {
+  platform: process.platform,
+  spawn: spawnReal,
+  isTTY: process.stdin.isTTY ?? false,
+  readline: readLineStdin,
+}
+
+const holders = await findPortHolders([plan.port, 5173], ctx)
+if (holders.length) {
+  if (!(await promptReclaim(holders, ctx))) process.exit(1)
+  await reclaim(holders, ctx)
+}
 
 function spawnLogged(name: string, cmd: string[]) {
   const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe', env: process.env })

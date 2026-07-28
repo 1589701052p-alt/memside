@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { findPortHolders, promptReclaim, type PortCheckCtx, type ReclaimCtx } from '@/launch/portCheck'
+import { findPortHolders, promptReclaim, reclaim, type PortCheckCtx, type ReclaimCtx } from '@/launch/portCheck'
 
 // 端口占用防呆（2026-07-28-port-reclaim-guard）：跨平台端口查询纯函数层。
 // 平台/spawn 全注入，不碰真实系统命令。
@@ -129,4 +129,47 @@ test('promptReclaim: TTY n/empty/other returns false', async () => {
     const ctx: ReclaimCtx = { isTTY: true, readline: async () => ans }
     expect(await promptReclaim([{ port: 7777, pid: 1, cmdline: 'x' }], ctx)).toBe(false)
   }
+})
+
+test('reclaim: Windows calls taskkill per unique PID', async () => {
+  const calls: string[][] = []
+  const ctx: PortCheckCtx = {
+    platform: 'win32',
+    spawn: async (cmd: string[]) => { calls.push(cmd); return { stdout: '', exitCode: 0 } },
+  }
+  // 同 PID 占两端口 -> 只杀一次
+  await reclaim(
+    [
+      { port: 7777, pid: 18196, cmdline: 'a' },
+      { port: 5173, pid: 18196, cmdline: 'a' },
+      { port: 5173, pid: 21044, cmdline: 'b' },
+    ],
+    ctx,
+  )
+  expect(calls).toEqual([
+    ['taskkill', '//PID', '18196', '//F'],
+    ['taskkill', '//PID', '21044', '//F'],
+  ])
+})
+
+test('reclaim: posix uses process.kill SIGKILL', async () => {
+  const killed: number[] = []
+  const origKill = process.kill
+  process.kill = ((pid: number, sig?: string | number) => { killed.push(pid); return true }) as typeof process.kill
+  const ctx: PortCheckCtx = { platform: 'linux', spawn: async () => ({ stdout: '', exitCode: 0 }) }
+  try {
+    await reclaim([{ port: 7777, pid: 42, cmdline: 'x' }], ctx)
+  } finally {
+    process.kill = origKill
+  }
+  expect(killed).toEqual([42])
+})
+
+test('reclaim: kill failure warns but does not throw', async () => {
+  const ctx: PortCheckCtx = {
+    platform: 'win32',
+    spawn: async () => { throw new Error('access denied') },
+  }
+  // 不抛即通过
+  await reclaim([{ port: 7777, pid: 1, cmdline: '' }], ctx)
 })
