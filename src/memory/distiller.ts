@@ -20,7 +20,7 @@ Write a matching category as a "[category:xxx]" prefix on each candidate title:
 9. [category:convention] - stable team / reviewer preferences a future agent should respect
 10. [category:quality-bar] - what counts as "done" in this project
 
-对每条候选标记 subject：
+对每条候选标记 ruleObject：
 - codebase = 这条规则描述的是当前仓库自身的代码、配置、模块行为或实现逻辑。
   判据：规则的主语是仓库内的具体组件/符号/流程（如 valueFilter、daemon、scheduler、
   某个函数的调用约定）。脱离这个仓库，规则就失去所指对象。
@@ -68,7 +68,7 @@ Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部�
       "scope": "project",
       "runtime": "claude-code",
       "distillAction": "new",
-      "subject": "codebase"
+      "ruleObject": "codebase"
     }
   ]
 }`
@@ -82,7 +82,7 @@ export interface DistillCandidate {
   /** 瞬态：规则对象是当前仓库自身代码(codebase) 还是外部业务领域(domain)。
    *  valueFilter 条件门据此决定是否强制保留 protected category。不入库。
    *  distiller 漏标/非法时默认 'codebase'（精度优先：不保护）。 */
-  subject: 'codebase' | 'domain'
+  ruleObject: 'codebase' | 'domain'
 }
 
 export interface DistillInput {
@@ -127,9 +127,9 @@ function distillShouldRetry(parsed: unknown): string | null {
     if (!c.title.includes('[category:')) {
       return `候选 ${i} 的 title 缺少 [category:xxx] 前缀`
     }
-    const subj = (c as { subject?: unknown }).subject
+    const subj = (c as { ruleObject?: unknown }).ruleObject
     if (subj !== undefined && subj !== 'codebase' && subj !== 'domain') {
-      return `候选 ${i} 的 subject 非法（必须是 codebase 或 domain）`
+      return `候选 ${i} 的 ruleObject 非法（必须是 codebase 或 domain）`
     }
   }
   return null
@@ -175,8 +175,8 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         o.distillAction === 'conflict_with'
           ? o.distillAction
           : 'new'
-      const rawSubject = o.subject
-      const subject: 'codebase' | 'domain' =
+      const rawSubject = o.ruleObject
+      const ruleObject: 'codebase' | 'domain' =
         rawSubject === 'domain' ? 'domain' : 'codebase'
       out.push({
         title: o.title,
@@ -184,7 +184,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         scopeType: scope,
         runtime: rt as RuntimeTag,
         distillAction: action,
-        subject,
+        ruleObject,
       })
     }
     return { candidates: out, filteredTurns: filtered }

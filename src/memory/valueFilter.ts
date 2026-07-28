@@ -27,7 +27,7 @@ category by these criteria:
 6. topology - a cross-boundary connection (cross-module/service/team/repo) invisible
    from any single vantage point.
 
-Each candidate is marked with a subject hint: codebase (describes the current repository's own code/config/modules) or domain (describes something outside the repository). Apply the 6 categories above as written - a codebase-subject candidate that describes this repository's own design decisions, implementation rules, or internal behavior is derivable.
+Each candidate is marked with a ruleObject hint: codebase (describes the current repository's own code/config/modules) or domain (describes something outside the repository). Apply the 6 categories above as written - a codebase-ruleObject candidate that describes this repository's own design decisions, implementation rules, or internal behavior is derivable.
 
 Pick the best-fitting category for each candidate. 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
 {
@@ -100,7 +100,7 @@ const VALUE_CLASS_MAP: Record<string, ValueClass> = {
 }
 
 function renderUserPrompt(candidates: DistillCandidate[]): string {
-  return candidates.map((c, i) => `[${i}] (subject: ${c.subject ?? 'codebase'}) ${c.title}\n${c.bodyMd}`).join('\n---\n')
+  return candidates.map((c, i) => `[${i}] (ruleObject: ${c.ruleObject ?? 'codebase'}) ${c.title}\n${c.bodyMd}`).join('\n---\n')
 }
 
 /**
@@ -142,7 +142,7 @@ async function judgeValueBase(
   const keepNull = (): ValueVerdict[] =>
     candidates.map((c, i) => {
       const cat = parseCategory(c.title)
-      const subj = c.subject === 'domain' ? 'domain' : 'codebase'
+      const subj = c.ruleObject === 'domain' ? 'domain' : 'codebase'
       return (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain')
         ? { index: i, keep: true, valueClass: 'decision' as ValueClass }
         : { index: i, keep: true, valueClass: null }
@@ -172,7 +172,7 @@ async function judgeValueBase(
     }
     return candidates.map((c, i) => {
       const cat = parseCategory(c.title)
-      const subj = c.subject === 'domain' ? 'domain' : 'codebase'
+      const subj = c.ruleObject === 'domain' ? 'domain' : 'codebase'
       if (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain') {
         return { index: i, keep: true, valueClass: 'decision' as ValueClass }
       }
@@ -187,7 +187,7 @@ async function judgeValueBase(
  * Classify each candidate into one of 6 categories (rules 1-6) + apply taming override
  * (fix6). Code maps public-knowledge/derivable => discard, decision/convention/trap/
  * topology => keep with valueClass; protected categories (invariant/integration/
- * compliance × subject=domain) are force-kept with valueClass='decision' inside
+ * compliance × ruleObject=domain) are force-kept with valueClass='decision' inside
  * judgeValueBase. judgeValueBase swallows its own LLM errors (all keep+null/decision),
  * never bubbles. The taming override (fix6) runs last and overrides protected force-keep
  * (safety > protection): a taming instruction is discarded even if mislabeled invariant.
@@ -200,7 +200,7 @@ export async function judgeValue(
   if (n === 0) return []
   const base = await judgeValueBase(candidates, callLLM)
   // 第六轮第 4 项：taming override，最后跑，覆盖 protected force-keep（安全 > 保护）。
-  // 驯化指令即使被误标 [category:invariant] subject=domain，仍丢弃--合法 business
+  // 驯化指令即使被误标 [category:invariant] ruleObject=domain，仍丢弃--合法 business
   // invariant 不会含反馈压制词，无现实冲突。
   return base.map((v, i) =>
     detectTaming(candidates[i]!.title, candidates[i]!.bodyMd)

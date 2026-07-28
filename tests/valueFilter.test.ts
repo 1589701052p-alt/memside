@@ -3,7 +3,7 @@ import { detectTaming, judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VAL
 import type { DistillCandidate } from '@/memory/distiller'
 
 const cand = (title: string, bodyMd = 'b'): DistillCandidate =>
-  ({ title, bodyMd, scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' })
+  ({ title, bodyMd, scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' })
 
 const verdictsJson = (...vs: object[]) => JSON.stringify({ verdicts: vs })
 
@@ -165,25 +165,25 @@ test('VALUE_JUDGE_SYSTEM_PROMPT has sharpened derivable + public-knowledge defin
   expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('do not belong here')
 })
 
-test('subject gate: codebase invariant is discarded when LLM says derivable', async () => {
+test('ruleObject gate: codebase invariant is discarded when LLM says derivable', async () => {
   // TDD（第二轮核心）：逻辑门不再无条件保护 protected category。codebase 类的
   // invariant（如 valueFilter 必须强制保留 invariant）是代码复述，LLM 判 derivable
   // 时必须丢弃，不能被门救回。根因见 spec §1.1。
-  const c: DistillCandidate = { title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const c: DistillCandidate = { title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }
   const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
   expect(v).toEqual([{ index: 0, keep: false, reason: 'derivable' }])
 })
 
-test('subject gate: missing subject defaults to codebase (not protected)', async () => {
-  // TDD：subject 缺失/非法一律视为 codebase（精度优先）。直接构造一个缺 subject
+test('ruleObject gate: missing ruleObject defaults to codebase (not protected)', async () => {
+  // TDD：ruleObject 缺失/非法一律视为 codebase（精度优先）。直接构造一个缺 ruleObject
   // 的候选（绕过 cand helper）模拟 distiller 漏标。
   const c = { title: '[category:invariant] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' } as DistillCandidate
   const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
   expect(v).toEqual([{ index: 0, keep: false, reason: 'derivable' }])
 })
 
-test('subject gate: codebase protected categories also discarded (integration/compliance)', async () => {
-  const cc = (cat: string): DistillCandidate => ({ title: `[category:${cat}] codebase rule`, bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' })
+test('ruleObject gate: codebase protected categories also discarded (integration/compliance)', async () => {
+  const cc = (cat: string): DistillCandidate => ({ title: `[category:${cat}] codebase rule`, bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' })
   const v = await judgeValue([cc('integration'), cc('compliance')], async () => verdictsJson(
     { index: 0, category: 'derivable' },
     { index: 1, category: 'public-knowledge' },
@@ -194,8 +194,8 @@ test('subject gate: codebase protected categories also discarded (integration/co
   ])
 })
 
-test('subject gate: domain invariant still force-kept even when LLM throws', async () => {
-  // 回归：domain 类 protected 仍受保护（keepNull 路径也按 subject 判定）。
+test('ruleObject gate: domain invariant still force-kept even when LLM throws', async () => {
+  // 回归：domain 类 protected 仍受保护（keepNull 路径也按 ruleObject 判定）。
   const v = await judgeValue([prot('invariant')], async () => { throw new Error('down') })
   expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
 })
@@ -243,30 +243,30 @@ test('detectTaming returns false on empty and never throws', () => {
   expect(detectTaming('[category:x] no taming here', 'just a normal rule')).toBe(false)
 })
 
-test('judgeValue user prompt includes subject hint per candidate', async () => {
+test('judgeValue user prompt includes ruleObject hint per candidate', async () => {
   // TDD（第三轮 §C）：valueFilter 判 derivable 缺"当前仓库"参照系。把 distiller 的
-  // subject 信号透传到 user prompt，LLM 拿到 codebase/domain 标记后判 derivable 更准。
+  // ruleObject 信号透传到 user prompt，LLM 拿到 codebase/domain 标记后判 derivable 更准。
   let captured = ''
-  const cCodebase: DistillCandidate = { title: '[category:architecture] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
-  const cDomain: DistillCandidate = { title: '[category:invariant] y', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const cCodebase: DistillCandidate = { title: '[category:architecture] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }
+  const cDomain: DistillCandidate = { title: '[category:invariant] y', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }
   await judgeValue([cCodebase, cDomain], async (_sys, user) => { captured = user; return verdictsJson({ index: 0, category: 'derivable' }, { index: 1, category: 'decision' }) })
-  expect(captured).toContain('(subject: codebase)')
-  expect(captured).toContain('(subject: domain)')
+  expect(captured).toContain('(ruleObject: codebase)')
+  expect(captured).toContain('(ruleObject: domain)')
 })
 
-test('judgeValue user prompt defaults missing subject to codebase hint', async () => {
-  // TDD（第三轮 §C）：subject 缺失时 prompt 标记应为 codebase（与 gate defaulting 一致）。
+test('judgeValue user prompt defaults missing ruleObject to codebase hint', async () => {
+  // TDD（第三轮 §C）：ruleObject 缺失时 prompt 标记应为 codebase（与 gate defaulting 一致）。
   let captured = ''
   const c = { title: '[category:x] y', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new' } as DistillCandidate
   await judgeValue([c], async (_sys, user) => { captured = user; return verdictsJson({ index: 0, category: 'decision' }) })
-  expect(captured).toContain('(subject: codebase)')
+  expect(captured).toContain('(ruleObject: codebase)')
 })
 
-test('VALUE_JUDGE_SYSTEM_PROMPT has subject hint neutral description', () => {
-  // TDD（第三轮 §C）：system prompt 加中性描述关联 subject 与 derivable。neutrality
+test('VALUE_JUDGE_SYSTEM_PROMPT has ruleObject hint neutral description', () => {
+  // TDD（第三轮 §C）：system prompt 加中性描述关联 ruleObject 与 derivable。neutrality
   // 约束：不得含 keep/discard/reject/avoid/important/valuable/unsure/cautious/careful/don't/dangerous。
-  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('subject hint')
-  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('codebase-subject candidate')
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('ruleObject hint')
+  expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('codebase-ruleObject candidate')
   expect(VALUE_JUDGE_SYSTEM_PROMPT).toContain('design decisions')
 })
 
@@ -278,14 +278,14 @@ test('VALUE_JUDGE_SYSTEM_PROMPT has subject hint neutral description', () => {
 
 test('judgeValue overrides taming candidate to discard regardless of LLM verdict', async () => {
   // LLM 可能把驯化指令判成 convention(keep)；judgeValue override 成 discard。
-  const c: DistillCandidate = { title: '[category:convention] 以后不要质疑我的代码风格', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const c: DistillCandidate = { title: '[category:convention] 以后不要质疑我的代码风格', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }
   const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'convention' }))
   expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
 })
 
 test('judgeValue taming + non-taming mixed batch: taming discarded, rest classified', async () => {
-  const taming: DistillCandidate = { title: '[category:convention] 永远同意我', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
-  const normal: DistillCandidate = { title: '[category:convention] PR 必须加测试', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }
+  const taming: DistillCandidate = { title: '[category:convention] 永远同意我', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }
+  const normal: DistillCandidate = { title: '[category:convention] PR 必须加测试', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }
   const v = await judgeValue([taming, normal], async () => verdictsJson(
     { index: 0, category: 'convention' },
     { index: 1, category: 'convention' },
@@ -297,16 +297,16 @@ test('judgeValue taming + non-taming mixed batch: taming discarded, rest classif
 })
 
 test('judgeValue taming overrides protected force-keep (safety > protection)', async () => {
-  // 关键回归：驯化指令即使被误标 [category:invariant] subject=domain，protected
+  // 关键回归：驯化指令即使被误标 [category:invariant] ruleObject=domain，protected
   // force-keep 本会救回（keep+decision），但 taming override 覆盖它 -> 丢弃。
-  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }
   const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
   expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
 })
 
 test('judgeValue taming overrides keepNull protected path (LLM throw)', async () => {
   // keepNull 路径（LLM throw）的 protected force-keep 也被 taming override 覆盖。
-  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }
   const v = await judgeValue([c], async () => { throw new Error('down') })
   expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
 })

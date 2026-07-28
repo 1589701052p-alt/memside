@@ -188,8 +188,8 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
 test('dedupCandidates keeps non-duplicate and drops duplicate in a multi-candidate group', async () => {
   const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'existing', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()
-  const cand0: DistillCandidate = { title: '[category:x] dup-of-existing', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
-  const cand1: DistillCandidate = { title: '[category:y] genuinely-new', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const cand0: DistillCandidate = { title: '[category:x] dup-of-existing', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }
+  const cand1: DistillCandidate = { title: '[category:y] genuinely-new', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }
   // Verdict index 0 = duplicate, index 1 = new. Exercises globalIndex mapping:
   // index 1 must be kept (not index 0).
   const keep = await dedupCandidates(db, async () => JSON.stringify({
@@ -204,8 +204,8 @@ test('dedupCandidates groups by scope and compares each only against same-scope 
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, projEx.id)).run()
   const globEx = await realCreateCandidate(db, { scopeType: 'global', scopeId: null, title: 'global-existing-title', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, globEx.id)).run()
-  const projectCand: DistillCandidate = { title: '[category:x] proj-cand', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
-  const globalCand: DistillCandidate = { title: '[category:y] glob-cand', bodyMd: 'b', scopeType: 'global', runtime: null, distillAction: 'new', subject: 'domain' }
+  const projectCand: DistillCandidate = { title: '[category:x] proj-cand', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }
+  const globalCand: DistillCandidate = { title: '[category:y] glob-cand', bodyMd: 'b', scopeType: 'global', runtime: null, distillAction: 'new', ruleObject: 'domain' }
   const prompts: string[] = []
   let callCount = 0
   const keep = await dedupCandidates(db, async (_sys, user) => {
@@ -233,7 +233,7 @@ test('dedupCandidates bubbles listForDedupByScope DB errors (spec §8)', async (
   // bubbles to tick's catch (infrastructure fault -> job retry), NOT swallowed.
   const db2 = openDb(join(dir, 't2.db'))
   db2.$client.close()
-  const cand: DistillCandidate = { title: '[category:x] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', subject: 'domain' }
+  const cand: DistillCandidate = { title: '[category:x] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }
   await expect(dedupCandidates(db2, async () => 'x', [cand], '/r')).rejects.toThrow()
 })
 
@@ -340,7 +340,7 @@ test('tick: protected invariant candidate survives with valueClass=decision (e2e
     loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refunds only within 14 days' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
-      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', subject: 'domain' }] })
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] })
       // dedup short-circuits (1 candidate, no existing) -> call 2 is judgeValue;
       // judgeValue LLM wrongly says derivable -> logic gate must override to keep+decision
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
@@ -354,9 +354,9 @@ test('tick: protected invariant candidate survives with valueClass=decision (e2e
   expect(rows.length).toBe(0) // not discarded despite LLM saying derivable
 })
 
-test('tick: codebase invariant candidate is discarded when LLM says derivable (e2e subject gate)', async () => {
+test('tick: codebase invariant candidate is discarded when LLM says derivable (e2e ruleObject gate)', async () => {
   // TDD（第二轮核心 e2e）：codebase 类 invariant（代码复述）不再被逻辑门保护。
-  // distill 产出 subject=codebase，judgeValue LLM 判 derivable -> 丢弃入 discards，
+  // distill 产出 ruleObject=codebase，judgeValue LLM 判 derivable -> 丢弃入 discards，
   // createCandidate 不被调用。与上一条 domain 测试互为正反锚点。
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
@@ -366,7 +366,7 @@ test('tick: codebase invariant candidate is discarded when LLM says derivable (e
     loadTranscript: async () => ({ turns: [{ role: 'user', content: 'valueFilter must force-keep invariant' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
-      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }] })
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }] })
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
@@ -392,7 +392,7 @@ test('tick: dedup existing bodyMd flows into cross-batch comparison (e2e)', asyn
     loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund rule' }], fullLength: 1 }),
     callLLM: async (_sys, user) => {
       callCount++
-      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款规则14天期限', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', subject: 'domain' }] })
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款规则14天期限', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] })
       if (callCount === 2) { captured = user; return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: ex.id }] }) }
       return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
@@ -402,11 +402,11 @@ test('tick: dedup existing bodyMd flows into cross-batch comparison (e2e)', asyn
   expect(createCalls).toBe(0) // 新候选被判重复，不创建
 })
 
-test('tick: codebase-subject design-decision candidate is derivable-discarded (e2e subject-driven derivable)', async () => {
+test('tick: codebase-ruleObject design-decision candidate is derivable-discarded (e2e ruleObject-driven derivable)', async () => {
   // TDD（第三轮 §D）：dogfood 场景下"关于当前仓库自身设计决策"的候选被 LLM 当 decision
-  // 保留。现在 distiller 标 subject=codebase，valueFilter prompt 带 subject 标记 +
-  // 中性描述关联 derivable -> LLM 判 derivable -> 丢弃。锁住 subject 信号端到端流转。
-  // 根因见 spec §1.2（valueFilter 判 derivable 缺仓库参照系，靠 distiller subject 补强）。
+  // 保留。现在 distiller 标 ruleObject=codebase，valueFilter prompt 带 ruleObject 标记 +
+  // 中性描述关联 derivable -> LLM 判 derivable -> 丢弃。锁住 ruleObject 信号端到端流转。
+  // 根因见 spec §1.2（valueFilter 判 derivable 缺仓库参照系，靠 distiller ruleObject 补强）。
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let createCalls = 0
@@ -415,9 +415,9 @@ test('tick: codebase-subject design-decision candidate is derivable-discarded (e
     loadTranscript: async () => ({ turns: [{ role: 'user', content: 'token budget widened to 64k' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
-      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:architecture] token 预算从 12k 扩到 64k', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'codebase' }] })
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:architecture] token 预算从 12k 扩到 64k', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }] })
       // dedup short-circuits (1 candidate, no existing) -> call 2 is judgeValue;
-      // subject=codebase + 仓库自身设计决策 -> derivable
+      // ruleObject=codebase + 仓库自身设计决策 -> derivable
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },

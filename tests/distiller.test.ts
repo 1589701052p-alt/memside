@@ -120,8 +120,8 @@ test('DISTILLER_SYSTEM_PROMPT rejects codebase implementation details', () => {
   expect(DISTILLER_SYSTEM_PROMPT).toContain('被开发仓库自身源码的实现细节')
 })
 
-test('distillTranscript defaults missing subject to codebase', async () => {
-  // TDD: 第二轮条件门要求 DistillCandidate 带 subject。LLM 漏标时 distiller
+test('distillTranscript defaults missing ruleObject to codebase', async () => {
+  // TDD: 第二轮条件门要求 DistillCandidate 带 ruleObject。LLM 漏标时 distiller
   // 必须默认 codebase（精度优先：不保护，走 derivable 判定）。
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
@@ -129,50 +129,50 @@ test('distillTranscript defaults missing subject to codebase', async () => {
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
   })
   expect(result.candidates.length).toBe(1)
-  expect(result.candidates[0]!.subject).toBe('codebase')
+  expect(result.candidates[0]!.ruleObject).toBe('codebase')
 })
 
-test('distillTranscript parses explicit subject=domain', async () => {
+test('distillTranscript parses explicit ruleObject=domain', async () => {
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
     runtime: 'claude-code', cwd: '/repo',
-    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'domain' }] }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] }),
   })
   expect(result.candidates.length).toBe(1)
-  expect(result.candidates[0]!.subject).toBe('domain')
+  expect(result.candidates[0]!.ruleObject).toBe('domain')
 })
 
-test('distillTranscript retries when subject is invalid', async () => {
-  // TDD: distillShouldRetry 必须对非法 subject 触发重试；第二次返回合法值。
+test('distillTranscript retries when ruleObject is invalid', async () => {
+  // TDD: distillShouldRetry 必须对非法 ruleObject 触发重试；第二次返回合法值。
   let calls = 0
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
     runtime: 'claude-code', cwd: '/repo',
     callLLM: async () => {
       calls++
-      if (calls === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'bogus' }] })
-      return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', subject: 'domain' }] })
+      if (calls === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'bogus' }] })
+      return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] })
     },
   })
   expect(calls).toBe(2)
-  expect(result.candidates[0]!.subject).toBe('domain')
+  expect(result.candidates[0]!.ruleObject).toBe('domain')
 })
 
-test('DISTILLER_SYSTEM_PROMPT contains subject field + DOMAIN-not-codebase invariant def', () => {
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('"subject"')
+test('DISTILLER_SYSTEM_PROMPT contains ruleObject field + DOMAIN-not-codebase invariant def', () => {
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('"ruleObject"')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('codebase = ')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('domain = ')
   expect(DISTILLER_SYSTEM_PROMPT).toContain("DOMAIN (NOT about this codebase's own implementation)")
 })
 
-test('DISTILLER_SYSTEM_PROMPT has subject judgement heuristic (grep-able concrete things)', () => {
-  // TDD（第三轮 §B）：dogfood 场景 subject 偏 domain，加判定启发让 LLM 区分
+test('DISTILLER_SYSTEM_PROMPT has ruleObject judgement heuristic (grep-able concrete things)', () => {
+  // TDD（第三轮 §B）：dogfood 场景 ruleObject 偏 domain，加判定启发让 LLM 区分
   // "仓库内能 grep 到的具体东西" vs "仓库外业务概念"。
   expect(DISTILLER_SYSTEM_PROMPT).toContain('grep')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('具体东西')
 })
 
-test('DISTILLER_SYSTEM_PROMPT has generic placeholder subject examples', () => {
+test('DISTILLER_SYSTEM_PROMPT has generic placeholder ruleObject examples', () => {
   // TDD（第三轮 §B）：通用占位符示例（X 模块的 Y 函数 / W 配置为值 V 等），
   // 示判定模式而非具体答案。
   expect(DISTILLER_SYSTEM_PROMPT).toContain('X 模块的 Y 函数')
@@ -180,11 +180,11 @@ test('DISTILLER_SYSTEM_PROMPT has generic placeholder subject examples', () => {
   expect(DISTILLER_SYSTEM_PROMPT).toContain('外部系统 X 的 SLA 要求 Y')
 })
 
-test('DISTILLER_SYSTEM_PROMPT subject examples do not hardcode real memory symbols (anti-overfitting)', () => {
+test('DISTILLER_SYSTEM_PROMPT ruleObject examples do not hardcode real memory symbols (anti-overfitting)', () => {
   // TDD（第三轮 §B 防过拟合硬约束）：示例不得针对已有记忆。断言 prompt 的示例区
   // 不含当前 dogfood 产物的真实符号--否则等于 hardcode 答案，换仓库就失效。
   // 注意：主体 prompt 仍会提到 valueFilter/daemon 等（作为 category 说明），这里只
-  // 断言"通用示例"这一段不含这些词。取 subject 示例段（"通用示例"到段尾）校验。
+  // 断言"通用示例"这一段不含这些词。取 ruleObject 示例段（"通用示例"到段尾）校验。
   const prompt = DISTILLER_SYSTEM_PROMPT
   const exampleStart = prompt.indexOf('通用示例')
   expect(exampleStart).toBeGreaterThan(-1)
