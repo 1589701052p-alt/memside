@@ -43,3 +43,10 @@ test('App.tsx source-input modal shows unavailable / loading / error states', ()
   expect(src).toContain('加载中')
   expect(src).toContain('无法加载原始输入')
 })
+
+// subject-keyed 聚合（spec §4.7）：卡片 slug 徽标 + 编辑表单 slug 输入框。
+// React 组件不单测，源码文本断言锁住 UI 锚点，refactor 删除即变红。
+test('App.tsx shows subject slug badge + edit input (source text)', () => {
+  expect(src).toContain('subjectSlug')
+  expect(src).toContain('subject slug')
+})
