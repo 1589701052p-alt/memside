@@ -17,7 +17,15 @@ test('archived can return to approved (unarchive)', () => {
 
 test('terminal states cannot leave', () => {
   expect(canTransition('superseded', 'approved')).toBe(false)
-  expect(canTransition('rejected', 'candidate')).toBe(false)
+})
+
+test('rejected can return to candidate (restore)', () => {
+  expect(canTransition('rejected', 'candidate')).toBe(true)
+})
+
+test('superseded stays terminal', () => {
+  expect(canTransition('superseded', 'approved')).toBe(false)
+  expect(canTransition('superseded', 'candidate')).toBe(false)
 })
 
 test('candidate cannot jump to archived', () => {
