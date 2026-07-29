@@ -242,3 +242,39 @@ verdict=Ready to merge=Yes,0 Critical / 0 Important)。`bun run typecheck && bun
 5. 跨 scope 同 slug 渲染时合并为一节(spec-conformant 语义边缘,第二期 spec 考虑)。
 6. `clipByBudget` 按平铺行长度计价,分组渲染后预算略偏保守(保守方向,可接受)。
 7. patchMemory 中 `normalizeSubjectSlug` 调用两次(纯函数,冗余无害)。
+
+## 蒸馏输入信号丢失三层治(2026-07-29)
+
+诊断:distill 管线三层把记忆信号丢光,设计/brainstorming 会话只产出 trivial 记忆。
+三层一起治(分支 `feat/distill-signal-recovery`,基线 `origin/master` 84b03e6):
+
+1. **第三层(主力,origin discipline 重平衡)**:`src/memory/distiller.ts` 的
+   `DISTILLER_SYSTEM_PROMPT` Origin discipline 段重写。放宽第 3/6 条--agent 在
+   transcript 里说过、且被用户采纳的设计 rationale 可记;第 1/2/4/5 条维持 REJECT
+   (脑补/前瞻/研究输出/丰富化/道听途说)。加硬约束「记 rationale 必须能在 transcript
+   找到 agent 原话出处,找不到不记」防脑补。只改 prompt 文本,不动 distillTranscript 逻辑。
+2. **第一层(subagent 单独蒸馏)**:`src/server.ts` SubagentStop 钩子从早返回改为
+   fire-and-forget 处理:payload 的 `agent_id` 定位该 subagent 自己的对话文件
+   (`<slug>/<sid>/subagents/agent-<agentId>.jsonl`,已核实官方文档 SubagentStop 带
+   agent_id 字段),`loadSubagentTranscript` 双路兜底读取(agent_id 推路径 -> 退回
+   transcript_path -> 空),单独蒸馏成独立任务(与主会话互不可见)。schema 加
+   `memory_distill_jobs.source_agent_id` 列 + `memories.source_kind` 加 `'subagent'`
+   enum(旧库 CHECK 约束需表重建 migration,已幂等)。scheduler 对 subagent job 走
+   sourceKind='subagent'、跳过偏移切片/更新。
+3. **第二层(过滤上限放宽)**:`src/memory/pure.ts` `NON_TOOL_CAP_CHARS` 8000->20000,
+   设计讨论的长段 assistant 文本(rationale)不被腰斩。文件类工具结果压占位、预算裁剪不动。
+
+执行:subagent-driven(7 实现 + 1 验证任务,每任务 implementer + reviewer;
+终审 pending)。`bun run typecheck && bun test` 402/402 全绿。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-07-29-distill-signal-recovery*`。
+
+### 已知 follow-up(本轮 deferred minor,非阻塞)
+
+1. App.tsx `sourceLabel` 无 `'subagent'` 专用 UI 标签(spec 明确推迟;subagent job
+   带 cwd 显示 basename,无回归)。
+2. `subagentFilePathFromPayload` 的"subagent 文件存在但解析出空 turns -> 退回主会话"
+   边界已实现(transcript.ts turns.length>0 守卫)未直接测。
+3. schema 表重建 migration 的 `memories_new` DDL 与原 DDL 重复(SQLite 无法 ALTER
+   CHECK,brief mandate;未来加列需 lockstep 更新)。
+4. origin discipline 的脑补防护为 LLM 行为,以 prompt 文本断言为 proxy(与现有
+   distiller.test.ts 源码层断言模式一致),LLM 遵循度由 dogfood 验证。
