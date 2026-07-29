@@ -415,6 +415,49 @@ export async function logDiscards(
   )
 }
 
+/**
+ * Promote a discarded candidate back into a memory candidate row.
+ *
+ * 读 discard -> 已提升守卫(MemoryConflictError) -> scope 缺失守卫(MemoryConflictError，
+ * 老行迁移前 scope 字段全 NULL，不反查 job 回填，spec 非目标) -> createCandidate(自带事务)
+ * -> 回填 promoted_memory_id。不删 discard 行（审计保留）。幂等：并发两次提升只有一次能
+ * 回填（UPDATE … WHERE promoted_memory_id IS NULL）；落败方查到的 candidate 仍在，但下次
+ * promote 会被开头的 promotedMemoryId 守卫挡住。not found 抛 MemoryNotFoundError。
+ */
+export async function promoteDiscard(db: DbClient, id: string): Promise<Memory> {
+  // 1. 读 discard 行 + 守卫（单次 select）
+  const rows = await db.select().from(memoryDiscards).where(eq(memoryDiscards.id, id)).limit(1)
+  if (rows.length === 0) throw new MemoryNotFoundError(`discard ${id} not found`)
+  const d = rows[0]!
+  if (d.promotedMemoryId !== null) {
+    throw new MemoryConflictError(`discard ${id} already promoted to ${d.promotedMemoryId}`)
+  }
+  // 老行（迁移前）scope 字段全 NULL -> 无法提升（不反查 job 回填，spec 非目标）
+  if (d.scopeType === null || (d.scopeType === 'project' && d.scopeId === null)) {
+    throw new MemoryConflictError(`discard ${id} missing scope info; cannot promote`)
+  }
+  // 2. createCandidate（自带事务）
+  const mem = await createCandidate(db, {
+    scopeType: d.scopeType as 'project' | 'global',
+    scopeId: d.scopeId,
+    title: d.title,
+    bodyMd: d.bodyMd,
+    tags: [],
+    sourceKind: (d.sourceKind ?? 'conversation') as 'conversation' | 'error' | 'manual' | 'subagent',
+    runtime: (d.runtime ?? null) as RuntimeTag,
+    sourceCwd: d.sourceCwd,
+    distillJobId: d.distillJobId,
+    valueClass: null,
+    subjectSlug: null,
+  })
+  // 3. 回填 promoted_memory_id（WHERE promoted_memory_id IS NULL 闭环幂等：
+  //    并发两次提升只有一次能回填；落败方查到的 candidate 仍在，但 discard 状态已变，
+  //    下次 promote 会被上面的 promotedMemoryId 守卫挡住）
+  await db.update(memoryDiscards).set({ promotedMemoryId: mem.id })
+    .where(and(eq(memoryDiscards.id, id), isNull(memoryDiscards.promotedMemoryId))).run()
+  return mem
+}
+
 // ---------------------------------------------------------------------------
 // 第五轮：会话级 turn 偏移（增量蒸馏）。getSessionOffset 无记录返回 0（首次全量）；
 // setSessionOffset UPSERT（同 session 二次写覆盖）。偏移是优化非正确性依赖：
