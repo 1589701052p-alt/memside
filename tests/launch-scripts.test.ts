@@ -50,6 +50,16 @@ test('package.json exposes dev one-click script', () => {
   expect(pkg.scripts.dev).toBe('bun run scripts/dev.ts')
 })
 
+test('vite.config.ts bypasses system HTTP_PROXY for loopback proxy upstream', () => {
+  // 系统代理（如 Clash 7897）会拦截 vite proxy 到 daemon(127.0.0.1:7777) 的
+  // loopback upstream -> 前端「连不上 daemon / Unexpected end of JSON input」。
+  // vite.config 顶层设 NO_PROXY 含 127.0.0.1 让 Bun http 绕过代理（CLAUDE.md
+  // loopback 排除代理陷阱）。覆盖 dev / dev:web 所有 vite 入口。
+  const src = readFileSync(join(repoRoot, 'vite.config.ts'), 'utf8')
+  expect(src).toContain('NO_PROXY')
+  expect(src).toContain('127.0.0.1')
+})
+
 test('scripts/start.ts wires port-reclaim guard before startDaemon', () => {
   const src = readFileSync(join(repoRoot, 'scripts', 'start.ts'), 'utf8')
   expect(src).toContain('findPortHolders')
