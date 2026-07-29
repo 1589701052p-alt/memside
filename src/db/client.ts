@@ -147,7 +147,13 @@ export function openDb(path: string) {
   {
     const tbl = raw.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").get() as { sql?: string } | undefined
     if (tbl?.sql && !tbl.sql.includes("'subagent'")) {
-      raw.exec(`CREATE TABLE memories_new (
+      // 事务包裹整段表重建 DDL：SQLite DDL 是事务性的，BEGIN...COMMIT 之间任一语句
+      // 失败 -> ROLLBACK 回滚到旧表，避免「DROP memories 后 RENAME 前」被 kill 导致
+      // 下次重开 CREATE TABLE IF NOT EXISTS 建空表、guard 见 'subagent' 跳过重建、
+      // 用户数据滞留 memories_new 的丢失窗口。guard 在事务外决定是否进入。
+      raw.exec('BEGIN')
+      try {
+        raw.exec(`CREATE TABLE memories_new (
         id TEXT PRIMARY KEY,
         scope_type TEXT NOT NULL CHECK (scope_type IN ('project','global')),
         scope_id TEXT,
@@ -177,6 +183,11 @@ export function openDb(path: string) {
       raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_scope_status ON memories(scope_type, scope_id, status)')
       raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_status_created ON memories(status, created_at)')
       raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(scope_type, scope_id, subject_slug)')
+      raw.exec('COMMIT')
+      } catch (e) {
+        raw.exec('ROLLBACK')
+        throw e
+      }
     }
   }
   return db

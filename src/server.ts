@@ -119,6 +119,12 @@ export function createApp(deps: AppDeps) {
       const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
       const debounceKey = `${cwd}:${event}`
       const sourceKind = 'conversation'  // events.kind：对话型数据（subagent 区分在 job.source_agent_id）
+      // 失败模式可观测：payload 缺 agent_id 时 loadSubagentTranscript 只能退回 transcript_path
+      // 兜底。同步路径打 warn（不入 IIFE，即使后续 enqueue 失败也留信号），便于发现 claude
+      // code payload 变更悄悄禁用 subagent 蒸馏的情况。
+      if (!agentId) {
+        console.warn('memside: SubagentStop payload missing agent_id; falling back to transcript_path')
+      }
       void (async () => {
         try {
           const turns = loadSubagentTranscript(transcriptPath, agentId)
