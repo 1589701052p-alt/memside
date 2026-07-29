@@ -40,14 +40,34 @@ test('old payload (no toolName) long + no code feature -> truncated', () => {
   expect(out[0]!.content).toContain('…[truncated]')
 })
 
-test('user/assistant over 8000 chars -> truncated', () => {
-  const big = 'u'.repeat(10000)
+test('user/assistant over 20000 chars -> truncated', () => {
+  const big = 'u'.repeat(25000)
   const out = filterTranscriptForDistill([
     { role: 'user', content: big },
     { role: 'assistant', content: big },
   ])
-  expect(out[0]!.content.length).toBe(8000 + '…[truncated]'.length)
-  expect(out[1]!.content.length).toBe(8000 + '…[truncated]'.length)
+  expect(out[0]!.content.length).toBe(20000 + '…[truncated]'.length)
+  expect(out[1]!.content.length).toBe(20000 + '…[truncated]'.length)
+})
+
+test('assistant text between 8000 and 20000 is NOT truncated (design rationale survives)', () => {
+  // 第三层放开 origin discipline 后，设计 rationale（长段 assistant 文本）必须能完整
+  // 进蒸馏输入。8000-20000 区间不再被腰斩。
+  const mid = 'r'.repeat(15000)
+  const out = filterTranscriptForDistill([{ role: 'assistant', content: mid }])
+  expect(out[0]!.content).toBe(mid)
+  expect(out[0]!.content).not.toContain('…[truncated]')
+})
+
+test('assistant text at exactly 20000 is not truncated; over 20000 is', () => {
+  const exact = 'a'.repeat(20000)
+  const over = 'a'.repeat(20001)
+  expect(filterTranscriptForDistill([{ role: 'assistant', content: exact }])[0]!.content).toBe(exact)
+  expect(filterTranscriptForDistill([{ role: 'assistant', content: over }])[0]!.content).toContain('…[truncated]')
+})
+
+test('empty string assistant passes through unchanged', () => {
+  expect(filterTranscriptForDistill([{ role: 'assistant', content: '' }])[0]!.content).toBe('')
 })
 
 test('budget: drops oldest lowest-priority first; user + error kept; recent kept over old', () => {
@@ -78,8 +98,8 @@ test('DEFAULT_DISTILL_INPUT_BUDGET_TOKENS is 64000 (second-round widen)', () => 
   expect(DEFAULT_DISTILL_INPUT_BUDGET_TOKENS).toBe(64000)
 })
 
-test('per-turn caps widened: non-tool 8000, tool 3000', async () => {
-  // TDD：cap 翻倍。非文件 tool 结果截断到 3000；user/assistant 截断到 8000。
+test('per-turn caps widened: non-tool 20000, tool 3000', async () => {
+  // TDD：cap 翻倍。非文件 tool 结果截断到 3000；user/assistant 截断到 20000。
   const longTool = 'x'.repeat(5000)
   const longUser = 'y'.repeat(10000)
   const out = filterTranscriptForDistill([
@@ -87,5 +107,5 @@ test('per-turn caps widened: non-tool 8000, tool 3000', async () => {
     { role: 'user', content: longUser },
   ])
   expect(out[0]!.content.length).toBeLessThanOrEqual(3000 + '…[truncated]'.length)
-  expect(out[1]!.content.length).toBeLessThanOrEqual(8000 + '…[truncated]'.length)
+  expect(out[1]!.content.length).toBeLessThanOrEqual(20000 + '…[truncated]'.length)
 })
