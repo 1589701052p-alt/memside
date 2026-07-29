@@ -21,7 +21,7 @@ export interface MemoryInput {
   title: string
   bodyMd: string
   tags: string[]
-  sourceKind: 'conversation' | 'error' | 'manual'
+  sourceKind: 'conversation' | 'error' | 'manual' | 'subagent'
   runtime: RuntimeTag
   sourceCwd?: string | null
   sourceEventId?: string | null

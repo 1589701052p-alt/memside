@@ -570,7 +570,7 @@ test('makeLoadTranscript degrades to full when getSessionOffset throws (read-fai
   try {
     sessionOffsetsThrows = true
     const loadTranscript = makeLoadTranscript(db)
-    const result = await loadTranscript({ id: jobId, cwd: '/r', sourceEventId: 'e1', sessionId: 'sess-D' })
+    const result = await loadTranscript({ id: jobId, cwd: '/r', sourceEventId: 'e1', sessionId: 'sess-D', sourceAgentId: null })
     // 降级全量：3 turns（不是 slice(2) 的 1 turn），fullLength = 3。
     expect(result.turns.length).toBe(3)
     expect(result.fullLength).toBe(3)
@@ -857,4 +857,59 @@ test('tick: existing slugs (project + global union) reach the distiller prompt; 
   const rows = await db.select().from(memories).where(eq(memories.title, '[category:invariant] 退款14天'))
   expect(rows[0]!.subjectSlug).toBe('refund-policy')
   db.$client.close()
+})
+
+// ---------------------------------------------------------------------------
+// Task 6：subagent 蒸馏隔离 -- job 带 sourceAgentId -> sourceKind='subagent'、
+// 跳过偏移切片/更新；主会话 job 维持 sourceKind='conversation'、正常偏移。
+// ---------------------------------------------------------------------------
+
+test('tick: subagent job (sourceAgentId set) -> sourceKind=subagent in createCandidate', async () => {
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'sub-1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sourceAgentId: 'agent-XYZ',
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'subagent did X' }], fullLength: 1 }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:architecture] subagent rationale', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(captured.sourceKind).toBe('subagent')
+})
+
+test('tick: subagent job does NOT update session offset (even if sessionId present)', async () => {
+  const { getSessionOffset } = await import('@/memory/store')
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'sub-2', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sessionId: 'sess-sub', sourceAgentId: 'agent-OFF',
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+  })
+  // subagent job 不更新偏移：sess-sub 无记录（getSessionOffset 返回 0 且无行）
+  expect(await getSessionOffset(db, 'sess-sub')).toBe(0)
+  const offs = await db.select().from(memorySessionOffsets)
+  expect(offs.length).toBe(0)
+})
+
+test('tick: main-session job (no sourceAgentId) still uses sourceKind=conversation + updates offset', async () => {
+  const { getSessionOffset } = await import('@/memory/store')
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'main-1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sessionId: 'sess-main',
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 7 }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(captured.sourceKind).toBe('conversation')
+  expect(await getSessionOffset(db, 'sess-main')).toBe(7)
 })

@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob } from '@/scheduler'
-import { runDistillOnce, sweepStuckRunning } from '@/daemon'
-import { memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
+import { runDistillOnce, sweepStuckRunning, makeLoadTranscript } from '@/daemon'
+import { memoryDistillJobs, memoryDistillEvents, memorySessionOffsets } from '@/db/schema'
 
 // EBUSY-safe pattern (same as scheduler.test.ts / server.test.ts): wipe `root`
 // once in beforeAll, give each test its own fresh subdir, and close the raw
@@ -99,4 +99,24 @@ test('sweepStuckRunning leaves pending/done/failed jobs untouched', async () => 
   const done = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, doneId))
   expect(pend[0]!.status).toBe('pending')
   expect(done[0]!.status).toBe('done')
+})
+
+test('makeLoadTranscript: subagent job (sourceAgentId) returns full turns, ignores session offset', async () => {
+  // 即使 subagent job 带 sessionId + 偏移表有记录，也必须返回全量（subagent 一次性，不切片）
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'sub-lt', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+    sessionId: 'sess-lt', sourceAgentId: 'agent-LT',
+  })
+  await db.insert(memoryDistillEvents).values({
+    distillJobId: jobId, attemptIndex: 0, ts: 1, kind: 'conversation',
+    payload: JSON.stringify([
+      { role: 'user', content: 'A' }, { role: 'user', content: 'B' }, { role: 'user', content: 'C' },
+    ]),
+  })
+  // 预置偏移 = 2（正常会 slice(2) 只给 1 turn）；subagent 必须忽略、返回全量 3
+  await db.insert(memorySessionOffsets).values({ sessionId: 'sess-lt', lastTurnOffset: 2, updatedAt: Date.now() })
+  const loadTranscript = makeLoadTranscript(db)
+  const result = await loadTranscript({ id: jobId, cwd: '/r', sourceEventId: 'sub-lt', sessionId: 'sess-lt', sourceAgentId: 'agent-LT' })
+  expect(result.turns.length).toBe(3)
+  expect(result.fullLength).toBe(3)
 })
