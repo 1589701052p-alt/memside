@@ -171,6 +171,17 @@ memside 直接读 claude code 自己的 settings,所以 claude code 能跑,disti
 
 **会话变慢/卡顿。** daemon 没跑,每个 hook 都吃满 2s 超时。启动它:`bun run start`(构建+daemon+hooks 一条命令;不想重新构建就用 `bun run src/cli.ts start`)。确认存活:`curl -s http://127.0.0.1:7777/api/memories`。
 
+**启动报 `EADDRINUSE` / 端口被占。** 上一次 dev/start 未正常退出留了孤儿进程。
+`bun run start` / `bun run dev` 现在会在启动前检测端口占用,列出占用进程的 PID
+和命令行并询问是否杀掉;非交互环境(管道/CI)直接退出,需手动回收:
+
+```bash
+netstat -ano | findstr :7777      # Windows,拿 PID
+taskkill //PID <pid> //F
+# 或 posix:
+lsof -ti:7777 | xargs kill -9
+```
+
 **没有候选记忆产出。** distiller 调不通 LLM。查 `~/.memside/memside.db` 里 `memory_distill_jobs.last_error`,确认凭证可用(claude code 自己能跑是个好信号)。常见原因:`ANTHROPIC_DEFAULT_HAIKU_MODEL` 的 model id 在你的代理上不可达--换成代理支持的 haiku 档 model。
 
 **拒绝过的记忆又出现了。** 不应该--rejected 的条目保持 rejected。如果出现,提 issue。
