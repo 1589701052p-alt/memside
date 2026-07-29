@@ -373,8 +373,8 @@ export async function restoreMemory(db: DbClient, id: string): Promise<Memory> {
     const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
     // Specific-source guard (I3): restore must only accept status === 'rejected'.
-    // canTransition('archived','candidate') is false, but a general check would
-    // silently accept any row; lock the source like unarchive does.
+    // canTransition('rejected','candidate') is now true, but keep the specific
+    // check for consistency with archive/unarchive semantics.
     if (rows[0]!.status !== 'rejected') {
       throw new MemoryConflictError(`memory ${id} is '${rows[0]!.status}', not 'rejected'`)
     }

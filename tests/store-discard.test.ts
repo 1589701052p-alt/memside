@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { memoryDiscards, memoryDistillJobs } from '@/db/schema'
-import { logDiscards, createCandidate, promoteDiscard, getMemoryById, listDiscards, MemoryConflictError, MemoryNotFoundError } from '@/memory/store'
+import { logDiscards, promoteDiscard, getMemoryById, listDiscards, MemoryConflictError, MemoryNotFoundError } from '@/memory/store'
 
 const root = join(import.meta.dir, '.tmp-discard')
 let dir = ''

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
+import type { MemoryStatus } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, MemoryNotFoundError } from '@/memory/store'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import type { EnqueueInput } from '@/scheduler'
@@ -222,7 +223,6 @@ export function createApp(deps: AppDeps) {
 
   app.get('/api/memories', async (c) => {
     const statusParam = c.req.query('status') ?? ''
-    type MemoryStatus = 'candidate' | 'approved' | 'archived' | 'superseded' | 'rejected'
     const VALID: Set<string> = new Set(['candidate', 'approved', 'archived', 'superseded', 'rejected'])
     const wanted = statusParam.split(',').map((s) => s.trim()).filter((s): s is MemoryStatus => s.length > 0 && VALID.has(s))
     const rows = wanted.length > 0
