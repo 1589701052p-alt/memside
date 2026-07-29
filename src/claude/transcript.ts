@@ -162,3 +162,27 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
     return []
   }
 }
+
+/**
+ * Derive the subagent's own transcript file path from a SubagentStop payload's
+ * `transcript_path` (main-session `<dir>/<sid>.jsonl`) + `agent_id`. The
+ * subagent file lives at `<dir>/<sid>/subagents/agent-<agentId>.jsonl`
+ * (verified on disk against claude code 2.1.220). Returns null when the inputs
+ * can't yield a valid path (agentId empty, transcriptPath not a .jsonl, etc.)
+ * so callers can fall back to the raw transcript_path. Pure + never throws.
+ */
+export function subagentFilePathFromPayload(
+  transcriptPath: string,
+  agentId: string | null | undefined,
+): string | null {
+  try {
+    if (!transcriptPath || !transcriptPath.endsWith('.jsonl')) return null
+    if (!agentId) return null
+    // strip trailing '.jsonl' -> the <sid> directory; join with subagents/agent-<id>.jsonl
+    const sep = transcriptPath.includes('\\') && !transcriptPath.includes('/') ? '\\' : '/'
+    const base = transcriptPath.slice(0, -'.jsonl'.length)
+    return `${base}${sep}subagents${sep}agent-${agentId}.jsonl`
+  } catch {
+    return null
+  }
+}

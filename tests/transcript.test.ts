@@ -1,7 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseTranscriptFile, extractText } from '@/claude/transcript'
+import { parseTranscriptFile, extractText, subagentFilePathFromPayload } from '@/claude/transcript'
 
 /**
  * Tests for the claude code transcript JSONL parser (C3 fix).
@@ -229,4 +229,35 @@ test('orphan tool_result (no preceding tool_use) -> tool turn without toolName',
   )
   const turns = parseTranscriptFile(p)
   expect(turns).toEqual([{ role: 'tool', content: 'lonely', isError: false }])
+})
+
+// --- subagentFilePathFromPayload unit cases -----------------------------------
+
+test('subagentFilePathFromPayload: normal main-session path -> subagent file path', () => {
+  const tp = '/home/u/.claude/projects/C--repo/abc-123.jsonl'
+  expect(subagentFilePathFromPayload(tp, 'a0696f74')).toBe(
+    '/home/u/.claude/projects/C--repo/abc-123/subagents/agent-a0696f74.jsonl',
+  )
+})
+
+test('subagentFilePathFromPayload: Windows-style path', () => {
+  const tp = 'C:\\Users\\u\\.claude\\projects\\C--repo\\abc-123.jsonl'
+  expect(subagentFilePathFromPayload(tp, 'xyz')).toBe(
+    'C:\\Users\\u\\.claude\\projects\\C--repo\\abc-123\\subagents\\agent-xyz.jsonl',
+  )
+})
+
+test('subagentFilePathFromPayload: agentId empty -> null', () => {
+  expect(subagentFilePathFromPayload('/x/abc.jsonl', '')).toBeNull()
+  expect(subagentFilePathFromPayload('/x/abc.jsonl', null)).toBeNull()
+  expect(subagentFilePathFromPayload('/x/abc.jsonl', undefined)).toBeNull()
+})
+
+test('subagentFilePathFromPayload: non-jsonl transcriptPath -> null', () => {
+  expect(subagentFilePathFromPayload('/x/abc.txt', 'ag')).toBeNull()
+  expect(subagentFilePathFromPayload('/x/abc', 'ag')).toBeNull()
+})
+
+test('subagentFilePathFromPayload: empty transcriptPath -> null', () => {
+  expect(subagentFilePathFromPayload('', 'ag')).toBeNull()
 })
