@@ -23,7 +23,7 @@ export function openDb(path: string) {
       body_md TEXT NOT NULL,
       tags TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected')),
-      source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual')),
+      source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual','subagent')),
       source_cwd TEXT,
       source_event_id TEXT,
       distill_job_id TEXT,
@@ -45,6 +45,7 @@ export function openDb(path: string) {
       runtime TEXT NOT NULL,
       cwd TEXT,
       session_id TEXT,
+      source_agent_id TEXT,
       scope_resolved_json TEXT,
       status TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0,
@@ -131,6 +132,63 @@ export function openDb(path: string) {
     // column" on round-4-and-earlier DBs before the ALTER runs. IF NOT EXISTS
     // makes this idempotent across reopens.
     raw.exec('CREATE INDEX IF NOT EXISTS idx_distill_jobs_session ON memory_distill_jobs(session_id)')
+  }
+  // Idempotent migration: add source_agent_id to memory_distill_jobs.
+  // subagent 蒸馏任务的来源标识；主会话 job 为 NULL。无 backfill。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'source_agent_id')) {
+      raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN source_agent_id TEXT')
+    }
+  }
+  // Idempotent migration: widen memories.source_kind CHECK to include 'subagent'.
+  // sqlite 无法 ALTER CHECK，旧库的窄 CHECK 会拒绝 source_kind='subagent' 插入。
+  // 检测 sqlite_master 里的建表 SQL 是否已含 'subagent'；不含则表重建（保数据、重建索引）。
+  {
+    const tbl = raw.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").get() as { sql?: string } | undefined
+    if (tbl?.sql && !tbl.sql.includes("'subagent'")) {
+      // 事务包裹整段表重建 DDL：SQLite DDL 是事务性的，BEGIN...COMMIT 之间任一语句
+      // 失败 -> ROLLBACK 回滚到旧表，避免「DROP memories 后 RENAME 前」被 kill 导致
+      // 下次重开 CREATE TABLE IF NOT EXISTS 建空表、guard 见 'subagent' 跳过重建、
+      // 用户数据滞留 memories_new 的丢失窗口。guard 在事务外决定是否进入。
+      raw.exec('BEGIN')
+      try {
+        raw.exec(`CREATE TABLE memories_new (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT NOT NULL CHECK (scope_type IN ('project','global')),
+        scope_id TEXT,
+        runtime TEXT CHECK (runtime IN ('claude-code','opencode') OR runtime IS NULL),
+        title TEXT NOT NULL,
+        body_md TEXT NOT NULL,
+        tags TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected')),
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual','subagent')),
+        source_cwd TEXT,
+        source_event_id TEXT,
+        distill_job_id TEXT,
+        distill_action TEXT CHECK (distill_action IN ('new','update_of','duplicate_of','conflict_with') OR distill_action IS NULL),
+        supersedes_id TEXT,
+        superseded_by_id TEXT,
+        approved_at INTEGER,
+        created_at INTEGER NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        subject_slug TEXT,
+        value_class TEXT,
+        CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL))
+      )`)
+      raw.exec(`INSERT INTO memories_new (id, scope_type, scope_id, runtime, title, body_md, tags, status, source_kind, source_cwd, source_event_id, distill_job_id, distill_action, supersedes_id, superseded_by_id, approved_at, created_at, version, subject_slug, value_class)
+        SELECT id, scope_type, scope_id, runtime, title, body_md, tags, status, source_kind, source_cwd, source_event_id, distill_job_id, distill_action, supersedes_id, superseded_by_id, approved_at, created_at, version, subject_slug, value_class FROM memories`)
+      raw.exec('DROP TABLE memories')
+      raw.exec('ALTER TABLE memories_new RENAME TO memories')
+      raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_scope_status ON memories(scope_type, scope_id, status)')
+      raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_status_created ON memories(status, created_at)')
+      raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(scope_type, scope_id, subject_slug)')
+      raw.exec('COMMIT')
+      } catch (e) {
+        raw.exec('ROLLBACK')
+        throw e
+      }
+    }
   }
   return db
 }

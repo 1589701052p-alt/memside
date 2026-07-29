@@ -18,7 +18,7 @@ let dir = ''
 let db: ReturnType<typeof openDb>
 let app: ReturnType<typeof createApp>
 let adapter: ClaudeCodeAdapter
-let enqueueCalls: { sourceEventId: string; runtime: string; cwd: string; debounceKey: string; sessionId?: string }[]
+let enqueueCalls: { sourceEventId: string; runtime: string; cwd: string; debounceKey: string; sessionId?: string; sourceAgentId?: string | null }[]
 let broadcastCalls: unknown[]
 
 beforeAll(() => {
@@ -150,26 +150,68 @@ test('collector PostToolUse is skipped (no distill, no event, no job, no broadca
   expect(broadcastCalls.length).toBe(0)             // 不 broadcast（连 memory.capture 都不发）
 })
 
-test('collector SubagentStop is skipped (no distill, no event, no job, no broadcast)', async () => {
-  // 第五轮：SubagentStop 的 transcript_path 指向主会话 JSONL（不是独立子会话），
-  // 与同 session 的 Stop 蒸馏同一段会话（firstUser 一致、turns 数几乎相同），纯重复。
-  // SubagentStop 无独有价值，早返回 202 不蒸馏。与 PostToolUse 跳过对称。
-  const fixturePath = writeJsonlFixture('subagent.jsonl', {
-    type: 'user',
-    message: { role: 'user', content: 'subagent transcript is main session' },
+test('collector SubagentStop now enqueues + stores event + broadcasts (subagent distill)', async () => {
+  // 第七轮（本 spec）：SubagentStop 不再早返回。payload 带 agent_id -> 定位 subagent
+  // 自己的文件 -> 单独蒸馏。这里 transcript_path 指向一个 fixture（双路兜底退回它），
+  // 断言 enqueue（带 sourceAgentId）+ 落 event + broadcast。
+  const fixturePath = writeJsonlFixture('sub.jsonl', {
+    type: 'user', message: { role: 'user', content: 'subagent internal turn' },
   })
   const beforeEvents = await db.select().from(memoryDistillEvents)
   const r = await req('/hooks/claude/SubagentStop', {
     method: 'POST',
-    body: JSON.stringify({ sourceEventId: 'e3', cwd: '/r', transcript_path: fixturePath, session_id: 'sess-1' }),
+    body: JSON.stringify({ sourceEventId: 'e3', cwd: '/r', transcript_path: fixturePath, session_id: 'sess-1', agent_id: 'ag-1' }),
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
   await new Promise((res) => setTimeout(res, 50))
+  // enqueue 被调用，且带 sourceAgentId
+  expect(enqueueCalls.length).toBe(1)
+  expect(enqueueCalls[0]).toMatchObject({ sourceEventId: 'e3', runtime: 'claude-code', cwd: '/r', debounceKey: '/r:SubagentStop' })
+  expect(enqueueCalls[0]!.sourceAgentId).toBe('ag-1')
+  // 落了 event（含 subagent 内部 turn）
   const events = await db.select().from(memoryDistillEvents)
-  expect(events.length).toBe(beforeEvents.length)  // 不存 event
-  expect(enqueueCalls.length).toBe(0)               // 不 enqueue job
-  expect(broadcastCalls.length).toBe(0)             // 不 broadcast
+  expect(events.length).toBe(beforeEvents.length + 1)
+  expect(events[events.length - 1]!.payload).toContain('subagent internal turn')
+  // broadcast 了 capture
+  expect(broadcastCalls.length).toBeGreaterThanOrEqual(1)
+})
+
+test('collector SubagentStop with agent_id hitting subagent file (double-fallback path 1)', async () => {
+  // agent_id 推路径命中真实 subagent 文件 -> 落的 event 含 subagent 内容、不含主会话内容
+  const subDir = join(dir, 'sess-ff', 'subagents')
+  mkdirSync(subDir, { recursive: true })
+  const mainPath = join(dir, 'sess-ff.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
+  const subPath = join(subDir, 'agent-ff.jsonl')
+  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT-FF' } }) + '\n')
+  await req('/hooks/claude/SubagentStop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e-ff', cwd: '/r', transcript_path: mainPath, agent_id: 'ff' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  await new Promise((res) => setTimeout(res, 50))
+  const events = await db.select().from(memoryDistillEvents)
+  const last = events[events.length - 1]!
+  expect(last.payload).toContain('SUBAGENT-FF')
+  expect(last.payload).not.toContain('MAIN')
+})
+
+test('collector SubagentStop still acks 202 when enqueue rejects, broadcasts failure', async () => {
+  const bc: unknown[] = []
+  app = createApp({
+    db, adapter,
+    enqueueDistillJob: async () => { throw new Error('SQLITE_BUSY') },
+    broadcast: (m: unknown) => { bc.push(m) },
+  })
+  const r = await req('/hooks/claude/SubagentStop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e-rej', cwd: '/r', transcript_path: '', agent_id: 'ag' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  await new Promise((res) => setTimeout(res, 50))
+  expect(bc.some((m: any) => m.type === 'memory.enqueue.failed' && m.sourceEventId === 'e-rej')).toBe(true)
 })
 
 test('collector Stop reads session_id and passes it to enqueueDistillJob', async () => {

@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, existsSync } from 'node:fs'
 import type { TranscriptTurn } from '@/memory/pure'
 
 /**
@@ -159,6 +159,58 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
     return turns
   } catch {
     // never throw to the caller (collector hot path)
+    return []
+  }
+}
+
+/**
+ * Derive the subagent's own transcript file path from a SubagentStop payload's
+ * `transcript_path` (main-session `<dir>/<sid>.jsonl`) + `agent_id`. The
+ * subagent file lives at `<dir>/<sid>/subagents/agent-<agentId>.jsonl`
+ * (verified on disk against claude code 2.1.220). Returns null when the inputs
+ * can't yield a valid path (agentId empty, transcriptPath not a .jsonl, etc.)
+ * so callers can fall back to the raw transcript_path. Pure + never throws.
+ */
+export function subagentFilePathFromPayload(
+  transcriptPath: string,
+  agentId: string | null | undefined,
+): string | null {
+  try {
+    if (!transcriptPath || !transcriptPath.endsWith('.jsonl')) return null
+    if (!agentId) return null
+    // strip trailing '.jsonl' -> the <sid> directory; join with subagents/agent-<id>.jsonl
+    const sep = transcriptPath.includes('\\') && !transcriptPath.includes('/') ? '\\' : '/'
+    const base = transcriptPath.slice(0, -'.jsonl'.length)
+    return `${base}${sep}subagents${sep}agent-${agentId}.jsonl`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Load a subagent's own transcript with double-fallback (spec 第一层):
+ * 1. Try the path derived from (transcriptPath, agentId) via subagentFilePathFromPayload.
+ * 2. If that yields no path or the file is absent, fall back to parseTranscriptFile(transcriptPath).
+ * 3. If neither reads, return [].
+ * Never throws - degrades to [] on any fs/parse error so the caller can still enqueue
+ * (preserve capture signal, don't drop the event). The subagent file format matches the
+ * main session's (verified), so parseTranscriptFile reads it directly.
+ */
+export function loadSubagentTranscript(
+  transcriptPath: string,
+  agentId: string | null | undefined,
+): TranscriptTurn[] {
+  try {
+    const subPath = subagentFilePathFromPayload(transcriptPath, agentId)
+    if (subPath && existsSync(subPath)) {
+      const turns = parseTranscriptFile(subPath)
+      if (turns.length > 0) return turns
+    }
+    if (transcriptPath) {
+      return parseTranscriptFile(transcriptPath)
+    }
+    return []
+  } catch {
     return []
   }
 }

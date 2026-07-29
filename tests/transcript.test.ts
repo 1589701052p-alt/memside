@@ -1,7 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseTranscriptFile, extractText } from '@/claude/transcript'
+import { parseTranscriptFile, extractText, subagentFilePathFromPayload, loadSubagentTranscript } from '@/claude/transcript'
 
 /**
  * Tests for the claude code transcript JSONL parser (C3 fix).
@@ -229,4 +229,67 @@ test('orphan tool_result (no preceding tool_use) -> tool turn without toolName',
   )
   const turns = parseTranscriptFile(p)
   expect(turns).toEqual([{ role: 'tool', content: 'lonely', isError: false }])
+})
+
+// --- subagentFilePathFromPayload unit cases -----------------------------------
+
+test('subagentFilePathFromPayload: normal main-session path -> subagent file path', () => {
+  const tp = '/home/u/.claude/projects/C--repo/abc-123.jsonl'
+  expect(subagentFilePathFromPayload(tp, 'a0696f74')).toBe(
+    '/home/u/.claude/projects/C--repo/abc-123/subagents/agent-a0696f74.jsonl',
+  )
+})
+
+test('subagentFilePathFromPayload: Windows-style path', () => {
+  const tp = 'C:\\Users\\u\\.claude\\projects\\C--repo\\abc-123.jsonl'
+  expect(subagentFilePathFromPayload(tp, 'xyz')).toBe(
+    'C:\\Users\\u\\.claude\\projects\\C--repo\\abc-123\\subagents\\agent-xyz.jsonl',
+  )
+})
+
+test('subagentFilePathFromPayload: agentId empty -> null', () => {
+  expect(subagentFilePathFromPayload('/x/abc.jsonl', '')).toBeNull()
+  expect(subagentFilePathFromPayload('/x/abc.jsonl', null)).toBeNull()
+  expect(subagentFilePathFromPayload('/x/abc.jsonl', undefined)).toBeNull()
+})
+
+test('subagentFilePathFromPayload: non-jsonl transcriptPath -> null', () => {
+  expect(subagentFilePathFromPayload('/x/abc.txt', 'ag')).toBeNull()
+  expect(subagentFilePathFromPayload('/x/abc', 'ag')).toBeNull()
+})
+
+test('subagentFilePathFromPayload: empty transcriptPath -> null', () => {
+  expect(subagentFilePathFromPayload('', 'ag')).toBeNull()
+})
+
+// --- loadSubagentTranscript double-fallback (Task 5) -------------------------
+
+test('loadSubagentTranscript: agent_id path hit -> parses subagent file', () => {
+  // 主会话 dir/sess-1.jsonl；subagent 文件 dir/sess-1/subagents/agent-AG.jsonl
+  mkdirSync(join(dir, 'sess-1', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'sess-1.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
+  const subPath = join(dir, 'sess-1', 'subagents', 'agent-AG.jsonl')
+  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT INTERNAL' } }) + '\n')
+  const turns = loadSubagentTranscript(mainPath, 'AG')
+  expect(turns.length).toBe(1)
+  expect(turns[0]!.content).toBe('SUBAGENT INTERNAL')
+  expect(turns[0]!.content).not.toBe('MAIN SESSION')
+})
+
+test('loadSubagentTranscript: agent_id path miss -> falls back to transcript_path', () => {
+  const mainPath = join(dir, 'sess-2.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'FALLBACK TO MAIN' } }) + '\n')
+  // 不建 subagents 目录 -> 推路径读不到 -> 退回 mainPath
+  const turns = loadSubagentTranscript(mainPath, 'NOPE')
+  expect(turns.length).toBe(1)
+  expect(turns[0]!.content).toBe('FALLBACK TO MAIN')
+})
+
+test('loadSubagentTranscript: both miss -> empty (no throw)', () => {
+  const turns = loadSubagentTranscript(join(dir, 'nope.jsonl'), 'AG')
+  expect(turns).toEqual([])
+  // agentId 空 + 无 transcript_path 也空
+  expect(loadSubagentTranscript('', 'AG')).toEqual([])
+  expect(loadSubagentTranscript(join(dir, 'x.jsonl'), '')).toEqual([])
 })

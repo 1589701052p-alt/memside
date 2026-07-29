@@ -43,6 +43,8 @@ export function makeLoadTranscript(db: DbClient): TickDeps['loadTranscript'] {
       } catch { /* skip malformed payload */ }
     }
     const fullLength = turns.length
+    // subagent 蒸馏任务：一次性全量，不按 session 偏移切片（spec 第一层）。
+    if (job.sourceAgentId) return { turns, fullLength }
     // 无 sessionId（历史 job）-> 全量返回，向后兼容（不切片、不更新偏移）。
     if (!job.sessionId) return { turns, fullLength }
     // 有 sessionId -> 查偏移切片。getSessionOffset 失败降级全量（不阻塞蒸馏）。

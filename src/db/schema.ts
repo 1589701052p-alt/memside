@@ -14,7 +14,7 @@ export const memories = sqliteTable(
       enum: ['candidate', 'approved', 'archived', 'superseded', 'rejected'],
     }).notNull(),
     sourceKind: text('source_kind', {
-      enum: ['conversation', 'error', 'manual'],
+      enum: ['conversation', 'error', 'manual', 'subagent'],
     }).notNull(),
     sourceCwd: text('source_cwd'), // 来源项目 cwd；蒸馏来自 job.cwd，手动记忆为 null
     sourceEventId: text('source_event_id'),
@@ -46,6 +46,7 @@ export const memoryDistillJobs = sqliteTable(
     runtime: text('runtime', { enum: ['claude-code', 'opencode'] }).notNull(),
     cwd: text('cwd'), // project scope resolver input
     sessionId: text('session_id'), // 第五轮：claude code hook payload 的 session_id，增量偏移键
+    sourceAgentId: text('source_agent_id'), // subagent 蒸馏任务的 agent_id；主会话任务为 null
     scopeResolvedJson: text('scope_resolved_json'), // {projectId, includeGlobal}
     status: text('status', {
       enum: ['pending', 'running', 'done', 'failed', 'canceled'],

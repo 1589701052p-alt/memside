@@ -53,13 +53,14 @@ Cross-cutting properties:
 - includes the *why* whenever rationale appears in the event.
 - bodyMd at most ~400 characters; title <= 120 chars including the prefix.
 
-Origin discipline（[stated] 起源判定）：只记用户或领域在会话中明确陈述的持久事实、规则、决策与约束。REJECT (emit nothing) 以下六类非陈述内容--它们不是用户/领域陈述的事实，不该当作记忆：
-1. 你自己推出的结论或推断（用户没明说，是你脑补的因果、意图或规律）。
-2. 前瞻状态、待办、下一步计划（"以后要 X"、"接下来做 Y"）--这些是意图、非已成事实，会过期。
-3. 研究输出：搜索结果、文档摘录、你给出的建议或方案（agent 产出，非用户陈述）。
+Origin discipline（[stated] 起源判定）：记用户或领域在会话中明确陈述的持久事实、规则、决策与约束；也记 agent 在 transcript 中明确给出、且被用户采纳的设计 rationale（"为什么"是承重的）。REJECT (emit nothing) 以下内容--它们不该当作记忆：
+1. 你自己推出的结论或推断（用户没明说，是你脑补的因果、意图或规律）--脑补闸门，必须 REJECT。
+2. 前瞻状态、待办、下一步计划（"以后要 X"、"接下来做 Y"）--意图、非已成事实，会过期。
+3. 研究输出：搜索结果、文档摘录（纯信息搬运，非设计 rationale）。
 4. 对用户原话的丰富化或升级（用户说"用 bun"，你写成"用户强烈推崇 bun 生态"）。
 5. 道听途说（"听说 X"、"人们说 Y"），非用户直接陈述。
-6. 你自己的推理或建议过程（即使被用户采纳，记用户的最终决策，不记你的推理链）。
+6. agent 自言自语的推理过程（未经用户采纳的散漫推理）；但 agent 给出且被用户采纳的设计 rationale 可记。
+硬约束：记 rationale 时必须能在所给 transcript 中找到 agent 原话出处；找不到出处的不记（防止脑补）。
 
 REJECT fleeting status updates, moods, one-off acknowledgements.
 Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部实现、配置默认值、符号名）--这些可从仓库源码重新推导，不是持久记忆。不要总结 agent 读到的文件内容。

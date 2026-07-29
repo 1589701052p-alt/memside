@@ -22,6 +22,7 @@ export interface EnqueueInput {
   debounceKey: string
   debounceMs?: number
   sessionId?: string  // 第五轮：会话键，用于增量偏移
+  sourceAgentId?: string | null  // subagent 蒸馏任务的 agent_id；主会话任务为 null/不传
 }
 
 export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
@@ -31,6 +32,7 @@ export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
   await db.insert(memoryDistillJobs).values({
     id, debounceKey: input.debounceKey, sourceEventId: input.sourceEventId,
     runtime: input.runtime, cwd: input.cwd, sessionId: input.sessionId ?? null,
+    sourceAgentId: input.sourceAgentId ?? null,
     status: 'pending', attempts: 0, nextRunAt, createdAt: now, finishedAt: null,
   })
   return { jobId: id, nextRunAt }
@@ -39,6 +41,7 @@ export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
 export interface TickDeps {
   loadTranscript: (job: {
     id: string; cwd: string | null; sourceEventId: string; sessionId: string | null
+    sourceAgentId: string | null
   }) => Promise<{ turns: TranscriptTurn[]; fullLength: number }>
   callLLM: LLMCall
   /** Signature matches store.createCandidate(db, MemoryInput): Promise<Memory>. */
@@ -120,7 +123,8 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
     await db.update(memoryDistillJobs).set({ status: 'running' }).where(eq(memoryDistillJobs.id, job.id)).run()
     try {
       const { turns: newTurns, fullLength } = await deps.loadTranscript({
-        id: job.id, cwd: job.cwd, sourceEventId: job.sourceEventId, sessionId: job.sessionId ?? null,
+        id: job.id, cwd: job.cwd, sourceEventId: job.sourceEventId,
+        sessionId: job.sessionId ?? null, sourceAgentId: (job.sourceAgentId as string | null) ?? null,
       })
       // 第五轮增量切片：newTurns 为空 = 该 session 自上次蒸馏后无新增 turn，跳过蒸馏。
       // 标 done（消费 job），不 distill / createCandidate / setSessionOffset（偏移不变）。
@@ -177,7 +181,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           title: k.cand.title,
           bodyMd: k.cand.bodyMd,
           tags: [],
-          sourceKind: 'conversation',
+          sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
           sourceCwd: job.cwd ?? null,
           runtime: k.cand.runtime,
           distillJobId: job.id,
@@ -196,7 +200,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() }).where(eq(memoryDistillJobs.id, job.id)).run()
       // 第五轮：本次蒸馏到 fullLength，下次该 session 从此处切。仅 job 有 sessionId 时
       // 更新；无 sessionId（历史 job）不更新，保持全量向后兼容。失败只 warn，不阻塞 done。
-      if (job.sessionId) {
+      if (job.sessionId && !job.sourceAgentId) {
         try { await setSessionOffset(db, job.sessionId, fullLength) }
         catch (e) { console.warn('memside: setSessionOffset failed', e) }
       }

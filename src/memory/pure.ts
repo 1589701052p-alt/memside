@@ -207,7 +207,7 @@ export const DEFAULT_DISTILL_INPUT_BUDGET_TOKENS = 64000
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const TOOL_RESULT_CAP_CHARS = 3000
-const NON_TOOL_CAP_CHARS = 8000
+const NON_TOOL_CAP_CHARS = 20000 // 放宽：设计 rationale 长段 assistant 文本不再腰斩
 const CODE_FEATURE_RE = /(^|\n)\s*(import |export |function |const |class |interface |def |async |return )/
 const INDENT_RE = /\n( {4,}|\t+)\S/
 
