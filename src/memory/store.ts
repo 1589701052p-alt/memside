@@ -372,6 +372,11 @@ export interface DiscardRecord {
   title: string
   bodyMd: string
   reason: 'public-knowledge' | 'derivable' | 'taming'
+  scopeType: 'project' | 'global'
+  scopeId: string | null
+  sourceCwd: string | null
+  runtime: RuntimeTag
+  sourceKind: 'conversation' | 'subagent'
 }
 
 /**
@@ -389,6 +394,8 @@ export async function logDiscards(
   await db.insert(memoryDiscards).values(
     discards.map((d) => ({
       id: ulid(), distillJobId, title: d.title, bodyMd: d.bodyMd, reason: d.reason, ts,
+      scopeType: d.scopeType, scopeId: d.scopeId, sourceCwd: d.sourceCwd,
+      runtime: d.runtime, sourceKind: d.sourceKind, promotedMemoryId: null,
     })),
   )
 }

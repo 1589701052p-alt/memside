@@ -151,8 +151,8 @@ test('logDiscards writes rows with title/bodyMd/reason/distillJobId', async () =
   // need a distill job row for the FK
   db.insert(memoryDistillJobs).values({ id: 'j1', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code', cwd: '/r', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 0 }).run()
   await logDiscards(db, 'j1', [
-    { title: 't1', bodyMd: 'b1', reason: 'public-knowledge' },
-    { title: 't2', bodyMd: 'b2', reason: 'derivable' },
+    { title: 't1', bodyMd: 'b1', reason: 'public-knowledge', scopeType: 'project', scopeId: '/r', sourceCwd: '/r', runtime: 'claude-code', sourceKind: 'conversation' },
+    { title: 't2', bodyMd: 'b2', reason: 'derivable', scopeType: 'project', scopeId: '/r', sourceCwd: '/r', runtime: 'claude-code', sourceKind: 'conversation' },
   ])
   const rows = await db.select().from(memoryDiscards).orderBy(memoryDiscards.ts)
   expect(rows.length).toBe(2)

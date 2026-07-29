@@ -92,6 +92,13 @@ export const memoryDiscards = sqliteTable(
     bodyMd: text('body_md').notNull(),
     reason: text('reason').notNull(), // 'public-knowledge' | 'derivable' | 'taming'
     ts: integer('ts').notNull(),
+    // 以下 6 列为本需求新增（nullable；迁移前老行为 NULL）：
+    scopeType: text('scope_type'), // 'project' | 'global'
+    scopeId: text('scope_id'), // project -> cwd, global -> null
+    sourceCwd: text('source_cwd'),
+    runtime: text('runtime'), // 'claude-code' | 'opencode'
+    sourceKind: text('source_kind'), // 'conversation' | 'subagent'
+    promotedMemoryId: text('promoted_memory_id'), // 提升 success 后回填 candidate.id
   },
   (t) => ({
     tsIdx: index('idx_discards_ts').on(t.ts),

@@ -168,7 +168,14 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         const c = deduped[i]
         if (!c) return
         if (v.keep) keepWithClass.push({ cand: c, valueClass: v.valueClass })
-        else discarded.push({ title: c.title, bodyMd: c.bodyMd, reason: v.reason })
+        else discarded.push({
+          title: c.title, bodyMd: c.bodyMd, reason: v.reason,
+          scopeType: c.scopeType,
+          scopeId: resolveScopeId(c.scopeType, job.cwd ?? null),
+          sourceCwd: job.cwd ?? null,
+          runtime: c.runtime,
+          sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
+        })
       })
       if (discarded.length > 0) {
         // Best-effort audit log: a DB failure here must not block distill.
