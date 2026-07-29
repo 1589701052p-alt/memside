@@ -458,6 +458,36 @@ export async function promoteDiscard(db: DbClient, id: string): Promise<Memory> 
   return mem
 }
 
+export const DISCARDS_LIST_LIMIT = 200
+
+export interface DiscardRow {
+  id: string
+  distillJobId: string
+  title: string
+  bodyMd: string
+  reason: string
+  ts: number
+  scopeType: string | null
+  scopeId: string | null
+  sourceCwd: string | null
+  runtime: string | null
+  sourceKind: string | null
+  promotedMemoryId: string | null
+}
+
+export async function listDiscards(
+  db: DbClient,
+  opts: { limit?: number } = {},
+): Promise<DiscardRow[]> {
+  const limit = opts.limit ?? DISCARDS_LIST_LIMIT
+  const rows = await db.select().from(memoryDiscards).orderBy(desc(memoryDiscards.ts)).limit(limit).all()
+  return rows.map((r) => ({
+    id: r.id, distillJobId: r.distillJobId, title: r.title, bodyMd: r.bodyMd, reason: r.reason,
+    ts: r.ts, scopeType: r.scopeType ?? null, scopeId: r.scopeId ?? null, sourceCwd: r.sourceCwd ?? null,
+    runtime: r.runtime ?? null, sourceKind: r.sourceKind ?? null, promotedMemoryId: r.promotedMemoryId ?? null,
+  }))
+}
+
 // ---------------------------------------------------------------------------
 // 第五轮：会话级 turn 偏移（增量蒸馏）。getSessionOffset 无记录返回 0（首次全量）；
 // setSessionOffset UPSERT（同 session 二次写覆盖）。偏移是优化非正确性依赖：

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { memoryDiscards, memoryDistillJobs } from '@/db/schema'
-import { logDiscards, createCandidate, promoteDiscard, getMemoryById, MemoryConflictError, MemoryNotFoundError } from '@/memory/store'
+import { logDiscards, createCandidate, promoteDiscard, getMemoryById, listDiscards, MemoryConflictError, MemoryNotFoundError } from '@/memory/store'
 
 const root = join(import.meta.dir, '.tmp-discard')
 let dir = ''
@@ -102,4 +102,24 @@ test('promoteDiscard on legacy row missing scope throws Conflict', async () => {
 
 test('promoteDiscard on missing id throws NotFound', async () => {
   await expect(promoteDiscard(db, 'nope')).rejects.toBeInstanceOf(MemoryNotFoundError)
+})
+
+test('listDiscards returns rows newest-first, default limit 200', async () => {
+  const jobId = await seedJob()
+  const now = Date.now()
+  for (let i = 0; i < 3; i++) {
+    await db.insert(memoryDiscards).values({
+      id: `d-${i}`, distillJobId: jobId, title: `t${i}`, bodyMd: 'b', reason: 'derivable',
+      ts: now + i, scopeType: 'global', scopeId: null, sourceCwd: null,
+      runtime: 'claude-code', sourceKind: 'conversation', promotedMemoryId: null,
+    })
+  }
+  const rows = await listDiscards(db)
+  expect(rows.length).toBe(3)
+  expect(rows[0]!.ts).toBeGreaterThan(rows[2]!.ts)  // DESC
+})
+
+test('listDiscards empty table returns []', async () => {
+  const rows = await listDiscards(db)
+  expect(rows).toEqual([])
 })
