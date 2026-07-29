@@ -1,11 +1,11 @@
 import { Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
-import { desc } from 'drizzle-orm'
+import { desc, inArray } from 'drizzle-orm'
 import { join } from 'node:path'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, MemoryNotFoundError } from '@/memory/store'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import type { EnqueueInput } from '@/scheduler'
 
@@ -205,6 +205,7 @@ export function createApp(deps: AppDeps) {
     const jobs = await deps.db.select().from(memoryDistillJobs).orderBy(desc(memoryDistillJobs.createdAt)).limit(20).all()
     const events = await deps.db.select().from(memoryDistillEvents).all()
     const memRows = await deps.db.select().from(memories).all()
+    const discardRows = await deps.db.select().from(memoryDiscards).all()
     const jobStats: Record<string, number> = {}
     for (const j of jobs) jobStats[j.status] = (jobStats[j.status] ?? 0) + 1
     const memStats: Record<string, number> = {}
@@ -214,12 +215,19 @@ export function createApp(deps: AppDeps) {
       events: events.length,
       jobs: jobStats,
       memories: memStats,
+      discards: discardRows.length,
       lastError: errored ? { error: errored.lastError } : null,
     })
   })
 
   app.get('/api/memories', async (c) => {
-    const rows = await deps.db.select().from(memories).orderBy(desc(memories.createdAt))
+    const statusParam = c.req.query('status') ?? ''
+    type MemoryStatus = 'candidate' | 'approved' | 'archived' | 'superseded' | 'rejected'
+    const VALID: Set<string> = new Set(['candidate', 'approved', 'archived', 'superseded', 'rejected'])
+    const wanted = statusParam.split(',').map((s) => s.trim()).filter((s): s is MemoryStatus => s.length > 0 && VALID.has(s))
+    const rows = wanted.length > 0
+      ? await deps.db.select().from(memories).where(inArray(memories.status, wanted)).orderBy(desc(memories.createdAt)).all()
+      : await deps.db.select().from(memories).orderBy(desc(memories.createdAt)).all()
     return c.json({ items: rows })
   })
 
@@ -288,6 +296,57 @@ export function createApp(deps: AppDeps) {
       }
     }
     return c.json({ rejected: count })
+  })
+
+  // --- Discards (AI 自动拒绝审计) -----------------------------------------
+  app.get('/api/discards', async (c) => {
+    const items = await listDiscards(deps.db)
+    return c.json({ items })
+  })
+
+  app.post('/api/discards/:id/promote', async (c) => {
+    try {
+      const m = await promoteDiscard(deps.db, c.req.param('id'))
+      deps.broadcast({ type: 'discard.promoted', memoryId: m.id, discardId: c.req.param('id') })
+      return c.json({ memory: m })
+    } catch (e) {
+      if (e instanceof MemoryNotFoundError) return c.json({ error: (e as Error).message }, 404)
+      return c.json({ error: (e as Error).message }, 409)
+    }
+  })
+
+  // --- Archive / unarchive / restore --------------------------------------
+  app.post('/api/memories/:id/archive', async (c) => {
+    try {
+      const m = await archiveMemory(deps.db, c.req.param('id'))
+      deps.broadcast({ type: 'memory.archived', memoryId: m.id, newStatus: m.status })
+      return c.json({ memory: m })
+    } catch (e) {
+      if (e instanceof MemoryNotFoundError) return c.json({ error: (e as Error).message }, 404)
+      return c.json({ error: (e as Error).message }, 409)
+    }
+  })
+
+  app.post('/api/memories/:id/unarchive', async (c) => {
+    try {
+      const m = await unarchiveMemory(deps.db, c.req.param('id'))
+      deps.broadcast({ type: 'memory.unarchived', memoryId: m.id, newStatus: m.status })
+      return c.json({ memory: m })
+    } catch (e) {
+      if (e instanceof MemoryNotFoundError) return c.json({ error: (e as Error).message }, 404)
+      return c.json({ error: (e as Error).message }, 409)
+    }
+  })
+
+  app.post('/api/memories/:id/restore', async (c) => {
+    try {
+      const m = await restoreMemory(deps.db, c.req.param('id'))
+      deps.broadcast({ type: 'memory.restored', memoryId: m.id, newStatus: m.status })
+      return c.json({ memory: m })
+    } catch (e) {
+      if (e instanceof MemoryNotFoundError) return c.json({ error: (e as Error).message }, 404)
+      return c.json({ error: (e as Error).message }, 409)
+    }
   })
 
   app.post('/api/memories', async (c) => {
