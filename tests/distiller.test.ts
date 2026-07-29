@@ -195,17 +195,40 @@ test('DISTILLER_SYSTEM_PROMPT ruleObject examples do not hardcode real memory sy
   }
 })
 
-test('DISTILLER_SYSTEM_PROMPT has [stated] origin discipline with 6 exclusions', () => {
-  // 第六轮第 1 项：[stated] 起源判定。distiller 只记用户/领域明确陈述的持久事实，
-  // 显式排除六类非陈述内容（推断/前瞻/研究输出/丰富化/道听途说/自己的推理）。
-  // 源码层文本断言锁 prompt 契约（LLM 遵循度由 dogfood 验证，非单测范围）。
+test('DISTILLER_SYSTEM_PROMPT has [stated] origin discipline with放宽 + REJECT + hard约束', () => {
+  // 第七轮（本 spec）：origin discipline 重平衡。第3/6条放宽（agent 说过且被用户采纳
+  // 的设计 rationale 可记）；第1/2/4/5条维持 REJECT；加"必须 transcript 有出处"硬约束
+  // 防脑补。源码层文本断言锁 prompt 契约（LLM 遵循度由 dogfood 验证，非单测范围）。
   expect(DISTILLER_SYSTEM_PROMPT).toContain('Origin discipline')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('推断')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('前瞻')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('研究输出')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('丰富化')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('道听途说')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('推理或建议')
+  // 维持 REJECT 的四类关键词仍在
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('推断')        // 第1条 脑补闸门
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('前瞻')        // 第2条
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('研究输出')    // 第3条 研究输出仍 REJECT
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('丰富化')      // 第4条
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('道听途说')    // 第5条
+  // 放宽：agent 给出且被用户采纳的设计 rationale 可记
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('被用户采纳')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('rationale')
+  // 硬约束：必须 transcript 有出处（防脑补）
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('出处')
+})
+
+test('agent rationale in transcript reaches distiller prompt unfiltered (layer 2+3 signal survival)', async () => {
+  // 正向信号存活：agent 在 transcript 里说的设计 rationale（长段 assistant 文本）
+  // 必须能进 distiller 的 user prompt，这样第三层放开的 origin discipline 才有素材可提取。
+  // 锁住"过滤不丢 rationale 文本"+"渲染把它拼进 prompt"。
+  const rationale = '选 bun 脚本而非 concurrently，因为跨平台、契合 Bun 栈、生产模式只占一个进程一个端口'
+  let captured = ''
+  await distillTranscript({
+    turns: [
+      { role: 'assistant', content: `方案 A 推荐：${rationale}` },
+      { role: 'user', content: '就 A 吧，两个模式都要' },
+    ],
+    runtime: 'claude-code', cwd: '/r', existingSlugs: [],
+    callLLM: async (_sys, user) => { captured = user; return JSON.stringify({ candidates: [] }) },
+  })
+  expect(captured).toContain(rationale)
+  expect(captured).toContain('就 A 吧')
 })
 
 test('distillTranscript returns filteredTurns equal to filterTranscriptForDistill output (snapshot fidelity)', async () => {
