@@ -368,6 +368,21 @@ export async function unarchiveMemory(db: DbClient, id: string): Promise<Memory>
   })
 }
 
+export async function restoreMemory(db: DbClient, id: string): Promise<Memory> {
+  return db.transaction((tx) => {
+    const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
+    if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
+    // Specific-source guard (I3): restore must only accept status === 'rejected'.
+    // canTransition('archived','candidate') is false, but a general check would
+    // silently accept any row; lock the source like unarchive does.
+    if (rows[0]!.status !== 'rejected') {
+      throw new MemoryConflictError(`memory ${id} is '${rows[0]!.status}', not 'rejected'`)
+    }
+    tx.update(memories).set({ status: 'candidate', approvedAt: null }).where(eq(memories.id, id)).run()
+    return rowToMemory(tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()[0]!)
+  })
+}
+
 export interface DiscardRecord {
   title: string
   bodyMd: string
