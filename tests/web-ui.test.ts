@@ -50,3 +50,28 @@ test('App.tsx shows subject slug badge + edit input (source text)', () => {
   expect(src).toContain('subjectSlug')
   expect(src).toContain('subject slug')
 })
+
+// Task 8: 4-tab 审计视图（候选审批 / 已审批 / 已拒绝 / AI自动拒绝）。
+// React 组件不单测，源码文本断言锁住 tab 标签 + DiscardCard + 各操作接线 +
+// 已提升标注存在性，refactor 删除即变红。
+test('App.tsx renders 4 audit-view tabs (source text)', () => {
+  expect(src).toContain('候选审批')
+  expect(src).toContain('已审批')
+  expect(src).toContain('已拒绝')
+  expect(src).toContain('AI自动拒绝')
+})
+
+test('App.tsx has DiscardCard component (source text)', () => {
+  expect(src).toContain('DiscardCard')
+})
+
+test('App.tsx wires restore/archive/unarchive/promote actions (source text)', () => {
+  expect(src).toContain('restoreMemory')
+  expect(src).toContain('archiveMemory')
+  expect(src).toContain('unarchiveMemory')
+  expect(src).toContain('promoteDiscard')
+})
+
+test('App.tsx shows promoted marker on discards (source text)', () => {
+  expect(src).toContain('已提升')
+})

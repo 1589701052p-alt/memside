@@ -155,7 +155,7 @@ const TRANSITIONS: Record<MemoryStatus, MemoryStatus[]> = {
   approved: ['archived', 'superseded'],
   archived: ['approved'],
   superseded: [],
-  rejected: [],
+  rejected: ['candidate'],
 }
 
 export function canTransition(from: MemoryStatus, to: MemoryStatus): boolean {

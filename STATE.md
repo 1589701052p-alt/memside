@@ -278,3 +278,51 @@ verdict=Ready to merge=Yes,0 Critical / 0 Important)。`bun run typecheck && bun
    CHECK,brief mandate;未来加列需 lockstep 更新)。
 4. origin discipline 的脑补防护为 LLM 行为,以 prompt 文本断言为 proxy(与现有
    distiller.test.ts 源码层断言模式一致),LLM 遵循度由 dogfood 验证。
+
+## 记忆审计视图（2026-07-29）
+
+补齐 Web UI「审批后/拒绝后」可视面：4-tab（候选审批 / 已审批 / 已拒绝 /
+AI自动拒绝），给三类记忆各加最小操作能力。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-07-29-memory-audit-views*`。
+
+1. 状态机加 `rejected -> candidate`（`pure.ts` TRANSITIONS），superseded 保持终态。
+2. `memory_discards` 加 6 nullable 列（scope_type/scope_id/source_cwd/runtime/
+   source_kind/promoted_memory_id），ALTER TABLE 幂等迁移（不表重建）；logDiscards
+   + scheduler tick 接线写入来源（scopeType/scopeId/sourceCwd/runtime/sourceKind）。
+3. store 新增 `restoreMemory`（rejected->candidate，清 approvedAt，specific-source
+   guard）、`promoteDiscard`（discard->candidate + 回填 promoted_memory_id；幂等守卫
+   + 老行 scope 缺失守卫；不删审计行）、`listDiscards`（ORDER BY ts DESC LIMIT 200）+
+   `DiscardRow` 类型。
+4. server：`GET /api/memories?status=…` 服务端 status 过滤（inArray；不带 status 全量
+   向后兼容；非法值宽松忽略不 400）；`GET /api/discards`；`/api/status` 加 discards
+   计数；4 写路由 `POST /api/memories/:id/{archive,unarchive,restore}` +
+   `POST /api/discards/:id/promote`（MemoryNotFoundError->404，冲突->409，success
+   broadcast WS）。
+5. Web UI 4-tab + 计数徽标（candidate / approved+archived+superseded / rejected /
+   status.discards）+ `DiscardCard`（reason 徽标 + 来源 + 时间；已提升显「已提升」）+
+   切 tab 切轮询（useEffect `[tab]` + clearInterval，tabRef 防 stale-fetch 竞态）；
+   MemoryCard 抽通用骨架按 tab 注入操作（候选 4 回调不变 / 已审批 archive↔unarchive +
+   superseded 只读 / 已拒绝 restore）；no-throw 契约（操作后 void refresh）。
+
+执行：subagent-driven（8 实现 task 各 implementer + reviewer；终审 pending）。
+`bun run typecheck && bun test` 440/440 全绿。
+
+### 已知 follow-up（本轮 deferred minor，非阻塞）
+
+1. `store.ts:447` `(d.runtime ?? null) as RuntimeTag` 类型安全谎言（MemoryInput.runtime
+   非空但表达式可 yield null；runtime 安全因列 nullable）。Brief-verbatim。
+2. `promoteDiscard` 三步（读/createCandidate/回填）非单事务；同 id 并发双提升会产生
+   一个 orphan candidate 行（discard 幂等仍成立）。Brief 接受的低频手动操作权衡。
+3. `server.ts:225` 内联 `MemoryStatus` 类型重复 `pure.ts:151` 导出，可漂移；应改为
+   `import type { MemoryStatus } from '@/memory/pure'`。VALID Set 仍需留本地。
+4. web api 4 个新 POST wrapper（restore/archive/unarchive/promote）不检查 res.ok/throw，
+   404/409 时返回 undefined（与 promoteMemory 同模式，异于 patchMemory）。UI 已按
+   no-throw 契约处理；未来可统一所有 mutating wrapper 的错误处理。
+5. status-filter / discards 测试未 seed 非匹配行（部分断言 vacuously true）；
+   archive/unarchive broadcast 分支未断言（与已测的 restore/promote 同模式）；
+   scope-missing 守卫第二臂（project && scopeId===null）未单测。CLAUDE.md 错误路径
+   覆盖可后续补齐。
+6. App.tsx 切 tab 有一帧 stale-data 闪烁（useEffect reset 在 paint 后），自纠正非
+   stall；`tabRef.current=tab` 在 render 期赋值（latest-value ref，功能安全但违 React
+   书面规则，可移到 depless effect）；h1 仍「审批队列」（chrome 稳定优先，cosmetic）。
+

@@ -275,3 +275,24 @@ test('old DB with narrow source_kind CHECK is rebuilt to accept subagent (idempo
   expect(db3.select().from(memories).where(eq(memories.id, 'm-new2')).all().length).toBe(1)
   db3.$client.close()
 })
+
+test('memory_discards has scope/source columns after migration', () => {
+  db = openDb(join(dir, 't.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memory_discards)').all() as { name: string }[]
+  const names = cols.map((c) => c.name)
+  expect(names).toContain('scope_type')
+  expect(names).toContain('scope_id')
+  expect(names).toContain('source_cwd')
+  expect(names).toContain('runtime')
+  expect(names).toContain('source_kind')
+  expect(names).toContain('promoted_memory_id')
+})
+
+test('memory_discards migration is idempotent (reopen)', () => {
+  const path = join(dir, 't.db')
+  const db1 = openDb(path)
+  db1.$client.close()
+  db = openDb(path)  // 二次打开，迁移再跑一次，不应报错
+  const cols = db.$client.prepare('PRAGMA table_info(memory_discards)').all() as { name: string }[]
+  expect(cols.filter((c) => c.name === 'scope_type').length).toBe(1)  // 不重复加列
+})

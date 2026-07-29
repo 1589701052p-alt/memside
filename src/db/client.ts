@@ -141,6 +141,19 @@ export function openDb(path: string) {
       raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN source_agent_id TEXT')
     }
   }
+  // Idempotent migration: add scope/source columns to memory_discards.
+  // 让 promoteDiscard 提升路径自包含（不必反查 job）。nullable；老行 NULL。
+  // 幂等：列已存在则跳过（与 source_cwd/value_class 迁移同模式）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_discards)').all() as { name: string }[]
+    const have = (n: string) => cols.some((c) => c.name === n)
+    if (!have('scope_type')) raw.exec('ALTER TABLE memory_discards ADD COLUMN scope_type TEXT')
+    if (!have('scope_id')) raw.exec('ALTER TABLE memory_discards ADD COLUMN scope_id TEXT')
+    if (!have('source_cwd')) raw.exec('ALTER TABLE memory_discards ADD COLUMN source_cwd TEXT')
+    if (!have('runtime')) raw.exec('ALTER TABLE memory_discards ADD COLUMN runtime TEXT')
+    if (!have('source_kind')) raw.exec('ALTER TABLE memory_discards ADD COLUMN source_kind TEXT')
+    if (!have('promoted_memory_id')) raw.exec('ALTER TABLE memory_discards ADD COLUMN promoted_memory_id TEXT')
+  }
   // Idempotent migration: widen memories.source_kind CHECK to include 'subagent'.
   // sqlite 无法 ALTER CHECK，旧库的窄 CHECK 会拒绝 source_kind='subagent' 插入。
   // 检测 sqlite_master 里的建表 SQL 是否已含 'subagent'；不含则表重建（保数据、重建索引）。

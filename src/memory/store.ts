@@ -368,10 +368,30 @@ export async function unarchiveMemory(db: DbClient, id: string): Promise<Memory>
   })
 }
 
+export async function restoreMemory(db: DbClient, id: string): Promise<Memory> {
+  return db.transaction((tx) => {
+    const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
+    if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
+    // Specific-source guard (I3): restore must only accept status === 'rejected'.
+    // canTransition('rejected','candidate') is now true, but keep the specific
+    // check for consistency with archive/unarchive semantics.
+    if (rows[0]!.status !== 'rejected') {
+      throw new MemoryConflictError(`memory ${id} is '${rows[0]!.status}', not 'rejected'`)
+    }
+    tx.update(memories).set({ status: 'candidate', approvedAt: null }).where(eq(memories.id, id)).run()
+    return rowToMemory(tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()[0]!)
+  })
+}
+
 export interface DiscardRecord {
   title: string
   bodyMd: string
   reason: 'public-knowledge' | 'derivable' | 'taming'
+  scopeType: 'project' | 'global'
+  scopeId: string | null
+  sourceCwd: string | null
+  runtime: RuntimeTag
+  sourceKind: 'conversation' | 'subagent'
 }
 
 /**
@@ -389,8 +409,83 @@ export async function logDiscards(
   await db.insert(memoryDiscards).values(
     discards.map((d) => ({
       id: ulid(), distillJobId, title: d.title, bodyMd: d.bodyMd, reason: d.reason, ts,
+      scopeType: d.scopeType, scopeId: d.scopeId, sourceCwd: d.sourceCwd,
+      runtime: d.runtime, sourceKind: d.sourceKind, promotedMemoryId: null,
     })),
   )
+}
+
+/**
+ * Promote a discarded candidate back into a memory candidate row.
+ *
+ * 读 discard -> 已提升守卫(MemoryConflictError) -> scope 缺失守卫(MemoryConflictError，
+ * 老行迁移前 scope 字段全 NULL，不反查 job 回填，spec 非目标) -> createCandidate(自带事务)
+ * -> 回填 promoted_memory_id。不删 discard 行（审计保留）。幂等：并发两次提升只有一次能
+ * 回填（UPDATE … WHERE promoted_memory_id IS NULL）；落败方查到的 candidate 仍在，但下次
+ * promote 会被开头的 promotedMemoryId 守卫挡住。not found 抛 MemoryNotFoundError。
+ */
+export async function promoteDiscard(db: DbClient, id: string): Promise<Memory> {
+  // 1. 读 discard 行 + 守卫（单次 select）
+  const rows = await db.select().from(memoryDiscards).where(eq(memoryDiscards.id, id)).limit(1)
+  if (rows.length === 0) throw new MemoryNotFoundError(`discard ${id} not found`)
+  const d = rows[0]!
+  if (d.promotedMemoryId !== null) {
+    throw new MemoryConflictError(`discard ${id} already promoted to ${d.promotedMemoryId}`)
+  }
+  // 老行（迁移前）scope 字段全 NULL -> 无法提升（不反查 job 回填，spec 非目标）
+  if (d.scopeType === null || (d.scopeType === 'project' && d.scopeId === null)) {
+    throw new MemoryConflictError(`discard ${id} missing scope info; cannot promote`)
+  }
+  // 2. createCandidate（自带事务）
+  const mem = await createCandidate(db, {
+    scopeType: d.scopeType as 'project' | 'global',
+    scopeId: d.scopeId,
+    title: d.title,
+    bodyMd: d.bodyMd,
+    tags: [],
+    sourceKind: (d.sourceKind ?? 'conversation') as 'conversation' | 'error' | 'manual' | 'subagent',
+    runtime: (d.runtime ?? null) as RuntimeTag,
+    sourceCwd: d.sourceCwd,
+    distillJobId: d.distillJobId,
+    valueClass: null,
+    subjectSlug: null,
+  })
+  // 3. 回填 promoted_memory_id（WHERE promoted_memory_id IS NULL 闭环幂等：
+  //    并发两次提升只有一次能回填；落败方查到的 candidate 仍在，但 discard 状态已变，
+  //    下次 promote 会被上面的 promotedMemoryId 守卫挡住）
+  await db.update(memoryDiscards).set({ promotedMemoryId: mem.id })
+    .where(and(eq(memoryDiscards.id, id), isNull(memoryDiscards.promotedMemoryId))).run()
+  return mem
+}
+
+export const DISCARDS_LIST_LIMIT = 200
+
+export interface DiscardRow {
+  id: string
+  distillJobId: string
+  title: string
+  bodyMd: string
+  reason: string
+  ts: number
+  scopeType: string | null
+  scopeId: string | null
+  sourceCwd: string | null
+  runtime: string | null
+  sourceKind: string | null
+  promotedMemoryId: string | null
+}
+
+export async function listDiscards(
+  db: DbClient,
+  opts: { limit?: number } = {},
+): Promise<DiscardRow[]> {
+  const limit = opts.limit ?? DISCARDS_LIST_LIMIT
+  const rows = await db.select().from(memoryDiscards).orderBy(desc(memoryDiscards.ts)).limit(limit).all()
+  return rows.map((r) => ({
+    id: r.id, distillJobId: r.distillJobId, title: r.title, bodyMd: r.bodyMd, reason: r.reason,
+    ts: r.ts, scopeType: r.scopeType ?? null, scopeId: r.scopeId ?? null, sourceCwd: r.sourceCwd ?? null,
+    runtime: r.runtime ?? null, sourceKind: r.sourceKind ?? null, promotedMemoryId: r.promotedMemoryId ?? null,
+  }))
 }
 
 // ---------------------------------------------------------------------------

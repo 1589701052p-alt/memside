@@ -5,7 +5,7 @@ import { openDb } from '@/db/client'
 import { createCandidate, promoteCandidate, saveSourceInput } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memories } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards } from '@/db/schema'
 
 // EBUSY-safe pattern (same as store-promote.test.ts / adapter-claude.test.ts):
 // wipe `root` once in beforeAll, give each test its own fresh subdir, and
@@ -481,4 +481,114 @@ test('GET /api/memories list response does NOT contain turns (lazy load only)', 
   expect(body).not.toContain('SHOULD_NOT_APPEAR_IN_LIST')
   expect(body).not.toContain('turns_json')
   expect(body).not.toContain('"turns"')
+})
+
+// --- Task 6: status 过滤 + discards 端点 + 4 个写路由 ---------------------
+// 锁定回归：GET /api/memories?status=… 服务端过滤、GET /api/discards 审计列表、
+// /api/status 含 discards 计数、archive/unarchive/restore/promote 4 写路由。
+async function seedDiscardRow(id: string, opts: Partial<{ scopeType: string; scopeId: string | null; promotedMemoryId: string | null }> = {}) {
+  const now = Date.now()
+  await db.insert(memoryDistillJobs).values({
+    id: `job-${id}`, debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code',
+    cwd: '/p', sessionId: null, sourceAgentId: null, scopeResolvedJson: null,
+    status: 'done', attempts: 0, nextRunAt: now, lastError: null, createdAt: now, finishedAt: now,
+  })
+  await db.insert(memoryDiscards).values({
+    id, distillJobId: `job-${id}`, title: 'dt', bodyMd: 'db', reason: 'public-knowledge', ts: now,
+    scopeType: opts.scopeType ?? 'project', scopeId: opts.scopeId ?? '/p',
+    sourceCwd: '/p', runtime: 'claude-code', sourceKind: 'conversation',
+    promotedMemoryId: opts.promotedMemoryId ?? null,
+  })
+}
+
+test('GET /api/memories?status filters by status', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 'cand', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await promoteCandidate(db, c.id, { action: 'approve' })
+  const r = await req('/api/memories?status=approved')
+  expect(r.status).toBe(200)
+  expect((r.body.items as any[]).every((m) => m.status === 'approved')).toBe(true)
+})
+
+test('GET /api/memories?status with multiple values', async () => {
+  const r = await req('/api/memories?status=approved,archived,superseded')
+  expect(r.status).toBe(200)
+  expect(Array.isArray(r.body.items)).toBe(true)
+})
+
+test('GET /api/memories?status ignores illegal values (no 400)', async () => {
+  const r = await req('/api/memories?status=bogus,candidate')
+  expect(r.status).toBe(200)
+  // bogus 被忽略，只取 candidate
+  expect((r.body.items as any[]).every((m) => m.status === 'candidate')).toBe(true)
+})
+
+test('GET /api/memories without status returns all', async () => {
+  const r = await req('/api/memories')
+  expect(r.status).toBe(200)
+  expect(Array.isArray(r.body.items)).toBe(true)
+})
+
+test('GET /api/discards returns items newest-first', async () => {
+  await seedDiscardRow('d1')
+  const r = await req('/api/discards')
+  expect(r.status).toBe(200)
+  expect((r.body.items as any[]).length).toBe(1)
+})
+
+test('GET /api/discards empty table returns items:[]', async () => {
+  const r = await req('/api/discards')
+  expect(r.status).toBe(200)
+  expect(r.body.items).toEqual([])
+})
+
+test('GET /api/status includes discards count', async () => {
+  await seedDiscardRow('d1')
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.discards).toBe(1)
+})
+
+test('POST /api/memories/:id/restore moves rejected to candidate', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await promoteCandidate(db, c.id, { action: 'reject' })
+  const r = await req(`/api/memories/${c.id}/restore`, { method: 'POST' })
+  expect(r.status).toBe(200)
+  expect(r.body.memory.status).toBe('candidate')
+  expect(broadcastCalls.some((m: any) => m.type === 'memory.restored')).toBe(true)
+})
+
+test('POST /api/memories/:id/restore on non-rejected returns 409', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const r = await req(`/api/memories/${c.id}/restore`, { method: 'POST' })
+  expect(r.status).toBe(409)
+})
+
+test('POST /api/memories/:id/archive + unarchive', async () => {
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  await promoteCandidate(db, c.id, { action: 'approve' })
+  const ar = await req(`/api/memories/${c.id}/archive`, { method: 'POST' })
+  expect(ar.status).toBe(200)
+  expect(ar.body.memory.status).toBe('archived')
+  const ur = await req(`/api/memories/${c.id}/unarchive`, { method: 'POST' })
+  expect(ur.status).toBe(200)
+  expect(ur.body.memory.status).toBe('approved')
+})
+
+test('POST /api/discards/:id/promote creates candidate', async () => {
+  await seedDiscardRow('d1')
+  const r = await req('/api/discards/d1/promote', { method: 'POST' })
+  expect(r.status).toBe(200)
+  expect(r.body.memory.status).toBe('candidate')
+  expect(broadcastCalls.some((m: any) => m.type === 'discard.promoted')).toBe(true)
+})
+
+test('POST /api/discards/:id/promote on already-promoted returns 409', async () => {
+  await seedDiscardRow('d1', { promotedMemoryId: 'x' })
+  const r = await req('/api/discards/d1/promote', { method: 'POST' })
+  expect(r.status).toBe(409)
+})
+
+test('POST /api/discards/:id/promote on missing id returns 404', async () => {
+  const r = await req('/api/discards/nope/promote', { method: 'POST' })
+  expect(r.status).toBe(404)
 })

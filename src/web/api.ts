@@ -30,8 +30,12 @@ export interface MemoryItem {
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 
-export async function listMemories(fetchFn: FetchLike = fetch): Promise<MemoryItem[]> {
-  const res = await fetchFn('/api/memories')
+export async function listMemories(
+  fetchFn: FetchLike = fetch,
+  status?: string,
+): Promise<MemoryItem[]> {
+  const url = status ? `/api/memories?status=${encodeURIComponent(status)}` : '/api/memories'
+  const res = await fetchFn(url)
   const data = await res.json()
   return (data.items ?? []) as MemoryItem[]
 }
@@ -69,6 +73,7 @@ export interface MemsideStatus {
   events: number
   jobs: Record<string, number>
   memories: Record<string, number>
+  discards: number
   lastError: { error: string } | null
 }
 
@@ -127,4 +132,51 @@ export interface SourceInput {
 export async function getSourceInput(id: string, fetchFn: FetchLike = fetch): Promise<SourceInput> {
   const res = await fetchFn(`/api/memories/${id}/source-input`)
   return (await res.json()) as SourceInput
+}
+
+// --- Task 7: memory audit views client ---------------------------------------
+// Discards (AI 自动拒绝审计) + archive/unarchive/restore lifecycle. Fields
+// mirror server DiscardRow (src/memory/store.ts); optional here because the
+// client tolerates partial rows from older daemons.
+
+export interface DiscardItem {
+  id: string
+  title: string
+  bodyMd?: string
+  reason: string
+  ts?: number
+  scopeType?: string | null
+  sourceCwd?: string | null
+  sourceKind?: string | null
+  promotedMemoryId?: string | null
+}
+
+export async function listDiscards(fetchFn: FetchLike = fetch): Promise<DiscardItem[]> {
+  const res = await fetchFn('/api/discards')
+  const data = await res.json()
+  return (data.items ?? []) as DiscardItem[]
+}
+
+export async function restoreMemory(id: string, fetchFn: FetchLike = fetch): Promise<MemoryItem> {
+  const res = await fetchFn(`/api/memories/${id}/restore`, { method: 'POST' })
+  const data = await res.json()
+  return data.memory as MemoryItem
+}
+
+export async function archiveMemory(id: string, fetchFn: FetchLike = fetch): Promise<MemoryItem> {
+  const res = await fetchFn(`/api/memories/${id}/archive`, { method: 'POST' })
+  const data = await res.json()
+  return data.memory as MemoryItem
+}
+
+export async function unarchiveMemory(id: string, fetchFn: FetchLike = fetch): Promise<MemoryItem> {
+  const res = await fetchFn(`/api/memories/${id}/unarchive`, { method: 'POST' })
+  const data = await res.json()
+  return data.memory as MemoryItem
+}
+
+export async function promoteDiscard(id: string, fetchFn: FetchLike = fetch): Promise<MemoryItem> {
+  const res = await fetchFn(`/api/discards/${id}/promote`, { method: 'POST' })
+  const data = await res.json()
+  return data.memory as MemoryItem
 }
