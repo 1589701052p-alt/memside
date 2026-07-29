@@ -214,3 +214,64 @@ test('migration adds subject_slug to pre-existing db, idempotent, no backfill', 
   expect((reopened.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]).some((c) => c.name === 'subject_slug')).toBe(true)
   reopened.$client.close()
 })
+
+test('memories.source_kind accepts subagent (CHECK widened)', () => {
+  // 旧 CHECK ('conversation','error','manual') 会拒绝 'subagent'；扩展后必须接受。
+  // 沿用 schema.test.ts 既有风格：raw db.insert(memories)（本文件已 import memories + eq）。
+  db = openDb(join(dir, 't.db'))
+  db.insert(memories).values({
+    id: '01SUB', scopeType: 'global', scopeId: null, runtime: null,
+    title: '[category:x] sub', bodyMd: 'b', tags: '[]', status: 'candidate',
+    sourceKind: 'subagent', createdAt: 1, version: 1,
+  }).run()
+  const rows = db.select().from(memories).where(eq(memories.id, '01SUB')).all()
+  expect(rows[0]!.sourceKind).toBe('subagent')
+})
+
+test('memory_distill_jobs has source_agent_id column', () => {
+  db = openDb(join(dir, 't.db'))
+  const pragma = db!.$client.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+  expect(pragma.some((c) => c.name === 'source_agent_id')).toBe(true)
+})
+
+test('old DB with narrow source_kind CHECK is rebuilt to accept subagent (idempotent)', () => {
+  // 模拟旧库：手建一个 source_kind CHECK 不含 subagent 的 memories 表 + 一行数据，
+  // 重新 openDb 触发 migration，断言：数据保留 + 'subagent' 插入不再被 CHECK 拒绝 + 幂等。
+  const oldDbPath = join(dir, 'old.db')
+  const raw = new Database(oldDbPath)
+  raw.exec(`CREATE TABLE memories (
+    id TEXT PRIMARY KEY, scope_type TEXT NOT NULL, scope_id TEXT, runtime TEXT,
+    title TEXT NOT NULL, body_md TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL, source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual')),
+    source_event_id TEXT, distill_job_id TEXT, distill_action TEXT,
+    supersedes_id TEXT, superseded_by_id TEXT, approved_at INTEGER, created_at INTEGER NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1, source_cwd TEXT, value_class TEXT, subject_slug TEXT,
+    CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL))
+  )`)
+  raw.exec(`INSERT INTO memories (id, scope_type, scope_id, runtime, title, body_md, tags, status, source_kind, source_event_id, distill_job_id, distill_action, supersedes_id, superseded_by_id, approved_at, created_at, version, source_cwd, value_class, subject_slug)
+    VALUES ('m-old','global',NULL,NULL,'old title','old body','[]','approved','conversation',NULL,NULL,NULL,NULL,NULL,1,100,1,NULL,NULL,NULL)`)
+  raw.close()
+  // 重新打开 -> 触发 migration（表重建扩展 CHECK）
+  const db2 = openDb(oldDbPath)
+  // 旧数据保留
+  const rows = db2.select().from(memories).all()
+  expect(rows.some((r: any) => r.id === 'm-old' && r.title === 'old title')).toBe(true)
+  // 'subagent' 现在可插入（CHECK 已扩展）
+  db2.insert(memories).values({
+    id: 'm-new', scopeType: 'global', scopeId: null, runtime: null,
+    title: 'sub', bodyMd: 'b', tags: '[]', status: 'candidate',
+    sourceKind: 'subagent', createdAt: 1, version: 1,
+  }).run()
+  const got = db2.select().from(memories).where(eq(memories.id, 'm-new')).all()
+  expect(got[0]!.sourceKind).toBe('subagent')
+  db2.$client.close()
+  // 再开一次 -> 幂等（不重复重建；'subagent' 仍可插）
+  const db3 = openDb(oldDbPath)
+  db3.insert(memories).values({
+    id: 'm-new2', scopeType: 'global', scopeId: null, runtime: null,
+    title: 'sub2', bodyMd: 'b', tags: '[]', status: 'candidate',
+    sourceKind: 'subagent', createdAt: 2, version: 1,
+  }).run()
+  expect(db3.select().from(memories).where(eq(memories.id, 'm-new2')).all().length).toBe(1)
+  db3.$client.close()
+})
