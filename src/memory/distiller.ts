@@ -170,6 +170,11 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     // output" (turns WERE sent -> return filtered snapshot).
     let callThrew = false
     const wrappedCall: LLMCall = async (sys, user, opts) => {
+      // reset per attempt: a prior failed attempt must not stain a later success.
+      // callWithRetry re-invokes wrappedCall on throw; without this reset, an
+      // attempt-0 throw (callThrew=true) would persist even after attempt-1
+      // succeeds, misclassifying a produced result as llm_error (spec §4).
+      callThrew = false
       try {
         return await input.callLLM(sys, user, opts)
       } catch (e) {

@@ -215,7 +215,12 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       // 运行记录：outcome + 计数链 + LLM 原始产出。best-effort，与 logDiscards/saveSourceInput 同级。
       try {
         await saveDistillRun(db, job.id, {
-          outcome: callThrew ? 'llm_error' : (candidates.length === 0 ? 'empty_output' : 'produced'),
+          // spec §4: produced = accepted_count > 0 regardless of transient LLM
+          // errors during retry. Check candidates.length===0 FIRST so a retry-
+          // success (callThrew=true from attempt 0 but candidates produced on
+          // attempt 1) is classified 'produced', not 'llm_error'. Belt-and-
+          // suspenders alongside the distiller's per-attempt callThrew reset.
+          outcome: candidates.length === 0 ? (callThrew ? 'llm_error' : 'empty_output') : 'produced',
           rawOutput, rawCount, acceptedCount: candidates.length, dedupedCount: deduped.length,
           filteredCount: keepWithClass.length, storedCount: keepWithClass.length,
           discardedCount: discarded.length, durationMs,

@@ -5,7 +5,7 @@ import { openDb } from '@/db/client'
 import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards } from '@/db/schema'
 
 // EBUSY-safe pattern (same as store-promote.test.ts / adapter-claude.test.ts):
 // wipe `root` once in beforeAll, give each test its own fresh subdir, and

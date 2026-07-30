@@ -957,6 +957,32 @@ test('tick writes run record outcome=llm_error when callLLM throws', async () =>
   expect(runs[0]!.outcome).toBe('llm_error')
 })
 
+test('tick writes run record outcome=produced when distill retry succeeds (callThrew not sticky)', async () => {
+  // 回归（review fix-wave Finding 1）：distill 阶段第一次抛错、第二次重试成功产出候选。
+  // 旧逻辑 callThrew sticky=true -> outcome='llm_error'（错误分类）。修复后 callThrew
+  // 每次调用复位 + outcome 先查 candidates.length===0 -> 'produced'。spec §4 produced
+  // = accepted_count > 0 regardless。callWithRetry 默认 3 次尝试，throw-once 在预算内。
+  // 阶段：call1=distill attempt0 抛错，call2=distill attempt1 产候选，dedup 短路（无
+  // existing），call3=judgeValue 判 decision 保留。
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's3b' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
+  await forceDue(jobId)
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) throw new Error('transient api down')   // distill attempt 0
+      if (callCount === 2) return JSON.stringify({ candidates: [{ title: '[category:convention] x', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' }] })  // distill attempt 1 (retry success)
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })  // judgeValue
+    },
+    createCandidate: async (_d: any, input: any) => ({ id: 'c' + input.title, status: 'candidate', version: 1 } as any),
+  })
+  const runs = db.select().from(memoryDistillRuns).all()
+  expect(runs[0]!.outcome).toBe('produced')            // NOT 'llm_error'
+  expect(runs[0]!.acceptedCount).toBe(1)
+})
+
 test('tick writes run record outcome=produced with correct count chain', async () => {
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's4' })
   await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })

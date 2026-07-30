@@ -617,6 +617,8 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
   const [error, setError] = useState<string | null>(null)
   const [source, setSource] = useState<{ turnCount: number; charCount: number; turns: SourceTurn[] } | null>(null)
   const [sourceLoading, setSourceLoading] = useState(false)
+  const [sourceError, setSourceError] = useState<string | null>(null)
+  const [sourceLoaded, setSourceLoaded] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -638,9 +640,19 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
   }, [onClose])
 
   const loadSource = async () => {
+    // Reset all source states on each load so prior results/errors don't linger.
     setSourceLoading(true)
+    setSourceError(null)
+    setSource(null)
+    setSourceLoaded(false)
     try {
       setSource(await getDistillRunSourceInput(jobId))
+      setSourceLoaded(true)
+    } catch (e) {
+      // fetch itself rejected (network error): getDistillRunSourceInput only
+      // returns null on !res.ok; a transport failure throws and must surface
+      // (CLAUDE.md state-visibility: no silent stalls).
+      setSourceError(e instanceof Error ? e.message : String(e))
     } finally {
       setSourceLoading(false)
     }
@@ -694,7 +706,11 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
             </div>
             <div>
               <button onClick={loadSource} disabled={sourceLoading}>{sourceLoading ? '加载中…' : '查看原始输入'}</button>
-              {source && (
+              {sourceError ? (
+                <p style={{ color: '#c00', marginTop: 8 }}>无法加载原始输入: {sourceError}</p>
+              ) : source === null && sourceLoaded ? (
+                <p style={{ color: '#666', marginTop: 8 }}>该 job 无原始输入快照</p>
+              ) : source ? (
                 <div style={{ marginTop: 8 }}>
                   <p style={{ color: '#666' }}>{source.turnCount} turn · 约 {source.charCount} 字</p>
                   {source.turns.map((t, i) => {
@@ -704,7 +720,7 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                     )
                   })}
                 </div>
-              )}
+              ) : null}
             </div>
           </>
         ) : (
