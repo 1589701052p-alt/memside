@@ -6,6 +6,7 @@ import { openDb } from '@/db/client'
 import { enqueueDistillJob } from '@/scheduler'
 import { runDistillOnce, sweepStuckRunning, makeLoadTranscript } from '@/daemon'
 import { memoryDistillJobs, memoryDistillEvents, memorySessionOffsets } from '@/db/schema'
+import { saveUiLlmConfig, type UiLlmConfig } from '@/settings'
 
 // EBUSY-safe pattern (same as scheduler.test.ts / server.test.ts): wipe `root`
 // once in beforeAll, give each test its own fresh subdir, and close the raw
@@ -61,6 +62,44 @@ test('runDistillOnce wires loadTranscript + callLLM + createCandidate end-to-end
   })
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(rows[0]!.status).toBe('done')
+})
+
+/**
+ * Task 4 接线回归（feat/llm-settings-ui）：daemon 的 `resolveCallLLM` 必须把
+ * db-backed `loadUiConfig` 接进 anthropic 链——UI 设置页写入的凭证要真正到达
+ * `loadClaudeCreds(uiConfig)`。若 daemon 漏传 db 第二参，捕获值是 undefined，
+ * 本用例变红。
+ *
+ * 注入的 loadClaudeCreds 返回空 apiKey：makeLLMCall 在构造 SDK client 前抛
+ * "no claude credentials"，distillTranscript 内部降级（llm_error），全程零网络。
+ */
+test('runDistillOnce 的 anthropic 链带 db-backed loadUiConfig（UI 配置进 distill 链路）', async () => {
+  // 钉住 anthropic 后端：测试环境若意外有 OPENAI_API_KEY 会走 openai 分支，
+  // loadUiConfig 不会出现在该链路上，断言失真。用后恢复原值。
+  const prevBackend = process.env.MEMSIDE_LLM_BACKEND
+  process.env.MEMSIDE_LLM_BACKEND = 'anthropic'
+  try {
+    saveUiLlmConfig(db, { token: 'sk-ui-captured-token' })
+    const { jobId } = await enqueueDistillJob(db, {
+      sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0,
+    })
+    await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+    await db.insert(memoryDistillEvents).values({
+      distillJobId: jobId, attemptIndex: 0, ts: 1, kind: 'conversation',
+      payload: JSON.stringify([{ role: 'user', content: 'refund 14 days' }]),
+    })
+    let captured: UiLlmConfig | null | undefined
+    await runDistillOnce(db, {
+      loadClaudeCreds: (uiConfig?: UiLlmConfig | null) => {
+        captured = uiConfig
+        return { apiKey: null, source: 'test' }
+      },
+    })
+    expect(captured).toEqual({ token: 'sk-ui-captured-token' })
+  } finally {
+    if (prevBackend === undefined) delete process.env.MEMSIDE_LLM_BACKEND
+    else process.env.MEMSIDE_LLM_BACKEND = prevBackend
+  }
 })
 
 /**
