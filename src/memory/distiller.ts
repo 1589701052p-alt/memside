@@ -167,10 +167,10 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     const filtered = filterTranscriptForDistill(input.turns)
     const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals, input.existingSlugs)
     // callWithRetry swallows callLLM throws (returns undefined after exhausting
-    // retries). Track whether the underlying call threw so the !parsed branch can
-    // distinguish "API failure" (can't trust what was sent -> empty filteredTurns,
-    // matching the catch() degrade contract) from "model returned unparseable
-    // output" (turns WERE sent -> return filtered snapshot).
+    // retries). callThrew tracks whether the underlying call threw, for two uses:
+    // (a) errorMessage 取值（callThrew ? lastErrorMessage : null）,
+    // (b) scheduler 分类 llm_error vs empty_output.
+    // filteredTurns 已与调用成败解耦（恒为过滤快照，见下方注释）。
     let callThrew = false
     let lastErrorMessage: string | null = null
     const wrappedCall: LLMCall = async (sys, user, opts) => {
