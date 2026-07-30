@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard, listDistillRuns, getDistillRun, getDistillRunSourceInput } from '@/web/api'
+import { listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard, listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
 // not unit-tested; this client is the testable seam — a `fetchFn` param lets
@@ -160,4 +160,38 @@ test('getDistillRun returns errorMessage in detail', async () => {
   const r = await getDistillRun('j1', fake as any)
   expect(called).toBe('/api/distill-runs/j1')
   expect(r.errorMessage).toBe('500 boom')
+})
+
+// --- Task 6: LLM 设置 UI 配置 client ---
+// Locks the web API client contract for the LLM settings endpoints (Task 5 server).
+// get/save/test wrap GET/PUT/POST /api/settings/llm; saveLlmSettings uses field-level
+// merge and clear:true deletes the saved level. testLlmConnection validates credentials
+// without persisting them.
+
+test('getLlmSettings 解析 saved/effective', async () => {
+  const state = await getLlmSettings(async () => new Response(JSON.stringify({
+    saved: { baseURL: 'https://a', model: 'm', tokenMasked: 'sk-kim…5678fh' },
+    effective: { source: 'ui', baseURL: 'https://a', model: 'm', tokenMasked: 'sk-kim…5678fh' },
+  })) as Response)
+  expect(state.effective?.source).toBe('ui')
+})
+
+test('saveLlmSettings PUT 序列化 body（含 clear）', async () => {
+  let seen: any
+  await saveLlmSettings({ clear: true }, (async (_url: string, init: { body?: BodyInit }) => { seen = JSON.parse(String(init?.body)); return new Response('{}') }) as any)
+  expect(seen).toEqual({ clear: true })
+})
+
+test('testLlmConnection POST 到 /api/settings/llm/test 并透传 {ok,error}', async () => {
+  let captured: { url: string; method: string; body: string } | null = null
+  const fetchFn = (async (url: string, init: any) => {
+    captured = { url, method: init.method, body: init.body }
+    return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }))
+  }) as any
+  const r = await testLlmConnection({ baseURL: 'https://a', token: 'sk-test', model: 'm' }, fetchFn)
+  expect(captured!.url).toBe('/api/settings/llm/test')
+  expect(captured!.method).toBe('POST')
+  expect(JSON.parse(captured!.body)).toEqual({ baseURL: 'https://a', token: 'sk-test', model: 'm' })
+  expect(r.ok).toBe(false)
+  expect(r.error).toBe('unauthorized')
 })
