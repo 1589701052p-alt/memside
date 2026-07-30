@@ -74,6 +74,7 @@ export interface MemsideStatus {
   jobs: Record<string, number>
   memories: Record<string, number>
   discards: number
+  distillRuns?: { total: number; byOutcome: Record<string, number> }
   lastError: { error: string } | null
 }
 
@@ -179,4 +180,48 @@ export async function promoteDiscard(id: string, fetchFn: FetchLike = fetch): Pr
   const res = await fetchFn(`/api/discards/${id}/promote`, { method: 'POST' })
   const data = await res.json()
   return data.memory as MemoryItem
+}
+
+// --- Distill runs (工作记录透明化) client ------------------------------------
+
+export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced'
+
+export interface DistillRunListItem {
+  distillJobId: string
+  outcome: DistillOutcome
+  rawCount: number
+  acceptedCount: number
+  dedupedCount: number
+  filteredCount: number
+  storedCount: number
+  discardedCount: number
+  durationMs: number
+  ts: number
+  cwd: string | null
+  runtime: string
+  createdAt: number
+  sourceAgentId: string | null
+}
+
+export interface DistillRunDetail extends DistillRunListItem {
+  rawOutput: unknown | null
+}
+
+export async function listDistillRuns(fetchFn: FetchLike = fetch): Promise<DistillRunListItem[]> {
+  const res = await fetchFn('/api/distill-runs')
+  const data = await res.json()
+  return (data.items ?? []) as DistillRunListItem[]
+}
+
+export async function getDistillRun(jobId: string, fetchFn: FetchLike = fetch): Promise<DistillRunDetail> {
+  const res = await fetchFn(`/api/distill-runs/${jobId}`)
+  return (await res.json()) as DistillRunDetail
+}
+
+export async function getDistillRunSourceInput(
+  jobId: string, fetchFn: FetchLike = fetch,
+): Promise<{ turnCount: number; charCount: number; turns: SourceTurn[] } | null> {
+  const res = await fetchFn(`/api/distill-runs/${jobId}/source-input`)
+  if (!res.ok) return null
+  return (await res.json()) as { turnCount: number; charCount: number; turns: SourceTurn[] }
 }

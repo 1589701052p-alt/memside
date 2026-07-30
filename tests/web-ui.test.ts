@@ -75,3 +75,16 @@ test('App.tsx wires restore/archive/unarchive/promote actions (source text)', ()
 test('App.tsx shows promoted marker on discards (source text)', () => {
   expect(src).toContain('已提升')
 })
+
+// Task 8: 第 5 tab「蒸馏记录」+ DistillRunRow + DistillRunModal。
+// React 组件不单测，源码文本断言锁住 tab key / label / 行组件 / 遮罩层 /
+// refresh 拉取 / 两个纯函数接线，refactor 删除即变红。
+test('App.tsx has distill runs tab + row + modal', () => {
+  expect(src).toContain("'runs'")          // TabKey 含 runs
+  expect(src).toContain('蒸馏记录')         // tab label
+  expect(src).toContain('DistillRunRow')   // 列表行组件
+  expect(src).toContain('DistillRunModal') // 详情遮罩层
+  expect(src).toContain('listDistillRuns') // refresh 拉取
+  expect(src).toContain('formatOutcome')   // 徽标纯函数
+  expect(src).toContain('formatRunCounts') // 计数链纯函数
+})

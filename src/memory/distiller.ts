@@ -107,6 +107,12 @@ export interface DistillInput {
 export interface DistillResult {
   candidates: DistillCandidate[]
   filteredTurns: TranscriptTurn[]   // 实际喂给模型的过滤版，零偏差快照源
+  /** LLM 原始解析输出（candidates 数组原样，含被格式校验丢弃的）。无候选/跳过/报错时为 null。 */
+  rawOutput: unknown | null
+  /** LLM 返回的原始候选数（含格式不合格被丢的）。 */
+  rawCount: number
+  /** 底层 LLM 调用是否抛错（scheduler 据此判 llm_error vs empty_output）。 */
+  callThrew: boolean
 }
 
 function renderUserPrompt(
@@ -164,6 +170,11 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     // output" (turns WERE sent -> return filtered snapshot).
     let callThrew = false
     const wrappedCall: LLMCall = async (sys, user, opts) => {
+      // reset per attempt: a prior failed attempt must not stain a later success.
+      // callWithRetry re-invokes wrappedCall on throw; without this reset, an
+      // attempt-0 throw (callThrew=true) would persist even after attempt-1
+      // succeeds, misclassifying a produced result as llm_error (spec §4).
+      callThrew = false
       try {
         return await input.callLLM(sys, user, opts)
       } catch (e) {
@@ -177,7 +188,11 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
       user: userPrompt,
       shouldRetry: distillShouldRetry,
     }) as { candidates?: unknown } | undefined
-    if (!parsed || !Array.isArray(parsed.candidates)) return { candidates: [], filteredTurns: callThrew ? [] : filtered }
+    const rawOutput: unknown = parsed ?? null
+    if (!parsed || !Array.isArray(parsed.candidates)) {
+      return { candidates: [], filteredTurns: callThrew ? [] : filtered, rawOutput, rawCount: 0, callThrew }
+    }
+    const rawCount = parsed.candidates.length
     const out: DistillCandidate[] = []
     for (const c of parsed.candidates) {
       if (!c || typeof c !== 'object') continue
@@ -205,9 +220,9 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         subjectSlug: normalizeSubjectSlug(o.subjectSlug),
       })
     }
-    return { candidates: out, filteredTurns: filtered }
+    return { candidates: out, filteredTurns: filtered, rawOutput, rawCount, callThrew }
   } catch {
     // Never throw: distill failures degrade to "no candidates this round".
-    return { candidates: [], filteredTurns: [] }
+    return { candidates: [], filteredTurns: [], rawOutput: null, rawCount: 0, callThrew: true }
   }
 }

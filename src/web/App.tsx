@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import {
   listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput,
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
+  listDistillRuns, getDistillRun, getDistillRunSourceInput,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
+  type DistillRunListItem,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts } from './ui-utils'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -25,7 +27,7 @@ function priorityRank(vc: string | null | undefined): number {
   return 2
 }
 
-type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards'
+type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs'
 
 /**
  * 4-tab 审计视图。顶部 tab 切换:候选审批 / 已审批 / 已拒绝 / AI自动拒绝。每 tab
@@ -49,6 +51,8 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
+  const [runs, setRuns] = useState<DistillRunListItem[]>([])
+  const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
 
   // tabRef 始终指向最新 tab,用于丢弃切 tab 后才返回的过期 fetch 结果,避免旧 tab
   // 数据短暂覆盖新 tab 列表(stale-write 竞态)。
@@ -63,6 +67,11 @@ export default function App() {
         const [ds, st] = await Promise.all([listDiscards(), getStatus()])
         if (tabRef.current !== myTab) return
         setDiscards(ds)
+        setStatus(st)
+      } else if (myTab === 'runs') {
+        const [runItems, st] = await Promise.all([listDistillRuns(fetch), getStatus(fetch)])
+        if (tabRef.current !== myTab) return
+        setRuns(runItems)
         setStatus(st)
       } else {
         const filter = myTab === 'candidate'
@@ -89,6 +98,7 @@ export default function App() {
   useEffect(() => {
     setItems([])
     setDiscards([])
+    setRuns([])
     setLoading(true)
     setError(null)
     void refresh()
@@ -139,13 +149,14 @@ export default function App() {
   const memItems = sortCandidatesByTime(items)
   const jobs = status?.jobs ?? {}
   const running = (jobs.running ?? 0) + (jobs.pending ?? 0)
-  const listEmpty = tab === 'discards' ? discards.length === 0 : memItems.length === 0
+  const listEmpty = tab === 'discards' ? discards.length === 0 : tab === 'runs' ? runs.length === 0 : memItems.length === 0
 
   const tabs: ReadonlyArray<{ key: TabKey; label: string; count: number }> = [
     { key: 'candidate', label: '候选审批', count: status?.memories.candidate ?? 0 },
     { key: 'approved', label: '已审批', count: (status?.memories.approved ?? 0) + (status?.memories.archived ?? 0) + (status?.memories.superseded ?? 0) },
     { key: 'rejected', label: '已拒绝', count: status?.memories.rejected ?? 0 },
     { key: 'discards', label: 'AI自动拒绝', count: status?.discards ?? 0 },
+    { key: 'runs', label: '蒸馏记录', count: status?.distillRuns?.total ?? 0 },
   ]
 
   return (
@@ -299,6 +310,16 @@ export default function App() {
             <p style={{ color: '#666' }}>暂无已拒绝记忆</p>
           )}
         </>
+      ) : tab === 'runs' ? (
+        <div>
+          <p>共 {runs.length} 条蒸馏记录</p>
+          {runs.map((r) => (
+            <DistillRunRow key={r.distillJobId} r={r} onOpen={() => setRunDetailFor(r.distillJobId)} />
+          ))}
+          {runs.length === 0 && !loading && (
+            <p style={{ color: '#666' }}>暂无蒸馏记录</p>
+          )}
+        </div>
       ) : (
         <>
           <p>{discards.length} 条 AI 自动拒绝记录</p>
@@ -313,6 +334,10 @@ export default function App() {
 
       {sourceInputFor ? (
         <SourceInputModal memoryId={sourceInputFor} onClose={() => setSourceInputFor(null)} />
+      ) : null}
+
+      {runDetailFor ? (
+        <DistillRunModal jobId={runDetailFor} onClose={() => setRunDetailFor(null)} />
       ) : null}
     </div>
   )
@@ -480,6 +505,29 @@ function DiscardCard({ d, onPromote }: { d: DiscardItem; onPromote: () => void }
   )
 }
 
+/**
+ * 蒸馏记录列表行(runs tab)。outcome 徽标 + 计数链 + 来源/时间/耗时 + 「查看详情」
+ * 按钮（打开 DistillRunModal）。subagent 来源显 'subagent'，否则显 cwd 末段。
+ * 复用 formatOutcome / formatRunCounts / formatMemoryTime 纯函数。
+ */
+function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => void }) {
+  const oc = formatOutcome(r.outcome)
+  const cwdLabel = r.cwd ? (r.cwd.split(/[\\/]/).filter(Boolean).pop() ?? r.cwd) : '未知'
+  const time = formatMemoryTime(r.createdAt)
+  return (
+    <div style={{ border: '1px solid #eee', borderRadius: 6, padding: 12, marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
+        <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{formatRunCounts({ distilled: r.rawCount, deduped: r.dedupedCount, filtered: r.filteredCount, stored: r.storedCount })}</span>
+      </div>
+      <div style={{ fontSize: 13, color: '#555', marginTop: 6 }}>
+        {r.sourceAgentId ? 'subagent' : cwdLabel}{time ? ` · ${time}` : ''} · {r.durationMs}ms
+      </div>
+      <button onClick={onOpen} style={{ marginTop: 8 }}>查看详情</button>
+    </div>
+  )
+}
+
 function SourceInputModal({ memoryId, onClose }: { memoryId: string; onClose: () => void }) {
   const [data, setData] = useState<SourceInput | null>(null)
   const [loading, setLoading] = useState(true)
@@ -550,6 +598,133 @@ function SourceInputModal({ memoryId, onClose }: { memoryId: string; onClose: ()
           </>
         ) : (
           <p style={{ color: '#666' }}>该记忆无原始输入快照</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 蒸馏记录详情遮罩层(runs tab 点「查看详情」打开)。三态:加载中 / 错误 / 数据。
+ * ESC / × / 背景点击关闭(参照 SourceInputModal)。产出区按 outcome 分支:
+ * produced -> rawOutput.candidates JSON 展示;empty_output/llm_error/skipped 各显
+ * 对应文案。「模型返回 N 条，M 条格式不合格被丢弃」hint 仅在 rawCount >
+ * acceptedCount 时出现。原始输入懒加载(点按钮才拉 getDistillRunSourceInput)。
+ */
+function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => void }) {
+  const [detail, setDetail] = useState<Awaited<ReturnType<typeof getDistillRun>> | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [source, setSource] = useState<{ turnCount: number; charCount: number; turns: SourceTurn[] } | null>(null)
+  const [sourceLoading, setSourceLoading] = useState(false)
+  const [sourceError, setSourceError] = useState<string | null>(null)
+  const [sourceLoaded, setSourceLoaded] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setDetail(null)
+    getDistillRun(jobId)
+      .then((d) => { if (!cancelled) setDetail(d) })
+      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [jobId])
+
+  // ESC 关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const loadSource = async () => {
+    // Reset all source states on each load so prior results/errors don't linger.
+    setSourceLoading(true)
+    setSourceError(null)
+    setSource(null)
+    setSourceLoaded(false)
+    try {
+      setSource(await getDistillRunSourceInput(jobId))
+      setSourceLoaded(true)
+    } catch (e) {
+      // fetch itself rejected (network error): getDistillRunSourceInput only
+      // returns null on !res.ok; a transport failure throws and must surface
+      // (CLAUDE.md state-visibility: no silent stalls).
+      setSourceError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSourceLoading(false)
+    }
+  }
+
+  const cands = (detail?.rawOutput as { candidates?: unknown[] } | null | undefined)?.candidates
+  const oc = detail ? formatOutcome(detail.outcome) : null
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+        background: 'rgba(0,0,0,0.5)', display: 'flex',
+        alignItems: 'flex-start', justifyContent: 'center', padding: 40,
+        overflow: 'auto', zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: '#fff', borderRadius: 8, maxWidth: 900, width: '100%',
+          maxHeight: '85vh', overflow: 'auto', padding: 20,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <strong>蒸馏记录详情</strong>
+          <button onClick={onClose} style={{ fontSize: 18, lineHeight: 1 }}>×</button>
+        </div>
+
+        {loading ? (
+          <p style={{ color: '#666' }}>加载中…</p>
+        ) : error ? (
+          <p style={{ color: '#c00' }}>无法加载: {error}</p>
+        ) : detail && oc ? (
+          <>
+            <div style={{ marginBottom: 8 }}>
+              <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
+              <span style={{ marginLeft: 8, fontFamily: 'monospace' }}>{formatRunCounts({ distilled: detail.rawCount, deduped: detail.dedupedCount, filtered: detail.filteredCount, stored: detail.storedCount })}</span>
+              {detail.rawCount > detail.acceptedCount && (
+                <span style={{ marginLeft: 8, color: '#999' }}>模型返回 {detail.rawCount} 条，{detail.rawCount - detail.acceptedCount} 条格式不合格被丢弃</span>
+              )}
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <strong>产出：</strong>
+              {detail.outcome === 'empty_output' ? <span>LLM 返回 0 候选</span>
+                : detail.outcome === 'llm_error' ? <span style={{ color: '#c00' }}>LLM 调用失败</span>
+                : detail.outcome === 'skipped_no_new_turns' ? <span>该 job 无新 turn，未调用 LLM</span>
+                : Array.isArray(cands) ? cands.map((c, i) => (
+                    <pre key={i} style={{ background: '#f7f7f7', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap' }}>{JSON.stringify(c, null, 2)}</pre>
+                  )) : <span>（无产出解析）</span>}
+            </div>
+            <div>
+              <button onClick={loadSource} disabled={sourceLoading}>{sourceLoading ? '加载中…' : '查看原始输入'}</button>
+              {sourceError ? (
+                <p style={{ color: '#c00', marginTop: 8 }}>无法加载原始输入: {sourceError}</p>
+              ) : source === null && sourceLoaded ? (
+                <p style={{ color: '#666', marginTop: 8 }}>该 job 无原始输入快照</p>
+              ) : source ? (
+                <div style={{ marginTop: 8 }}>
+                  <p style={{ color: '#666' }}>{source.turnCount} turn · 约 {source.charCount} 字</p>
+                  {source.turns.map((t, i) => {
+                    const f = formatSourceTurn(t)
+                    return (
+                      <pre key={i} style={{ borderLeft: `3px solid ${f.color}`, padding: '4px 8px', margin: '4px 0', whiteSpace: 'pre-wrap' }}>[{f.label}] {t.content}</pre>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <p style={{ color: '#666' }}>无记录</p>
         )}
       </div>
     </div>

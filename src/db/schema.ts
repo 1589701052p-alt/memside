@@ -124,3 +124,20 @@ export const memoryDistillInputs = sqliteTable(
     ts: integer('ts').notNull(),
   },
 )
+
+export const memoryDistillRuns = sqliteTable(
+  'memory_distill_runs',
+  {
+    distillJobId: text('distill_job_id').primaryKey(),
+    outcome: text('outcome').notNull(),
+    rawOutputJson: text('raw_output_json'),
+    distilledCount: integer('distilled_count').notNull(),
+    acceptedCount: integer('accepted_count').notNull(),
+    dedupedCount: integer('deduped_count').notNull(),
+    filteredCount: integer('filtered_count').notNull(),
+    storedCount: integer('stored_count').notNull(),
+    discardedCount: integer('discarded_count').notNull(),
+    durationMs: integer('duration_ms').notNull(),
+    ts: integer('ts').notNull(),
+  },
+)

@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from './schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns } from './schema'
 
 export type DbClient = ReturnType<typeof openDb>
 
@@ -11,7 +11,7 @@ export function openDb(path: string) {
   const raw = new Database(path)
   raw.exec('PRAGMA journal_mode=WAL')
   raw.exec('PRAGMA synchronous=NORMAL')
-  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs } })
+  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns } })
   // Schema bootstrap (idempotent). DDL lives here so tests need no migration runner.
   raw.exec(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -85,6 +85,19 @@ export function openDb(path: string) {
       turn_count     INTEGER NOT NULL,
       char_count     INTEGER NOT NULL,
       ts             INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS memory_distill_runs (
+      distill_job_id   TEXT PRIMARY KEY,
+      outcome          TEXT NOT NULL,
+      raw_output_json  TEXT,
+      distilled_count  INTEGER NOT NULL,
+      accepted_count   INTEGER NOT NULL,
+      deduped_count    INTEGER NOT NULL,
+      filtered_count   INTEGER NOT NULL,
+      stored_count     INTEGER NOT NULL,
+      discarded_count  INTEGER NOT NULL,
+      duration_ms      INTEGER NOT NULL,
+      ts               INTEGER NOT NULL
     );
   `)
   // Idempotent migration: add source_cwd to pre-existing memories tables.

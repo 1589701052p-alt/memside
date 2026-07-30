@@ -3,10 +3,10 @@ import { serveStatic } from 'hono/bun'
 import { desc, inArray } from 'drizzle-orm'
 import { join } from 'node:path'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { MemoryStatus } from '@/memory/pure'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, MemoryNotFoundError } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, MemoryNotFoundError } from '@/memory/store'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import type { EnqueueInput } from '@/scheduler'
 
@@ -207,16 +207,22 @@ export function createApp(deps: AppDeps) {
     const events = await deps.db.select().from(memoryDistillEvents).all()
     const memRows = await deps.db.select().from(memories).all()
     const discardRows = await deps.db.select().from(memoryDiscards).all()
+    const runRows = await deps.db.select().from(memoryDistillRuns).all()
+    const now = Date.now()
+    const recentRuns = runRows.filter((r) => now - (r.ts as number) < 24 * 60 * 60 * 1000)
     const jobStats: Record<string, number> = {}
     for (const j of jobs) jobStats[j.status] = (jobStats[j.status] ?? 0) + 1
     const memStats: Record<string, number> = {}
     for (const m of memRows) memStats[m.status] = (memStats[m.status] ?? 0) + 1
+    const runStats: Record<string, number> = {}
+    for (const r of recentRuns) runStats[r.outcome] = (runStats[r.outcome] ?? 0) + 1
     const errored = jobs.find((j) => j.lastError)
     return c.json({
       events: events.length,
       jobs: jobStats,
       memories: memStats,
       discards: discardRows.length,
+      distillRuns: { total: recentRuns.length, byOutcome: runStats },
       lastError: errored ? { error: errored.lastError } : null,
     })
   })
@@ -313,6 +319,32 @@ export function createApp(deps: AppDeps) {
       if (e instanceof MemoryNotFoundError) return c.json({ error: (e as Error).message }, 404)
       return c.json({ error: (e as Error).message }, 409)
     }
+  })
+
+  // --- Distill runs (工作记录透明化) --------------------------------------
+  // 列表不含 rawOutput（走详情端点懒加载）；详情返回完整 DistillRunRow 或 404；
+  // source-input 复用按 distillJobId 查快照的 store 函数。
+  app.get('/api/distill-runs', async (c) => {
+    const limitParam = c.req.query('limit')
+    let limit = 200
+    if (limitParam) {
+      const n = Number(limitParam)
+      if (Number.isFinite(n) && n > 0) limit = Math.min(Math.floor(n), 500)
+    }
+    const items = await listRecentDistillRuns(deps.db, { limit })
+    return c.json({ items })
+  })
+
+  app.get('/api/distill-runs/:jobId', async (c) => {
+    const run = await getDistillRun(deps.db, c.req.param('jobId'))
+    if (!run) return c.json({ error: 'not found' }, 404)
+    return c.json(run)
+  })
+
+  app.get('/api/distill-runs/:jobId/source-input', async (c) => {
+    const snap = await getSourceInput(deps.db, c.req.param('jobId'))
+    if (!snap) return c.json({ error: 'not found' }, 404)
+    return c.json({ turnCount: snap.turnCount, charCount: snap.charCount, turns: snap.turns })
   })
 
   // --- Archive / unarchive / restore --------------------------------------

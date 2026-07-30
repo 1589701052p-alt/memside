@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -107,4 +107,25 @@ test('formatSourceTurn: unknown role -> 灰色 + 原角色名', () => {
   const r = formatSourceTurn({ role: 'system', content: 'x' })
   expect(r.label).toBe('system')
   expect(r.color).toBe('#666')
+})
+
+// --- formatOutcome ---
+// 蒸馏记录 outcome 四态 -> 徽标 { label, color }。CLAUDE.md「首选可断言面」。
+// 设计依据：docs/superpowers/specs/2026-07-29-distill-work-record-design.md §7。
+
+test('formatOutcome maps four outcomes to label + color', () => {
+  expect(formatOutcome('produced').color).toBe('#2e7d32')
+  expect(formatOutcome('empty_output').color).toBe('#666')
+  expect(formatOutcome('llm_error').color).toBe('#c00')
+  expect(formatOutcome('skipped_no_new_turns').color).toBe('#999')
+  expect(formatOutcome('produced').label).toBe('产出')
+})
+
+// --- formatRunCounts ---
+// 计数链 distilled->deduped->filtered->stored 渲染为「N->M->K->J」。
+// 纯函数，可单测。
+
+test('formatRunCounts renders distilled->deduped->filtered->stored chain', () => {
+  expect(formatRunCounts({ distilled: 5, deduped: 3, filtered: 1, stored: 1 })).toBe('5->3->1->1')
+  expect(formatRunCounts({ distilled: 0, deduped: 0, filtered: 0, stored: 0 })).toBe('0->0->0->0')
 })

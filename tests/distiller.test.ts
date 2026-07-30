@@ -307,3 +307,76 @@ test('DISTILLER_SYSTEM_PROMPT documents subjectSlug rules + reuse instruction', 
   expect(DISTILLER_SYSTEM_PROMPT).toContain('subjectSlug')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('kebab-case')
 })
+
+test('distillTranscript returns rawOutput/rawCount/callThrew on produced', async () => {
+  const turns = [{ role: 'user', content: '记一下' }, { role: 'assistant', content: '好' }] as any
+  const r = await distillTranscript({
+    turns, runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:convention] x', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' }] }),
+  })
+  expect(r.candidates.length).toBe(1)
+  expect(r.rawCount).toBe(1)
+  expect(r.callThrew).toBe(false)
+  expect((r.rawOutput as any)?.candidates?.length).toBe(1)
+})
+
+test('distillTranscript returns callThrew=true + null rawOutput when LLM throws', async () => {
+  const turns = [{ role: 'user', content: 'hi' }] as any
+  const r = await distillTranscript({
+    turns, runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => { throw new Error('api down') },
+  })
+  expect(r.candidates).toEqual([])
+  expect(r.callThrew).toBe(true)
+  expect(r.rawOutput).toBeNull()
+  expect(r.rawCount).toBe(0)
+})
+
+test('distillTranscript resets callThrew after a failed attempt then succeeds (retry-success not misclassified as llm_error)', async () => {
+  // 回归（review fix-wave Finding 1）：callThrew 曾是 sticky 的--attempt 0 抛错置 true
+  // 后永不复位，导致 attempt 1 成功产出候选时 scheduler 仍判 outcome='llm_error'
+  // （spec §4 produced = accepted_count > 0 regardless of transient errors）。
+  // callWithRetry 默认 maxRetries=2 = 3 次尝试，throw-once-then-succeed 在预算内。
+  // 此测试在 distiller 修复前 FAIL（callThrew===true），修复后 PASS（callThrew===false）。
+  let calls = 0
+  const turns = [{ role: 'user', content: '记一下' }] as any
+  const r = await distillTranscript({
+    turns, runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => {
+      calls++
+      if (calls === 1) throw new Error('transient api down')
+      return JSON.stringify({ candidates: [{ title: '[category:convention] x', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' }] })
+    },
+  })
+  expect(calls).toBe(2)              // 第一次抛错被重试，第二次成功
+  expect(r.callThrew).toBe(false)   // 重试成功后 callThrew 必须复位为 false
+  expect(r.candidates.length).toBeGreaterThan(0)
+})
+
+test('distillTranscript returns empty_output shape when LLM returns 0 candidates', async () => {
+  const turns = [{ role: 'user', content: 'hi' }] as any
+  const r = await distillTranscript({
+    turns, runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [] }),
+  })
+  expect(r.candidates).toEqual([])
+  expect(r.callThrew).toBe(false)
+  expect(r.rawCount).toBe(0)
+  expect((r.rawOutput as any)?.candidates).toEqual([])
+})
+
+test('distillTranscript preserves format-invalid candidates in rawOutput (rawCount > accepted)', async () => {
+  const turns = [{ role: 'user', content: 'hi' }] as any
+  // 始终返回 1 好 + 1 坏（无 [category: 前缀）-> shouldRetry 重试耗尽 -> 返回 lastParsed
+  const r = await distillTranscript({
+    turns, runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [
+      { title: '[category:convention] good', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
+      { title: 'no-prefix bad', bodyMd: 'b' },
+    ] }),
+  })
+  expect(r.candidates.length).toBe(1)            // 坏的被格式校验丢
+  expect(r.rawCount).toBe(2)                      // 原始两条都计
+  expect((r.rawOutput as any)?.candidates?.length).toBe(2)  // rawOutput 保留被丢的
+  expect(r.callThrew).toBe(false)
+})

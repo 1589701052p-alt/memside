@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick, dedupCandidates, DISTILL_DEBOUNCE_MS } from '@/scheduler'
 import { createCandidate, createCandidate as realCreateCandidate, promoteCandidate } from '@/memory/store'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns } from '@/db/schema'
 import type { DistillCandidate } from '@/memory/distiller'
 import { makeLoadTranscript } from '@/daemon'
 
@@ -766,9 +766,10 @@ test('tick writes source-input snapshot when candidates are kept', async () => {
   expect(snaps[0]!.turnsJson).toContain('we refund within 14 days')
 })
 
-test('tick does NOT write source-input snapshot when 0 candidates kept (all discarded)', async () => {
-  // 与既有 public-knowledge 丢弃测试（行 248）同 mock 模式：1 候选 + 无 existing ->
-  // dedup 短路（不调 LLM），judgeValue 判 public-knowledge -> 丢弃，0 候选入库。
+test('tick writes source-input snapshot even when 0 candidates kept (all discarded) (去门)', async () => {
+  // 去门后：即便 valueFilter 全丢弃（0 入库），tick 仍 best-effort 写 source-input 快照，
+  // 让用户看到「模型看到了什么却全被丢弃」。与 0 LLM 候选测试互补：此用例覆盖
+  // 「1 候选 -> dedup 短路 -> judgeValue 判 public-knowledge -> 丢弃」路径。
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let callCount = 0
@@ -783,7 +784,7 @@ test('tick does NOT write source-input snapshot when 0 candidates kept (all disc
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
   })
   const snaps = await db.select().from(memoryDistillInputs).where(eq(memoryDistillInputs.distillJobId, jobId))
-  expect(snaps.length).toBe(0)  // 0 候选入库，不写快照
+  expect(snaps.length).toBe(1)  // 去门后 0 候选入库也写快照
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(rows[0]!.status).toBe('done')
 })
@@ -912,4 +913,123 @@ test('tick: main-session job (no sourceAgentId) still uses sourceKind=conversati
   })
   expect(captured.sourceKind).toBe('conversation')
   expect(await getSessionOffset(db, 'sess-main')).toBe(7)
+})
+
+// ---------------------------------------------------------------------------
+// Task 4：distill run 记录透明化 -- tick 在每个 done job 写一行 memory_distill_runs
+// （outcome 四态 + 计数链 + LLM 原始产出 + 耗时），并去掉 saveSourceInput 的
+// keepWithClass>0 门（0 产出 job 也存过滤版输入）。run 记录 / source-input 均为
+// best-effort：写失败只 warn，不阻塞 done。
+// ---------------------------------------------------------------------------
+
+async function forceDue(jobId: string) {
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+}
+
+test('tick writes run record outcome=skipped_no_new_turns when newTurns empty', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's1' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: '[]' })
+  await forceDue(jobId)
+  const n = await tick(db, { loadTranscript: async () => ({ turns: [], fullLength: 0 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  expect(n).toBe(1)
+  const runs = db.select().from(memoryDistillRuns).all()
+  expect(runs.length).toBe(1)
+  expect(runs[0]!.outcome).toBe('skipped_no_new_turns')
+  expect(runs[0]!.distilledCount).toBe(0)
+})
+
+test('tick writes run record outcome=empty_output when LLM returns 0 candidates', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's2' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
+  await forceDue(jobId)
+  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  const runs = db.select().from(memoryDistillRuns).all()
+  expect(runs[0]!.outcome).toBe('empty_output')
+  expect(runs[0]!.distilledCount).toBe(0)
+})
+
+test('tick writes run record outcome=llm_error when callLLM throws', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's3' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
+  await forceDue(jobId)
+  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => { throw new Error('api down') }, createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  const runs = db.select().from(memoryDistillRuns).all()
+  expect(runs[0]!.outcome).toBe('llm_error')
+})
+
+test('tick writes run record outcome=produced when distill retry succeeds (callThrew not sticky)', async () => {
+  // 回归（review fix-wave Finding 1）：distill 阶段第一次抛错、第二次重试成功产出候选。
+  // 旧逻辑 callThrew sticky=true -> outcome='llm_error'（错误分类）。修复后 callThrew
+  // 每次调用复位 + outcome 先查 candidates.length===0 -> 'produced'。spec §4 produced
+  // = accepted_count > 0 regardless。callWithRetry 默认 3 次尝试，throw-once 在预算内。
+  // 阶段：call1=distill attempt0 抛错，call2=distill attempt1 产候选，dedup 短路（无
+  // existing），call3=judgeValue 判 decision 保留。
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's3b' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
+  await forceDue(jobId)
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) throw new Error('transient api down')   // distill attempt 0
+      if (callCount === 2) return JSON.stringify({ candidates: [{ title: '[category:convention] x', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' }] })  // distill attempt 1 (retry success)
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })  // judgeValue
+    },
+    createCandidate: async (_d: any, input: any) => ({ id: 'c' + input.title, status: 'candidate', version: 1 } as any),
+  })
+  const runs = db.select().from(memoryDistillRuns).all()
+  expect(runs[0]!.outcome).toBe('produced')            // NOT 'llm_error'
+  expect(runs[0]!.acceptedCount).toBe(1)
+})
+
+test('tick writes run record outcome=produced with correct count chain', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's4' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
+  await forceDue(jobId)
+  // distill 返回 2 候选 -> dedup 全留 2 -> valueFilter 全留 2（decision）-> 入库 2
+  let phase = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }),
+    callLLM: async () => {
+      phase++
+      if (phase === 1) return JSON.stringify({ candidates: [
+        { title: '[category:convention] a', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
+        { title: '[category:convention] c', bodyMd: 'd', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
+      ] })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }, { index: 1, category: 'decision' }] })  // dedup + valueFilter
+    },
+    createCandidate: async (_d: any, input: any) => ({ id: 'c' + input.title, status: 'candidate', version: 1 } as any),
+  })
+  const runs = db.select().from(memoryDistillRuns).all()
+  const r = runs[0]!
+  expect(r.outcome).toBe('produced')
+  expect(r.distilledCount).toBe(2)
+  expect(r.acceptedCount).toBe(2)
+  expect(r.dedupedCount).toBe(2)
+  expect(r.filteredCount).toBe(2)
+  expect(r.storedCount).toBe(2)
+  expect(r.discardedCount).toBe(0)
+})
+
+test('tick writes source-input snapshot even when 0 candidates kept (去门)', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's5' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
+  await forceDue(jobId)
+  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  const snaps = db.select().from(memoryDistillInputs).all()
+  expect(snaps.length).toBe(1)  // 去门后 0 候选也写
+})
+
+test('tick still marks done when saveDistillRun throws', async () => {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's6' })
+  await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
+  await forceDue(jobId)
+  const origInsert = db.insert.bind(db)
+  ;(db as any).insert = (table: unknown) => { if (table === memoryDistillRuns) throw new Error('write fail'); return origInsert(table as any) }
+  try {
+    await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  } finally { (db as any).insert = origInsert }
+  const job = db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).all()[0]!
+  expect(job.status).toBe('done')
 })

@@ -3,9 +3,9 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDiscards, memoryDistillInputs } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDiscards, memoryDistillInputs, memoryDistillRuns } from '@/db/schema'
 import type { TranscriptTurn } from '@/memory/pure'
-import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards, getSessionOffset, setSessionOffset, saveSourceInput, getSourceInput } from '@/memory/store'
+import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards, getSessionOffset, setSessionOffset, saveSourceInput, getSourceInput, saveDistillRun, getDistillRun, listRecentDistillRuns } from '@/memory/store'
 
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
@@ -219,4 +219,55 @@ test('getSourceInput returns null on malformed turns_json (deser failure, no cra
   }).run()
   const snap = await getSourceInput(db, 'job-bad')
   expect(snap).toBeNull()
+})
+
+test('saveDistillRun inserts a row, getDistillRun reads it back', async () => {
+  await db.insert(memoryDistillJobs).values({ id: 'job-r1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/repo', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 100, finishedAt: 200 })
+  await saveDistillRun(db, 'job-r1', { outcome: 'produced', rawOutput: { candidates: [{ title: 'x' }] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 42 })
+  const run = await getDistillRun(db, 'job-r1')
+  expect(run?.outcome).toBe('produced')
+  expect(run?.rawCount).toBe(1)
+  expect(run?.durationMs).toBe(42)
+  expect((run?.rawOutput as any)?.candidates?.length).toBe(1)
+})
+
+test('saveDistillRun UPSERT overwrites on same distillJobId', async () => {
+  await saveDistillRun(db, 'job-r2', { outcome: 'empty_output', rawOutput: null, rawCount: 0, acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0, durationMs: 5 })
+  await saveDistillRun(db, 'job-r2', { outcome: 'produced', rawOutput: null, rawCount: 3, acceptedCount: 2, dedupedCount: 2, filteredCount: 1, storedCount: 1, discardedCount: 1, durationMs: 9 })
+  const run = await getDistillRun(db, 'job-r2')
+  expect(run?.outcome).toBe('produced')
+  expect(run?.rawCount).toBe(3)
+})
+
+test('getDistillRun returns null for missing job', async () => {
+  expect(await getDistillRun(db, 'nope')).toBeNull()
+})
+
+test('getDistillRun returns null rawOutput on malformed raw_output_json', async () => {
+  await db.insert(memoryDistillRuns).values({ distillJobId: 'job-bad', outcome: 'produced', rawOutputJson: 'not-json{', distilledCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 1, ts: 1 })
+  const run = await getDistillRun(db, 'job-bad')
+  expect(run?.rawOutput).toBeNull()
+  expect(run?.outcome).toBe('produced')
+})
+
+test('listRecentDistillRuns returns rows newest-first with job metadata, no rawOutput', async () => {
+  await db.insert(memoryDistillJobs).values({ id: 'job-l1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/a', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 10, finishedAt: 20 })
+  await db.insert(memoryDistillJobs).values({ id: 'job-l2', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/b', sourceAgentId: 'ag1', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 30, finishedAt: 40 })
+  await saveDistillRun(db, 'job-l1', { outcome: 'produced', rawOutput: { candidates: [] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 1 })
+  await saveDistillRun(db, 'job-l2', { outcome: 'empty_output', rawOutput: null, rawCount: 0, acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0, durationMs: 1 })
+  const rows = await listRecentDistillRuns(db)
+  expect(rows.length).toBe(2)
+  expect(rows[0]!.ts).toBeGreaterThanOrEqual(rows[1]!.ts)
+  expect(rows.find((r) => r.distillJobId === 'job-l2')?.sourceAgentId).toBe('ag1')
+  expect(rows.find((r) => r.distillJobId === 'job-l1')?.cwd).toBe('/a')
+  expect((rows[0] as any).rawOutput).toBeUndefined()
+})
+
+test('openDb creates memory_distill_runs with all columns', () => {
+  const cols = (db.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[])
+    .map((r) => r.name)
+  expect(cols).toEqual(expect.arrayContaining([
+    'distill_job_id', 'outcome', 'raw_output_json', 'distilled_count', 'accepted_count',
+    'deduped_count', 'filtered_count', 'stored_count', 'discarded_count', 'duration_ms', 'ts',
+  ]))
 })

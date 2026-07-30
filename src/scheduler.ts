@@ -3,7 +3,7 @@ import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, type DiscardRecord } from '@/memory/store'
+import { listForDedupByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, type DiscardRecord } from '@/memory/store'
 import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass } from '@/memory/valueFilter'
 import type { MemoryInput, Memory } from '@/memory/store'
@@ -129,6 +129,14 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       // 第五轮增量切片：newTurns 为空 = 该 session 自上次蒸馏后无新增 turn，跳过蒸馏。
       // 标 done（消费 job），不 distill / createCandidate / setSessionOffset（偏移不变）。
       if (newTurns.length === 0) {
+        // skipped_no_new_turns：未调 LLM，记一条空 run（透明化），再 done。
+        try {
+          await saveDistillRun(db, job.id, {
+            outcome: 'skipped_no_new_turns', rawOutput: null, rawCount: 0,
+            acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0,
+            discardedCount: 0, durationMs: 0,
+          })
+        } catch (e) { console.warn('memside: saveDistillRun failed', e) }
         await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() })
           .where(eq(memoryDistillJobs.id, job.id)).run()
         processed += 1
@@ -146,13 +154,15 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       } catch (e) {
         console.warn('memside: listSubjectSlugs failed', e)
       }
-      const { candidates, filteredTurns } = await distillTranscript({
+      const t0 = Date.now()
+      const { candidates, filteredTurns, rawOutput, rawCount, callThrew } = await distillTranscript({
         turns: newTurns,  // 只喂新增 turn，不再全量
         runtime: job.runtime as 'claude-code' | 'opencode',
         cwd: job.cwd ?? '',
         existingSlugs,
         callLLM: deps.callLLM,
       })
+      const durationMs = Date.now() - t0
       // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter
       // only runs on survivors (no wasted calls, no per-dupe mis-classification).
       const deduped = await dedupCandidates(db, deps.callLLM, candidates, job.cwd ?? null)
@@ -198,12 +208,24 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           subjectSlug: k.cand.subjectSlug,
         })
       }
-      // 原始输入溯源：有候选入库时 best-effort 快照喂给模型的过滤版 turns。
-      // 失败只 warn、不阻塞 done（与 logDiscards / setSessionOffset 同级）。
-      if (keepWithClass.length > 0) {
-        try { await saveSourceInput(db, job.id, filteredTurns) }
-        catch (e) { console.warn('memside: saveSourceInput failed', e) }
-      }
+      // 去门（spec §5）：0 产出 job 也存过滤版输入，让用户看到「模型看到了什么却返回 0」。
+      // skipped 分支已 continue，此处恒非 skipped。best-effort：失败只 warn，不阻塞 done。
+      try { await saveSourceInput(db, job.id, filteredTurns) }
+      catch (e) { console.warn('memside: saveSourceInput failed', e) }
+      // 运行记录：outcome + 计数链 + LLM 原始产出。best-effort，与 logDiscards/saveSourceInput 同级。
+      try {
+        await saveDistillRun(db, job.id, {
+          // spec §4: produced = accepted_count > 0 regardless of transient LLM
+          // errors during retry. Check candidates.length===0 FIRST so a retry-
+          // success (callThrew=true from attempt 0 but candidates produced on
+          // attempt 1) is classified 'produced', not 'llm_error'. Belt-and-
+          // suspenders alongside the distiller's per-attempt callThrew reset.
+          outcome: candidates.length === 0 ? (callThrew ? 'llm_error' : 'empty_output') : 'produced',
+          rawOutput, rawCount, acceptedCount: candidates.length, dedupedCount: deduped.length,
+          filteredCount: keepWithClass.length, storedCount: keepWithClass.length,
+          discardedCount: discarded.length, durationMs,
+        })
+      } catch (e) { console.warn('memside: saveDistillRun failed', e) }
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() }).where(eq(memoryDistillJobs.id, job.id)).run()
       // 第五轮：本次蒸馏到 fullLength，下次该 session 从此处切。仅 job 有 sessionId 时
       // 更新；无 sessionId（历史 job）不更新，保持全量向后兼容。失败只 warn，不阻塞 done。
