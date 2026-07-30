@@ -90,7 +90,7 @@ export const memoryDiscards = sqliteTable(
       .references(() => memoryDistillJobs.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
     bodyMd: text('body_md').notNull(),
-    reason: text('reason').notNull(), // 'public-knowledge' | 'derivable' | 'taming'
+    reason: text('reason').notNull(), // 'public-knowledge' | 'derivable' | 'taming' | 'fleeting'
     ts: integer('ts').notNull(),
     // 以下 6 列为本需求新增（nullable；迁移前老行为 NULL）：
     scopeType: text('scope_type'), // 'project' | 'global'

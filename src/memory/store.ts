@@ -386,7 +386,7 @@ export async function restoreMemory(db: DbClient, id: string): Promise<Memory> {
 export interface DiscardRecord {
   title: string
   bodyMd: string
-  reason: 'public-knowledge' | 'derivable' | 'taming'
+  reason: 'public-knowledge' | 'derivable' | 'taming' | 'fleeting'
   scopeType: 'project' | 'global'
   scopeId: string | null
   sourceCwd: string | null
