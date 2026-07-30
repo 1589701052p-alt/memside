@@ -326,3 +326,50 @@ AI自动拒绝），给三类记忆各加最小操作能力。设计 spec / 计�
    stall；`tabRef.current=tab` 在 render 期赋值（latest-value ref，功能安全但违 React
    书面规则，可移到 depless effect）；h1 仍「审批队列」（chrome 稳定优先，cosmetic）。
 
+## 蒸馏工作记录透明化（2026-07-29）
+
+诊断「近一天无新增记忆」时发现 distill 管线是黑盒：只能反推 session offset 表
+确认 LLM 被调，看不到模型到底返回了什么、为什么 0 候选。本需求把每次 distill job
+的工作过程落盘透明化。设计 spec / 计划见 `docs/superpowers/specs|plans/
+2026-07-29-distill-work-record*`。
+
+1. `memory_distill_runs` 新表（1:1 随 job，无 FK 与 inputs 表一致解耦清理）：outcome
+   四态（skipped_no_new_turns / empty_output / llm_error / produced）+ LLM 原始产出
+   `raw_output_json`（含被格式校验丢弃的候选）+ 四道闸计数（distilled/accepted/
+   deduped/filtered/stored/discarded）+ duration。幂等 `CREATE TABLE IF NOT EXISTS`。
+2. `distillTranscript` 返回值透出 `rawOutput`/`rawCount`/`callThrew`（callThrew 区分
+   LLM 报错 vs 返回空）；`wrappedCall` 每次 attempt 重置 `callThrew`（防 sticky 跨
+   retry 误判），catch 降级 callThrew=true。
+3. `scheduler.tick` 接线：outcome 判定（`candidates.length===0 ? (callThrew ?
+   llm_error : empty_output) : produced`，candidates 优先匹配 spec §4 produced 定义）
+   + 计数采集 + 两处 best-effort `saveDistillRun`（skipped 分支 + 主路径，与
+   `logDiscards`/`setSessionOffset` 同级）+ `saveSourceInput` 去门（0 产出 job 也存
+   过滤版输入）。
+4. store：`saveDistillRun`（UPSERT）/`getDistillRun`（反序列化失败 rawOutput=null 不崩）
+   /`listRecentDistillRuns`（两段查询避免 join 键名不确定，列表不含 rawOutput）。
+5. server：`GET /api/distill-runs`（列表无 rawOutput）/`GET /api/distill-runs/:jobId`
+   （详情含 rawOutput）/`GET /api/distill-runs/:jobId/source-input`（复用 getSourceInput）
+   + `/api/status` 加 `distillRuns: {total, byOutcome}`（最近 24h）。
+6. Web UI 第 5 tab「蒸馏记录」：列表行 outcome 徽标 + 计数链 `N->M->K->J`
+   （`formatRunCounts`/`formatOutcome` 纯函数）+ 点开 `DistillRunModal`（产出区展示
+   rawOutput 候选 + rawCount>acceptedCount 时提示「N 条格式不合格被丢弃」+ 输入区
+   懒加载 + 三态 + sourceError/sourceLoaded 空反馈）。
+
+执行：subagent-driven（8 实现 task 各 implementer + reviewer；终审 opus whole-branch
+review verdict=With fixes，一轮 fix wave 修 3 Important + 1 Minor must-fix 后 scoped
+re-review 全绿）。`bun run typecheck && bun test` 470/470 全绿。
+
+### 已知 follow-up（本轮 deferred，非阻塞）
+
+1. spec §4 `discarded_count` 文案「= accepted - filtered」不精确（实为 `= deduped -
+   filtered`，当 dedup 有丢弃时 accepted-filtered 会多算）；实现用 `discarded.length`
+   正确，spec 文案待 docs follow-up 修正。
+2. `/api/status` distillRuns 全量加载后 JS 过滤 24h（与 events/memories/discards 同
+   模式）；长寿命 daemon 行数增长后改 SQL `WHERE ts > ?` follow-up。
+3. `DistillOutcome` 类型在 store/api/ui-utils 三处重复定义（与既有跨层类型重复同模式）；
+   `formatOutcome` if-else fallthrough 未做 `switch + never` 穷尽检查。
+4. Task 4 计数链测试用全等值（未覆盖 accepted>deduped>filtered 的发散链）；skipped
+   分支 saveDistillRun-throw 无独立测试（与已测主路径同模式）。
+5. events 表存完整 transcript 的膨胀债务（STATE.md 已知债务#1）仍独立未碰；runs 表
+   每行结构化记录体积有界，去门后 inputs 多写 0 产出 job 的过滤版输入（已压缩截断）。
+
