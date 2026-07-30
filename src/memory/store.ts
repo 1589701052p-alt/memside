@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs } from '@/db/schema'
+import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs } from '@/db/schema'
 import {
   canTransition,
   normalizeSubjectSlug,
@@ -541,4 +541,132 @@ export async function getSourceInput(
   } catch {
     return null
   }
+}
+
+// ---------------------------------------------------------------------------
+// 蒸馏工作记录透明化：每个 distill job 一条 run 记录（outcome + LLM 原始产出 +
+// 四道闸计数 + 耗时）。saveDistillRun best-effort 写（调用方 tick 吞错）；
+// getDistillRun 反序列化 raw_output_json 失败 -> rawOutput=null（不崩）。
+// listRecentDistillRuns 不含 rawOutput（走专用详情端点），JOIN job 元数据。
+// ---------------------------------------------------------------------------
+
+export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced'
+
+export interface DistillRunRecord {
+  outcome: DistillOutcome
+  rawOutput: unknown | null
+  rawCount: number
+  acceptedCount: number
+  dedupedCount: number
+  filteredCount: number
+  storedCount: number
+  discardedCount: number
+  durationMs: number
+}
+
+export interface DistillRunRow {
+  distillJobId: string
+  outcome: DistillOutcome
+  rawOutput: unknown | null
+  rawCount: number
+  acceptedCount: number
+  dedupedCount: number
+  filteredCount: number
+  storedCount: number
+  discardedCount: number
+  durationMs: number
+  ts: number
+}
+
+export async function saveDistillRun(
+  db: DbClient, distillJobId: string, record: DistillRunRecord,
+): Promise<void> {
+  const now = Date.now()
+  const rawOutputJson = record.rawOutput == null ? null : JSON.stringify(record.rawOutput)
+  await db.insert(memoryDistillRuns).values({
+    distillJobId, outcome: record.outcome, rawOutputJson,
+    distilledCount: record.rawCount, acceptedCount: record.acceptedCount,
+    dedupedCount: record.dedupedCount, filteredCount: record.filteredCount,
+    storedCount: record.storedCount, discardedCount: record.discardedCount,
+    durationMs: record.durationMs, ts: now,
+  }).onConflictDoUpdate({
+    target: memoryDistillRuns.distillJobId,
+    set: { outcome: record.outcome, rawOutputJson, distilledCount: record.rawCount,
+      acceptedCount: record.acceptedCount, dedupedCount: record.dedupedCount,
+      filteredCount: record.filteredCount, storedCount: record.storedCount,
+      discardedCount: record.discardedCount, durationMs: record.durationMs, ts: now },
+  })
+}
+
+function rowToRun(r: any): DistillRunRow {
+  let rawOutput: unknown = null
+  if (r.rawOutputJson != null) {
+    try { rawOutput = JSON.parse(r.rawOutputJson) } catch { rawOutput = null }
+  }
+  return {
+    distillJobId: r.distillJobId, outcome: r.outcome as DistillOutcome, rawOutput,
+    rawCount: r.distilledCount, acceptedCount: r.acceptedCount, dedupedCount: r.dedupedCount,
+    filteredCount: r.filteredCount, storedCount: r.storedCount, discardedCount: r.discardedCount,
+    durationMs: r.durationMs, ts: r.ts,
+  }
+}
+
+export async function getDistillRun(db: DbClient, distillJobId: string): Promise<DistillRunRow | null> {
+  const rows = await db.select().from(memoryDistillRuns)
+    .where(eq(memoryDistillRuns.distillJobId, distillJobId)).limit(1)
+  return rows.length === 0 ? null : rowToRun(rows[0])
+}
+
+export const DISTILL_RUNS_LIST_LIMIT = 200
+
+export interface DistillRunListRow {
+  distillJobId: string
+  outcome: DistillOutcome
+  rawCount: number
+  acceptedCount: number
+  dedupedCount: number
+  filteredCount: number
+  storedCount: number
+  discardedCount: number
+  durationMs: number
+  ts: number
+  cwd: string | null
+  runtime: string
+  createdAt: number
+  sourceAgentId: string | null
+}
+
+/**
+ * 最近 N 条 run（ts DESC，默认 200）。不含 rawOutput（走 GET /api/distill-runs/:jobId）。
+ * job 元数据（cwd/runtime/createdAt/sourceAgentId）通过 inArray 二次查询带出，避免
+ * drizzle JOIN 结果键名不确定性。孤儿 run（job 已删）-> cwd=null / createdAt=0。
+ */
+export async function listRecentDistillRuns(
+  db: DbClient, opts: { limit?: number } = {},
+): Promise<DistillRunListRow[]> {
+  const limit = opts.limit ?? DISTILL_RUNS_LIST_LIMIT
+  const cols = {
+    distillJobId: memoryDistillRuns.distillJobId, outcome: memoryDistillRuns.outcome,
+    rawCount: memoryDistillRuns.distilledCount, acceptedCount: memoryDistillRuns.acceptedCount,
+    dedupedCount: memoryDistillRuns.dedupedCount, filteredCount: memoryDistillRuns.filteredCount,
+    storedCount: memoryDistillRuns.storedCount, discardedCount: memoryDistillRuns.discardedCount,
+    durationMs: memoryDistillRuns.durationMs, ts: memoryDistillRuns.ts,
+  }
+  const runRows = await db.select(cols).from(memoryDistillRuns)
+    .orderBy(desc(memoryDistillRuns.ts)).limit(limit).all()
+  if (runRows.length === 0) return []
+  const jobRows = await db.select().from(memoryDistillJobs)
+    .where(inArray(memoryDistillJobs.id, runRows.map((r) => r.distillJobId))).all()
+  const jobById = new Map(jobRows.map((j) => [j.id, j]))
+  return runRows.map((r) => {
+    const j = jobById.get(r.distillJobId)
+    return {
+      distillJobId: r.distillJobId, outcome: r.outcome as DistillOutcome,
+      rawCount: r.rawCount, acceptedCount: r.acceptedCount, dedupedCount: r.dedupedCount,
+      filteredCount: r.filteredCount, storedCount: r.storedCount, discardedCount: r.discardedCount,
+      durationMs: r.durationMs, ts: r.ts,
+      cwd: j?.cwd ?? null, runtime: j?.runtime ?? '', createdAt: j?.createdAt ?? 0,
+      sourceAgentId: j?.sourceAgentId ?? null,
+    }
+  })
 }
