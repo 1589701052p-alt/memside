@@ -3,7 +3,7 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDiscards, memoryDistillInputs } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDiscards, memoryDistillInputs, memoryDistillRuns } from '@/db/schema'
 import type { TranscriptTurn } from '@/memory/pure'
 import { createCandidate, listApprovedByScope, getMemoryById, listForDedupByScope, DEDUP_EXISTING_LIMIT, logDiscards, getSessionOffset, setSessionOffset, saveSourceInput, getSourceInput } from '@/memory/store'
 
@@ -219,4 +219,13 @@ test('getSourceInput returns null on malformed turns_json (deser failure, no cra
   }).run()
   const snap = await getSourceInput(db, 'job-bad')
   expect(snap).toBeNull()
+})
+
+test('openDb creates memory_distill_runs with all columns', () => {
+  const cols = (db.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[])
+    .map((r) => r.name)
+  expect(cols).toEqual(expect.arrayContaining([
+    'distill_job_id', 'outcome', 'raw_output_json', 'distilled_count', 'accepted_count',
+    'deduped_count', 'filtered_count', 'stored_count', 'discarded_count', 'duration_ms', 'ts',
+  ]))
 })
