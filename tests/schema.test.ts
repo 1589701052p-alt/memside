@@ -1,5 +1,6 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
-import { rmSync, mkdirSync } from 'node:fs'
+import { rmSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { openDb, type DbClient } from '@/db/client'
@@ -321,4 +322,14 @@ test('migration adds error_message to pre-existing memory_distill_runs, idempote
   const reopened = openDb(dbPath)
   expect((reopened.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]).some((c) => c.name === 'error_message')).toBe(true)
   reopened.$client.close()
+})
+
+test('app_settings table exists with expected columns (idempotent on reopen)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'memside-schema-'))
+  const p = join(dir, 't.db')
+  openDb(p).$client.close()
+  const db = openDb(p) // 二次打开：迁移幂等不抛错
+  const raw = (db as any).$client as import('bun:sqlite').Database
+  const cols = raw.prepare("PRAGMA table_info(app_settings)").all() as { name: string }[]
+  expect(cols.map((c) => c.name).sort()).toEqual(['key', 'updated_at', 'value'])
 })
