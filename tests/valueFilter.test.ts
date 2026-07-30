@@ -97,6 +97,13 @@ test('judgeValue treats hallucinated category as keep+null', async () => {
   expect(v).toEqual([{ index: 0, keep: true, valueClass: null }])
 })
 
+test('judgeValue hallucinated category on user-stated -> keep+decision (immune to bulk-reject, spec §R3)', async () => {
+  // 回归锁（final-review I-1）：per-verdict 幻觉类别兜底必须与 keepNull 一致--
+  // stated/confirmed -> decision（免疫「批量拒绝未评估」），不得退回 null。
+  const v = await judgeValue([cand('a', 'user-stated')], async () => verdictsJson({ index: 0, category: 'nonsense' }))
+  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+})
+
 test('judgeValue treats missing category as keep+null', async () => {
   const v = await judgeValue([cand('a')], async () => verdictsJson({ index: 0 }))
   expect(v).toEqual([{ index: 0, keep: true, valueClass: null }])

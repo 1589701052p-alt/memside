@@ -169,7 +169,10 @@ async function judgeValueBase(
       const o = v as { index?: unknown; category?: unknown }
       if (typeof o.index !== 'number' || o.index < 0 || o.index >= n) continue
       if (typeof o.category !== 'string' || !VALID_CATEGORIES.has(o.category)) {
-        byIndex.set(o.index, { index: o.index, keep: true, valueClass: null })
+        // 与 keepNull 一致（spec §R3）：stated/confirmed -> decision（免疫批量拒绝未评估），
+        // observed -> null。幻觉类别兜底不能比 LLM-整体失败兜底更弱。
+        byIndex.set(o.index, { index: o.index, keep: true,
+          valueClass: candidates[o.index]!.origin === 'agent-observed' ? null : ('decision' as ValueClass) })
         continue
       }
       if (DISCARD_CATEGORIES.has(o.category)) {
