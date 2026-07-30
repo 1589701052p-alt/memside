@@ -43,3 +43,27 @@ export function formatSourceTurn(turn: { role: string; content?: string; isError
   if (turn.role === 'tool') return { label: 'tool', color: turn.isError ? '#c00' : '#666' }
   return { label: turn.role, color: '#666' }
 }
+
+export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced'
+
+/**
+ * 蒸馏记录 outcome 四态 -> 徽标 { label, color }。produced 绿 / empty_output 灰 /
+ * llm_error 红 / skipped 浅灰。纯函数，可单测（CLAUDE.md「首选可断言面」）。
+ *
+ * 设计依据：docs/superpowers/specs/2026-07-29-distill-work-record-design.md §7。
+ */
+export function formatOutcome(outcome: DistillOutcome): { label: string; color: string } {
+  if (outcome === 'produced') return { label: '产出', color: '#2e7d32' }
+  if (outcome === 'empty_output') return { label: '空产出', color: '#666' }
+  if (outcome === 'llm_error') return { label: 'LLM错误', color: '#c00' }
+  return { label: '跳过', color: '#999' }
+}
+
+/**
+ * 计数链 distilled->deduped->filtered->stored 渲染为「N->M->K->J」。
+ * 直观显示候选在哪一步被杀光。accepted_count（格式校验后）不在链中，由遮罩层
+ * hint 用 rawCount vs acceptedCount 体现。纯函数，可单测。
+ */
+export function formatRunCounts(c: { distilled: number; deduped: number; filtered: number; stored: number }): string {
+  return `${c.distilled}->${c.deduped}->${c.filtered}->${c.stored}`
+}
