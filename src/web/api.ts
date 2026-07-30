@@ -226,3 +226,42 @@ export async function getDistillRunSourceInput(
   if (!res.ok) return null
   return (await res.json()) as { turnCount: number; charCount: number; turns: SourceTurn[] }
 }
+
+// --- LLM 设置（凭证 UI 配置）client -------------------------------------------
+
+export interface LlmSettingsState {
+  saved: { baseURL: string | null; model: string | null; tokenMasked: string } | null
+  effective: { source: string; baseURL: string | null; model: string | null; tokenMasked: string } | null
+}
+
+/** GET /api/settings/llm — saved = UI 配置（打码）；effective = 当前凭证链生效级。 */
+export async function getLlmSettings(fetchFn: FetchLike = fetch): Promise<LlmSettingsState> {
+  const res = await fetchFn('/api/settings/llm')
+  return (await res.json()) as LlmSettingsState
+}
+
+/** PUT /api/settings/llm — 字段级合并；clear:true 删除整级。返回最新状态。 */
+export async function saveLlmSettings(
+  body: { baseURL?: string; token?: string; model?: string; clear?: boolean },
+  fetchFn: FetchLike = fetch,
+): Promise<LlmSettingsState> {
+  const res = await fetchFn('/api/settings/llm', {
+    method: 'PUT',
+    body: JSON.stringify(body),
+    headers: { 'content-type': 'application/json' },
+  })
+  return (await res.json()) as LlmSettingsState
+}
+
+/** POST /api/settings/llm/test — 不保存，当场验证凭证。空 body 测已保存配置。 */
+export async function testLlmConnection(
+  body: { baseURL?: string; token?: string; model?: string },
+  fetchFn: FetchLike = fetch,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetchFn('/api/settings/llm/test', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: { 'content-type': 'application/json' },
+  })
+  return (await res.json()) as { ok: boolean; error?: string }
+}

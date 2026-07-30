@@ -1,3 +1,5 @@
+// 回归防护（2026-07-30 事故）：settings.json 必须先于进程 env；
+// UI 配置必须最高优先。spec: docs/superpowers/specs/2026-07-30-llm-settings-ui-design.md
 import { test, expect, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -118,7 +120,7 @@ test('(b) settings.json env with authToken+baseURL+defaultHaikuModel is picked f
   expect(c.source).toBe('settings.json:authToken')
 })
 
-test('(c) process env ANTHROPIC_API_KEY wins over settings.json authToken', () => {
+test('(c) settings.json authToken 优先于进程 env ANTHROPIC_API_KEY（2026-07-30 事故后链重排）', () => {
   writeFileSync(
     join(fakeHome, '.claude', 'settings.json'),
     JSON.stringify({
@@ -129,13 +131,13 @@ test('(c) process env ANTHROPIC_API_KEY wins over settings.json authToken', () =
       },
     }),
   )
-  process.env.ANTHROPIC_API_KEY = 'sk-env-wins'
+  process.env.ANTHROPIC_API_KEY = 'sk-env-loses'
   const c = loadClaudeCreds()
-  expect(c.apiKey).toBe('sk-env-wins')
-  expect(c.source).toBe('env:apiKey')
-  // env apiKey path does not read baseURL/model from settings.json; only its own env
-  expect(c.baseURL).toBeUndefined()
-  expect(c.model).toBeUndefined()
+  // settings.json 级整体先于进程 env 级（整级短路）：返回 settings.json 的 authToken
+  expect(c.apiKey).toBe('ark-from-settings')
+  expect(c.source).toBe('settings.json:authToken')
+  expect(c.baseURL).toBe('https://ark.example.com/api/plan')
+  expect(c.model).toBe('deepseek-v4-flash[1m]')
 })
 
 test('(d) ANTHROPIC_DEFAULT_HAIKU_MODEL preferred over ANTHROPIC_MODEL for the model field', () => {
@@ -190,4 +192,58 @@ test('settings.json with non-string env values drops them', () => {
 
 test('missing settings.json yields empty env map', () => {
   expect(loadSettingsEnv()).toEqual({})
+})
+
+// --- Task 2: creds 链重排 + UI 级（settings.json 先于 env） ---
+
+test('(f) settings.json authToken 优先于进程 env（事故回归：持久 env 不得静默劫持）', () => {
+  // settings.json 与进程 env 同时存在 authToken：settings.json 必须先赢
+  writeFileSync(
+    join(fakeHome, '.claude', 'settings.json'),
+    JSON.stringify({
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'sk-settings-token',
+        ANTHROPIC_BASE_URL: 'https://settings.example.com',
+      },
+    }),
+  )
+  process.env.ANTHROPIC_AUTH_TOKEN = 'sk-env-token'
+  process.env.ANTHROPIC_BASE_URL = 'https://env.example.com'
+  const c = loadClaudeCreds()
+  expect(c.apiKey).toBe('sk-settings-token')
+  expect(c.baseURL).toBe('https://settings.example.com')
+  expect(c.source).toBe('settings.json:authToken')
+})
+
+test('(g) UI 配置整级短路：token 非空即生效，source=ui', () => {
+  // UI 级还必须盖过 settings.json / env —— 同场布置底层干扰项
+  writeFileSync(
+    join(fakeHome, '.claude', 'settings.json'),
+    JSON.stringify({
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'sk-settings-token',
+        ANTHROPIC_BASE_URL: 'https://settings.example.com',
+      },
+    }),
+  )
+  process.env.ANTHROPIC_AUTH_TOKEN = 'sk-env-token'
+  const c = loadClaudeCreds({ token: 'sk-ui-token-123456', baseURL: 'https://ui.example.com', model: 'ui-model' })
+  expect(c).toEqual({ apiKey: 'sk-ui-token-123456', baseURL: 'https://ui.example.com', model: 'ui-model', source: 'ui' })
+})
+
+test('(h) UI 配置 baseURL/model 缺省 -> 不携带（调用方回默认）', () => {
+  const c = loadClaudeCreds({ token: 'sk-ui-token-123456' })
+  expect(c.apiKey).toBe('sk-ui-token-123456')
+  expect(c.baseURL).toBeUndefined()
+  expect(c.model).toBeUndefined()
+  expect(c.source).toBe('ui')
+})
+
+test('(i) uiConfig 为 null / token 为空 -> 落到兜底链', () => {
+  process.env.ANTHROPIC_API_KEY = 'sk-env-456'
+  const a = loadClaudeCreds(null)
+  const b = loadClaudeCreds({})
+  // 两者均不得返回 source='ui'；具体落哪级由本用例的 mock 环境决定，断言不短路即可
+  expect(a.source).not.toBe('ui')
+  expect(b.source).not.toBe('ui')
 })

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
 import { desc, inArray } from 'drizzle-orm'
 import { join } from 'node:path'
+import { z } from 'zod'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
@@ -9,6 +10,9 @@ import type { MemoryStatus } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, MemoryNotFoundError } from '@/memory/store'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import type { EnqueueInput } from '@/scheduler'
+import { loadUiLlmConfig, saveUiLlmConfig, maskToken, type UiLlmConfig } from '@/settings'
+import { loadClaudeCreds, type ClaudeCreds } from './creds'
+import { testConnection as defaultTestConnection } from './anthropic'
 
 export interface AppDeps {
   db: DbClient
@@ -19,6 +23,12 @@ export interface AppDeps {
    * `GET /` 返回 index.html、`/assets/*` 走 serveStatic；不提供时行为与
    * 之前完全一致（vite dev 模式走 5173，不需要 daemon 托管）。 */
   staticDir?: string
+  /** LLM 设置端点的注入点（均可选，缺省走真实实现；测试注入假实现，
+   * 不碰真实 ~/.claude 与网络）。 */
+  loadUiConfig?: () => UiLlmConfig | null
+  saveUiConfig?: (patch: { baseURL?: string; token?: string; model?: string; clear?: boolean }) => void
+  loadEffectiveCreds?: () => ClaudeCreds
+  testConnection?: (cfg: { baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
 }
 
 /**
@@ -70,6 +80,38 @@ export interface AppDeps {
  */
 export function createApp(deps: AppDeps) {
   const app = new Hono()
+
+  // LLM 设置端点的依赖解析（缺省走真实实现）：
+  // - loadUi/saveUi：app_settings 表读写（Task 1 的 loadUiLlmConfig/saveUiLlmConfig）。
+  // - loadEff：四级凭证链（Task 2 的 loadClaudeCreds，UI 级整级短路）。
+  // - testConn：最小请求探测（Task 3 的 testConnection）。
+  const loadUi = deps.loadUiConfig ?? (() => loadUiLlmConfig(deps.db))
+  const saveUi = deps.saveUiConfig ?? ((patch: { baseURL?: string; token?: string; model?: string; clear?: boolean }) => saveUiLlmConfig(deps.db, patch))
+  const loadEff = deps.loadEffectiveCreds ?? (() => loadClaudeCreds(loadUi()))
+  const testConn = deps.testConnection ?? defaultTestConnection
+
+  /** GET/PUT 共用的响应形状（Task 6/7 依赖）。token 只回 maskToken 打码，
+   * 永不回明文（spec 硬约束）。loadUi 读异常降级 saved:null——GET 不得因
+   * 存储读异常 500（spec）；loadEff 异常同理降级 effective:null。 */
+  const buildState = () => {
+    let saved: UiLlmConfig | null = null
+    try { saved = loadUi() } catch { /* 存储异常降级 saved:null，不 500（spec） */ }
+    let effective: ClaudeCreds | null = null
+    try { const c = loadEff(); effective = c.apiKey ? c : null } catch { effective = null }
+    return {
+      saved: saved?.token
+        ? { baseURL: saved.baseURL ?? null, model: saved.model ?? null, tokenMasked: maskToken(saved.token) }
+        : null,
+      effective: effective?.apiKey
+        ? {
+            source: effective.source,
+            baseURL: effective.baseURL ?? null,
+            model: effective.model ?? null,
+            tokenMasked: maskToken(effective.apiKey),
+          }
+        : null,
+    }
+  }
 
   // --- Collector ----------------------------------------------------------
   app.post('/hooks/claude/:event', async (c) => {
@@ -345,6 +387,46 @@ export function createApp(deps: AppDeps) {
     const snap = await getSourceInput(deps.db, c.req.param('jobId'))
     if (!snap) return c.json({ error: 'not found' }, 404)
     return c.json({ turnCount: snap.turnCount, charCount: snap.charCount, turns: snap.turns })
+  })
+
+  // --- LLM settings (Web UI 凭证配置) --------------------------------------
+  // saved = UI 级（app_settings 表），effective = 四级凭证链实际生效级；
+  // 两者都只回打码 token。PUT 走字段级合并（token 缺省保持已存值；clear 清整级）；
+  // baseURL 限 http(s)（'' 允许 = 回默认端点）。saveUi 抛错（DB 写失败）自然 500，
+  // 但 buildState 内的读异常已降级（见上）。
+  app.get('/api/settings/llm', (c) => c.json(buildState()))
+
+  const putSchema = z.object({
+    baseURL: z.string().regex(/^https?:\/\//, 'baseURL must be http(s) URL').optional().or(z.literal('')),
+    token: z.string().optional(),
+    model: z.string().optional(),
+    clear: z.boolean().optional(),
+  })
+  app.put('/api/settings/llm', async (c) => {
+    const parsed = putSchema.safeParse(await c.req.json().catch(() => ({})))
+    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? 'invalid body' }, 400)
+    saveUi(parsed.data)
+    return c.json(buildState())
+  })
+
+  // 「测试连接」：body 字段缺省时回落到已保存的 UI 级配置；解析不出 token ->
+  // {ok:false,error:'no credentials'}（HTTP 200——这是业务结果不是请求错误）。
+  // body 里的 token 只用于本次探测，不落存储。
+  const testSchema = z.object({
+    baseURL: z.string().optional(),
+    token: z.string().optional(),
+    model: z.string().optional(),
+  })
+  app.post('/api/settings/llm/test', async (c) => {
+    const body = testSchema.parse(await c.req.json().catch(() => ({})))
+    const saved = loadUi()
+    const cfg = {
+      baseURL: body.baseURL ?? saved?.baseURL,
+      token: body.token ?? saved?.token,
+      model: body.model ?? saved?.model,
+    }
+    if (!cfg.token) return c.json({ ok: false, error: 'no credentials' })
+    return c.json(await testConn({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model }))
   })
 
   // --- Archive / unarchive / restore --------------------------------------

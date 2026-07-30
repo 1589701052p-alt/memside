@@ -142,3 +142,9 @@ export const memoryDistillRuns = sqliteTable(
     ts: integer('ts').notNull(),
   },
 )
+
+export const appSettings = sqliteTable('app_settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+})

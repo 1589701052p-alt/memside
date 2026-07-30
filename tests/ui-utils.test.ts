@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -128,4 +128,15 @@ test('formatOutcome maps four outcomes to label + color', () => {
 test('formatRunCounts renders distilled->deduped->filtered->stored chain', () => {
   expect(formatRunCounts({ distilled: 5, deduped: 3, filtered: 1, stored: 1 })).toBe('5->3->1->1')
   expect(formatRunCounts({ distilled: 0, deduped: 0, filtered: 0, stored: 0 })).toBe('0->0->0->0')
+})
+
+// --- llmSourceLabel ---
+// LLM 设置区块生效回显行的来源标签映射。纯函数，可单测（CLAUDE.md「首选可断言面」）。
+test('llmSourceLabel 映射各来源', () => {
+  expect(llmSourceLabel('ui')).toBe('UI 配置')
+  expect(llmSourceLabel('settings.json:authToken')).toBe('settings.json')
+  expect(llmSourceLabel('settings.json:apiKey')).toBe('settings.json')
+  expect(llmSourceLabel('env:authToken')).toBe('进程 env')
+  expect(llmSourceLabel('credentials.json:apiKey')).toBe('credentials.json')
+  expect(llmSourceLabel(null)).toBe('未配置')
 })

@@ -10,6 +10,7 @@ import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
 import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
 import { resolveLLMBackend, type LLMCall } from '@/llm'
+import { loadUiLlmConfig } from './settings'
 import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
@@ -65,11 +66,19 @@ interface ResolveCallLLMDeps {
  * `callLLM`。可选注入两套 creds 供测试避开网络；不传则各 `makeLLMCall` 用各自默认
  * loader（anthropic 读 `~/.claude` + env；openai 读 env）。后端选择逻辑由
  * `resolveLLMBackend` 单测覆盖（tests/llm.test.ts）；本函数是薄胶水。
+ *
+ * 传入 `db` 时，anthropic 链额外注入 db-backed `loadUiConfig`（UI 设置页写入的
+ * 凭证经 `loadClaudeCreds(uiConfig)` 整级短路生效）。DB 读取异常降级为无 UI 级
+ * （返回 null），不沿 LLM 调用路径炸掉 distill——与全项目「存储异常降级」一致。
+ * openai 后端路径不接 UI 配置（已知限制，见 plan Global Constraints）。
  */
-function resolveCallLLM(deps: ResolveCallLLMDeps = {}): LLMCall {
+function resolveCallLLM(deps: ResolveCallLLMDeps = {}, db?: DbClient): LLMCall {
   return resolveLLMBackend(process.env) === 'openai'
     ? makeOpenAiCall(deps.loadOpenAiCreds ? { loadOpenAiCreds: deps.loadOpenAiCreds } : {})
-    : makeAnthropicCall(deps.loadClaudeCreds ? { loadClaudeCreds: deps.loadClaudeCreds } : {})
+    : makeAnthropicCall({
+        ...(deps.loadClaudeCreds ? { loadClaudeCreds: deps.loadClaudeCreds } : {}),
+        ...(db ? { loadUiConfig: () => { try { return loadUiLlmConfig(db) } catch { return null } } } : {}),
+      })
 }
 
 /**
@@ -89,7 +98,7 @@ export async function runDistillOnce(
     callLLM?: LLMCall
   } = {},
 ): Promise<number> {
-  const callLLM = deps.callLLM ?? resolveCallLLM({ loadClaudeCreds: deps.loadClaudeCreds, loadOpenAiCreds: deps.loadOpenAiCreds })
+  const callLLM = deps.callLLM ?? resolveCallLLM({ loadClaudeCreds: deps.loadClaudeCreds, loadOpenAiCreds: deps.loadOpenAiCreds }, db)
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
     callLLM,
@@ -146,7 +155,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
 
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
-    callLLM: resolveCallLLM(),
+    callLLM: resolveCallLLM({}, db),
     createCandidate,
   }
   const stopLoop = startMemoryDistillLoop(db, tickDeps)

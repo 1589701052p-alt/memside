@@ -67,3 +67,13 @@ export function formatOutcome(outcome: DistillOutcome): { label: string; color: 
 export function formatRunCounts(c: { distilled: number; deduped: number; filtered: number; stored: number }): string {
   return `${c.distilled}->${c.deduped}->${c.filtered}->${c.stored}`
 }
+
+/** LLM 凭证来源标签（生效回显行用）。null = 凭证链无可用凭证。 */
+export function llmSourceLabel(source: string | null): string {
+  if (source === null) return '未配置'
+  if (source === 'ui') return 'UI 配置'
+  if (source.startsWith('settings.json')) return 'settings.json'
+  if (source.startsWith('env')) return '进程 env'
+  if (source.startsWith('credentials.json')) return 'credentials.json'
+  return source
+}

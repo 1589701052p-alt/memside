@@ -418,3 +418,15 @@ review verdict=Clean，1 条 Minor 注释 finding 一轮 fix wave 修后 scoped 
 非配置错误（用 settings.json 凭证实调简单调用 + distiller 真实 prompt 均成功）。本需求
 不解决 Ark 稳定性（外部服务），只让间歇失败时错误可见、可诊断。
 
+## LLM 凭证 UI 配置（2026-07-30）
+
+实现 LLM 凭证的 Web UI 配置与优先级修复（分支 `feat/llm-settings-ui`）。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-07-30-llm-settings-ui*`（8 个 task）。
+
+- **事故根因**：Windows 用户级持久 env 残留过期中转站配置，旧优先级「进程 env > settings.json」
+  导致其静默劫持有效凭证，全部 distill 401。
+- **修复方式**：UI 配置最高优先 + settings.json 先于 env + UI 常驻「当前生效」回显行，
+  让被 env 劫持的过期配置可被用户直接看见。
+
+执行：`bun run typecheck && bun test` 518/518 全绿。
+
