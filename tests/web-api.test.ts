@@ -169,17 +169,34 @@ test('getDistillRun returns errorMessage in detail', async () => {
 // without persisting them.
 
 test('getLlmSettings 解析 saved/effective', async () => {
-  const state = await getLlmSettings(async () => new Response(JSON.stringify({
-    saved: { baseURL: 'https://a', model: 'm', tokenMasked: 'sk-kim…5678fh' },
-    effective: { source: 'ui', baseURL: 'https://a', model: 'm', tokenMasked: 'sk-kim…5678fh' },
-  })) as Response)
+  let captured: { url: string; method: string } | null = null
+  const fetchFn = (async (url: string, init: any) => {
+    captured = { url, method: init?.method ?? 'GET' }
+    return new Response(JSON.stringify({
+      saved: { baseURL: 'https://a', model: 'm', tokenMasked: 'sk-kim…5678fh' },
+      effective: { source: 'ui', baseURL: 'https://a', model: 'm', tokenMasked: 'sk-kim…5678fh' },
+    }))
+  }) as any
+  const state = await getLlmSettings(fetchFn)
+  expect(captured!.url).toBe('/api/settings/llm')
+  expect(captured!.method).toBe('GET')
   expect(state.effective?.source).toBe('ui')
 })
 
-test('saveLlmSettings PUT 序列化 body（含 clear）', async () => {
-  let seen: any
-  await saveLlmSettings({ clear: true }, (async (_url: string, init: { body?: BodyInit }) => { seen = JSON.parse(String(init?.body)); return new Response('{}') }) as any)
-  expect(seen).toEqual({ clear: true })
+test('saveLlmSettings PUT 序列化 body（含 clear）并返回最新状态', async () => {
+  const returned = {
+    saved: null,
+    effective: { source: 'settings.json', baseURL: 'https://b', model: 'm2', tokenMasked: 'sk-sets…json' },
+  } as const
+  let captured: { url: string; method: string; body: any } | null = null
+  const result = await saveLlmSettings({ clear: true }, (async (_url: string, init: { method?: string; body?: BodyInit }) => {
+    captured = { url: _url, method: init.method!, body: JSON.parse(String(init.body)) }
+    return new Response(JSON.stringify(returned))
+  }) as any)
+  expect(captured!.url).toBe('/api/settings/llm')
+  expect(captured!.method).toBe('PUT')
+  expect(captured!.body).toEqual({ clear: true })
+  expect(result).toEqual(returned)
 })
 
 test('testLlmConnection POST 到 /api/settings/llm/test 并透传 {ok,error}', async () => {
