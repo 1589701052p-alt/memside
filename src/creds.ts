@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import type { UiLlmConfig } from './settings'
 
 export interface ClaudeCreds {
   apiKey: string | null
@@ -113,32 +114,38 @@ export function loadSettingsEnv(): Record<string, string> {
 /**
  * Load claude code credentials for calling the Anthropic API.
  *
- * Order of resolution:
- *   1. Process env `ANTHROPIC_API_KEY` (official key; explicit override wins).
- *      If `ANTHROPIC_BASE_URL` is also set it is carried through; `model` is
- *      `ANTHROPIC_DEFAULT_HAIKU_MODEL` || `ANTHROPIC_MODEL` if set.
- *      source=`'env:apiKey'`.
- *   2. Process env `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` (proxy auth,
- *      e.g. Volcengine Ark). apiKey=token, baseURL carried, model resolved as
- *      above. source=`'env:authToken'`.
- *   3. `~/.claude/settings.json`'s `env` object - the same apiKey-then-authToken
- *      preference applied over the settings env values. source=
- *      `'settings.json:apiKey'` / `'settings.json:authToken'`.
- *   4. `~/.claude/.credentials.json` - claude code stores the key here on most
- *      Windows/Linux installs. The exact shape varies by version, so several
- *      known shapes are tried: `apiKeyHelper.apiKey`, `claudeAiOauth.accessToken`,
- *      and a top-level `apiKey`. No baseURL/model is derivable here, so the
- *      call site falls back to `DISTILL_MODEL` and the SDK default base URL.
+ * 解析顺序（2026-07-30 重排，spec: docs/superpowers/specs/2026-07-30-llm-settings-ui-design.md）：
+ *   1. UI 配置（uiConfig 参数，daemon 从 app_settings 表读；token 非空整级短路，
+ *      baseURL/model 缺省则不携带 -> 调用方回官方端点 / DISTILL_MODEL）。
+ *      source=`'ui'`。
+ *   2. `~/.claude/settings.json` 的 env 块（用户主动维护的文件，先于 env）——
+ *      同一 apiKey-then-authToken 偏好应用在 settings env 值上。source=
+ *      `'settings.json:apiKey'` / `'settings.json:authToken'`。
+ *   3. 进程 env（持久 env 残留不得再静默劫持 settings.json —— 2026-07-30 事故）：
+ *      `ANTHROPIC_API_KEY`（source=`'env:apiKey'`）或
+ *      `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`（source=`'env:authToken'`）。
+ *   4. `~/.claude/.credentials.json`（形状探测，不变）——`apiKeyHelper.apiKey` /
+ *      `claudeAiOauth.accessToken` / 顶层 `apiKey`。此处无法推导 baseURL/model，
+ *      调用方回退到 `DISTILL_MODEL` 与 SDK 默认 base URL。
  *   5. null - the distiller logs a "configure credentials" message (Task 14).
  *
- * Never throws: malformed files are swallowed and treated as null.
+ * 不抛异常：任何文件读取/解析失败降级到下一级。
  */
-export function loadClaudeCreds(): ClaudeCreds {
-  const fromProc = pickFromEnv(process.env, 'env')
-  if (fromProc) return fromProc
+export function loadClaudeCreds(uiConfig?: UiLlmConfig | null): ClaudeCreds {
+  if (uiConfig?.token) {
+    return {
+      apiKey: uiConfig.token,
+      ...(uiConfig.baseURL ? { baseURL: uiConfig.baseURL } : {}),
+      ...(uiConfig.model ? { model: uiConfig.model } : {}),
+      source: 'ui',
+    }
+  }
 
   const fromSettings = pickFromEnv(loadSettingsEnv(), 'settings.json')
   if (fromSettings) return fromSettings
+
+  const fromProc = pickFromEnv(process.env, 'env')
+  if (fromProc) return fromProc
 
   const credPath = join(resolveHome(), '.claude', '.credentials.json')
   if (existsSync(credPath)) {
