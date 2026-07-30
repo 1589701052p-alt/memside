@@ -97,6 +97,7 @@ export function openDb(path: string) {
       stored_count     INTEGER NOT NULL,
       discarded_count  INTEGER NOT NULL,
       duration_ms      INTEGER NOT NULL,
+      error_message    TEXT,
       ts               INTEGER NOT NULL
     );
   `)
@@ -214,6 +215,14 @@ export function openDb(path: string) {
         raw.exec('ROLLBACK')
         throw e
       }
+    }
+  }
+  // Idempotent migration: add error_message to pre-existing memory_distill_runs.
+  // llm_error 时存 LLM 调用错误描述（spec 数据模型）。无 backfill（老行 NULL）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'error_message')) {
+      raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN error_message TEXT')
     }
   }
   return db

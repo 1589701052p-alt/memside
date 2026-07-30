@@ -138,6 +138,7 @@ export const memoryDistillRuns = sqliteTable(
     storedCount: integer('stored_count').notNull(),
     discardedCount: integer('discarded_count').notNull(),
     durationMs: integer('duration_ms').notNull(),
+    errorMessage: text('error_message'),   // 新增：nullable；llm_error 时存错误描述，其余 null
     ts: integer('ts').notNull(),
   },
 )
