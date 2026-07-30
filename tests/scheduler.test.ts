@@ -286,6 +286,33 @@ test('tick passes valueClass into createCandidate for kept candidates', async ()
   expect(captured.valueClass).toBe('decision')
 })
 
+test('tick 入库候选携带 origin/evidence（用户陈述类端到端入库）', async () => {
+  // Task 4（origin-driven value judgment）：distill 产出的 origin/evidence 必须随
+  // createCandidate 入库（spec §模块改动点 3）。用既有 tick harness：enqueue job +
+  // fake loadTranscript + callCount 分派 mock。distill 返回一条 origin='user-stated'、
+  // evidence='任何改动必须走分支+PR' 的候选；无 existing -> dedup 短路；judgeValue
+  // 返回 keep（category=decision）。断言 createCandidate 收到的 input.origin /
+  // input.evidence 与候选一致（断言聚焦 origin/evidence 流转，不强约束 valueClass）。
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: '任何改动必须走分支+PR' }], fullLength: 1 }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:convention] 任何改动必须走分支+PR', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: '任何改动必须走分支+PR' }] })
+      // callCount === 2: judgeValue（dedup 无 existing 短路，不调 LLM）-> keep
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(callCount).toBe(2) // distill + judgeValue；dedup 短路
+  expect(captured).not.toBeNull()
+  expect(captured.origin).toBe('user-stated')
+  expect(captured.evidence).toBe('任何改动必须走分支+PR')
+})
+
 test('tick keeps all as valueClass=null when judgeValue LLM throws, job still done', async () => {
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
