@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard } from '@/web/api'
+import { listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard, listDistillRuns, getDistillRun, getDistillRunSourceInput } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
 // not unit-tested; this client is the testable seam — a `fetchFn` param lets
@@ -114,4 +114,32 @@ test('promoteDiscard POSTs /api/discards/:id/promote', async () => {
   await promoteDiscard('d1', fetchFn)
   expect(captured!.url).toBe('/api/discards/d1/promote')
   expect(captured!.method).toBe('POST')
+})
+
+// --- Task 6: distill runs client (工作记录透明化) ---
+
+test('listDistillRuns calls GET /api/distill-runs', async () => {
+  let called = ''
+  const fake = async (url: string) => { called = url; return new Response(JSON.stringify({ items: [{ distillJobId: 'j1', outcome: 'produced' }] }), { status: 200 }) }
+  const rows = await listDistillRuns(fake as any)
+  expect(called).toBe('/api/distill-runs')
+  expect(rows.length).toBe(1)
+  expect(rows[0].distillJobId).toBe('j1')
+})
+
+test('getDistillRun calls GET /api/distill-runs/:jobId', async () => {
+  let called = ''
+  const fake = async (url: string) => { called = url; return new Response(JSON.stringify({ distillJobId: 'j1', outcome: 'produced', rawOutput: { candidates: [] } }), { status: 200 }) }
+  const r = await getDistillRun('j1', fake as any)
+  expect(called).toBe('/api/distill-runs/j1')
+  expect(r.distillJobId).toBe('j1')
+  expect(r.rawOutput).toBeDefined()
+})
+
+test('getDistillRunSourceInput returns null on 404', async () => {
+  let called = ''
+  const fake = async (url: string) => { called = url; return new Response('not found', { status: 404 }) }
+  const r = await getDistillRunSourceInput('j1', fake as any)
+  expect(called).toBe('/api/distill-runs/j1/source-input')
+  expect(r).toBeNull()
 })
