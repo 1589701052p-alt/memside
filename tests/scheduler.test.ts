@@ -1033,3 +1033,45 @@ test('tick still marks done when saveDistillRun throws', async () => {
   const job = db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).all()[0]!
   expect(job.status).toBe('done')
 })
+
+// ---------------------------------------------------------------------------
+// Task 4（distill-error-capture）：scheduler 接线 errorMessage。
+// llm_error 时 distill run 记 errorMessage + job.last_error 回写（/api/status
+// 的 lastError 查 j.lastError 非空 -> 顶部状态栏能看到 LLM 错误）；produced
+// 不写 job.last_error（回归锁：避免成功 job 被误标错误）。
+// ---------------------------------------------------------------------------
+
+test('llm_error: scheduler writes errorMessage to distill run + job.last_error', async () => {
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId)).run()
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    callLLM: async () => { throw new Error('500 Internal Server Error') },
+    createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
+  })
+  // distill run 记录 errorMessage
+  const run = await db.select().from(memoryDistillRuns).where(eq(memoryDistillRuns.distillJobId, jobId)).all()
+  expect(run[0]!.outcome).toBe('llm_error')
+  expect(run[0]!.errorMessage).toBe('500 Internal Server Error')
+  // job.last_error 回写（/api/status lastError 生效）
+  const job = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).all()
+  expect(job[0]!.lastError).toBe('500 Internal Server Error')
+  expect(job[0]!.status).toBe('done')
+})
+
+test('produced: scheduler does NOT write job.last_error', async () => {
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId)).run()
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund 14 days' }], fullLength: 1 }),
+    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] 14d', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
+  })
+  const job = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).all()
+  expect(job[0]!.lastError).toBeNull()
+  expect(job[0]!.status).toBe('done')
+})

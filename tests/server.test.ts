@@ -599,7 +599,7 @@ test('POST /api/discards/:id/promote on missing id returns 404', async () => {
 // /api/status 增 distillRuns 计数（按 outcome 分桶、近 24h）。
 async function seedRunRow(jobId: string, outcome: string, cwd = '/repo', agentId: string | null = null) {
   await db.insert(memoryDistillJobs).values({ id: jobId, debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd, sourceAgentId: agentId, status: 'done', attempts: 0, nextRunAt: 0, createdAt: 100, finishedAt: 200 })
-  await saveDistillRun(db, jobId, { outcome: outcome as any, rawOutput: { candidates: [{ title: '[category:convention] x' }] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 5 })
+  await saveDistillRun(db, jobId, { outcome: outcome as any, rawOutput: { candidates: [{ title: '[category:convention] x' }] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 5, errorMessage: null })
 }
 
 test('GET /api/distill-runs lists runs without rawOutput', async () => {
@@ -644,4 +644,27 @@ test('GET /api/status includes distillRuns counts', async () => {
   expect(r.status).toBe(200)
   expect(r.body.distillRuns).toBeDefined()
   expect(r.body.distillRuns.total).toBeGreaterThanOrEqual(2)
+})
+
+// --- Task 5: distill-error-capture -- errorMessage 端点验证 ---
+// 锁回归：GET /api/distill-runs/:jobId 和 GET /api/distill-runs 列表自动带出
+// errorMessage（store 层 Task 3 已加字段，server 路由不改代码）。
+test('GET /api/distill-runs/:jobId returns errorMessage', async () => {
+  await saveDistillRun(db, 'job-em1', { outcome: 'llm_error', rawOutput: null, rawCount: 0,
+    acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 42, errorMessage: '500 Internal Server Error' })
+  const res = await app.request('/api/distill-runs/job-em1')
+  const data = await res.json()
+  expect(data.errorMessage).toBe('500 Internal Server Error')
+  expect(data.outcome).toBe('llm_error')
+})
+
+test('GET /api/distill-runs list items include errorMessage', async () => {
+  await saveDistillRun(db, 'job-em2', { outcome: 'llm_error', rawOutput: null, rawCount: 0,
+    acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 1, errorMessage: 'timeout' })
+  const res = await app.request('/api/distill-runs')
+  const data = await res.json()
+  const row = (data.items as any[]).find((r: any) => r.distillJobId === 'job-em2')
+  expect(row?.errorMessage).toBe('timeout')
 })

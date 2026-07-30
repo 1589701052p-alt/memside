@@ -88,3 +88,23 @@ test('App.tsx has distill runs tab + row + modal', () => {
   expect(src).toContain('formatOutcome')   // 徽标纯函数
   expect(src).toContain('formatRunCounts') // 计数链纯函数
 })
+
+// distill-error-capture（2026-07-29）：llm_error 时展示错误描述。
+// DistillRunModal 产出区从纯文案「LLM 调用失败」改为展示 detail.errorMessage
+// （pre 块红色样式），历史 run 无该字段兜底「（无错误描述）」不静默空白。
+// DistillRunRow 在 outcome 徽标下加一行截断错误便于逐个查看。
+// React 组件不单测，源码文本断言锁住 UI 锚点，refactor 删除即变红。
+test('DistillRunModal renders llm_error errorMessage', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  // llm_error 分支展示 errorMessage（非空白兜底）
+  expect(src).toContain('detail.errorMessage')
+  expect(src).toContain('无错误描述')
+})
+
+test('DistillRunRow renders truncated errorMessage for llm_error', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  // 列表行 llm_error 时显示截断错误
+  expect(src).toContain("r.outcome === 'llm_error'")
+  expect(src).toContain('r.errorMessage')
+  expect(src).toContain('textOverflow')
+})

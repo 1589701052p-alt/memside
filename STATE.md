@@ -373,3 +373,48 @@ re-review 全绿）。`bun run typecheck && bun test` 470/470 全绿。
 5. events 表存完整 transcript 的膨胀债务（STATE.md 已知债务#1）仍独立未碰；runs 表
    每行结构化记录体积有界，去门后 inputs 多写 0 产出 job 的过滤版输入（已压缩截断）。
 
+## 蒸馏 LLM 错误捕获与透传（2026-07-29）
+
+distill-work-record 透明化上线后，第 5 tab 显示近期 distill job 全是 llm_error，但点开
+详情是空的--看不到「报了什么错」。诊断发现错误 message 被 callWithRetry（catch 后只拼
+进重试 prompt 不透出）-> distiller（顶层 catch 丢弃）-> scheduler（distiller 不抛 so
+不进外层 catch，job.last_error 不写）链路层层吞掉，加上 callThrew 时 filteredTurns 被清空
+（source input 也丢），llm_error 在最该透明的场景变成黑盒。本需求补错误捕获透传 + 两个
+伴生缺口。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-07-29-distill-error-capture*`。
+
+1. `memory_distill_runs` 加 `error_message TEXT`（nullable）+ 幂等 ALTER 迁移。llm_error
+   时存错误描述（含 HTTP status 若有），其余 outcome null。
+2. `distillTranscript`（方案 2，只动 distiller 不改 callWithRetry）：`wrappedCall` catch
+   记 `lastErrorMessage`（每次 attempt 更新，最后一次留存）；`DistillResult` 加
+   `errorMessage: string | null`；三路径取值--!parsed(callThrew?lastErrorMessage:null) /
+   成功(null，retry-success 显式返回 null 防 attempt 0 残留) / 顶层 catch(e message)。
+3. **filteredTurns 修复**：`callThrew ? [] : filtered` -> `filtered`（callThrew 时不再
+   清空 source input 快照，llm_error job 也能看到喂给模型的 transcript）。
+4. store：`DistillRunRecord`/`Row`/`ListRow` + `saveDistillRun`/`getDistillRun`/
+   `listRecentDistillRuns` 适配 errorMessage。
+5. scheduler：解构 errorMessage + 主路径 saveDistillRun 传 + **llm_error 时回写
+   `memory_distill_jobs.last_error`**（best-effort），修 `/api/status` 的 lastError（原查
+   j.lastError 非空但 llm_error job 的 last_error 为 null，顶部状态栏看不到 LLM 错误）。
+6. server 端点无代码改动（store 加字段后自动带出）；web-api 类型加 errorMessage；Web UI
+   `DistillRunModal` llm_error 分支展示 errorMessage（pre 红色块 + 无值兜底「无错误描述」
+   不空白）+ `DistillRunRow` 列表行截断错误（ellipsis）。
+
+执行：subagent-driven（6 实现 task 各 implementer + reviewer；终审 opus whole-branch
+review verdict=Clean，1 条 Minor 注释 finding 一轮 fix wave 修后 scoped re-review 全绿）。
+`bun run typecheck && bun test` 486/486 全绿。
+
+### 已知 follow-up（本轮 deferred minor，非阻塞）
+
+1. `store-crud.test.ts:266` 测试名「all columns」但 arrayContaining 未含 error_message
+   （列存在性已由 schema.test.ts 覆盖，仅测试名过承诺）。
+2. scheduler done update 从不清 job.lastError（既有行为）--job 失败重试成功后 lastError
+   残留；非本需求引入，独立 follow-up。
+3. `DistillRunRow` 截断错误行 marginTop:2 vs 来源行 marginTop:6 轻微不一致（有意设计）；
+   web-ui 测试只断言 textOverflow 未断言 whiteSpace/overflow（源码层文本断言粒度）。
+4. server.test.ts/web-api.test.ts 新测试风格与邻近测试略不一致（app.request vs req()
+   helper / hand-roll fake vs new Response），no action needed。
+
+诊断附注：根因是 Ark 端点间歇性不稳（成功 8-23s，失败每次 attempt ~6.4s × 3 耗尽重试），
+非配置错误（用 settings.json 凭证实调简单调用 + distiller 真实 prompt 均成功）。本需求
+不解决 Ark 稳定性（外部服务），只让间歇失败时错误可见、可诊断。
+

@@ -196,6 +196,7 @@ export interface DistillRunListItem {
   storedCount: number
   discardedCount: number
   durationMs: number
+  errorMessage: string | null
   ts: number
   cwd: string | null
   runtime: string

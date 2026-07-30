@@ -520,6 +520,11 @@ function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => voi
         <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
         <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{formatRunCounts({ distilled: r.rawCount, deduped: r.dedupedCount, filtered: r.filteredCount, stored: r.storedCount })}</span>
       </div>
+      {r.outcome === 'llm_error' && r.errorMessage && (
+        <div style={{ color: '#c00', fontSize: 12, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {r.errorMessage}
+        </div>
+      )}
       <div style={{ fontSize: 13, color: '#555', marginTop: 6 }}>
         {r.sourceAgentId ? 'subagent' : cwdLabel}{time ? ` · ${time}` : ''} · {r.durationMs}ms
       </div>
@@ -698,7 +703,14 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
             <div style={{ marginBottom: 12 }}>
               <strong>产出：</strong>
               {detail.outcome === 'empty_output' ? <span>LLM 返回 0 候选</span>
-                : detail.outcome === 'llm_error' ? <span style={{ color: '#c00' }}>LLM 调用失败</span>
+                : detail.outcome === 'llm_error' ? (
+                  <div>
+                    <span style={{ color: '#c00' }}>LLM 调用失败</span>
+                    {detail.errorMessage ? (
+                      <pre style={{ background: '#fff4f4', color: '#c00', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap', borderLeft: '3px solid #c00' }}>{detail.errorMessage}</pre>
+                    ) : <span style={{ color: '#999', marginLeft: 8 }}>（无错误描述）</span>}
+                  </div>
+                )
                 : detail.outcome === 'skipped_no_new_turns' ? <span>该 job 无新 turn，未调用 LLM</span>
                 : Array.isArray(cands) ? cands.map((c, i) => (
                     <pre key={i} style={{ background: '#f7f7f7', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap' }}>{JSON.stringify(c, null, 2)}</pre>

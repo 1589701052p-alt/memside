@@ -296,3 +296,29 @@ test('memory_discards migration is idempotent (reopen)', () => {
   const cols = db.$client.prepare('PRAGMA table_info(memory_discards)').all() as { name: string }[]
   expect(cols.filter((c) => c.name === 'scope_type').length).toBe(1)  // 不重复加列
 })
+
+test('fresh db has error_message column on memory_distill_runs', () => {
+  db = openDb(join(dir, 'em.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'error_message')).toBe(true)
+})
+
+test('migration adds error_message to pre-existing memory_distill_runs, idempotent, no backfill', () => {
+  const dbPath = join(dir, 'oldem.db')
+  // 旧形态库：memory_distill_runs 无 error_message 列
+  const old = new Database(dbPath)
+  old.exec(`CREATE TABLE memory_distill_runs (distill_job_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, raw_output_json TEXT, distilled_count INTEGER NOT NULL, accepted_count INTEGER NOT NULL, deduped_count INTEGER NOT NULL, filtered_count INTEGER NOT NULL, stored_count INTEGER NOT NULL, discarded_count INTEGER NOT NULL, duration_ms INTEGER NOT NULL, ts INTEGER NOT NULL)`)
+  old.exec(`INSERT INTO memory_distill_runs (distill_job_id, outcome, raw_output_json, distilled_count, accepted_count, deduped_count, filtered_count, stored_count, discarded_count, duration_ms, ts) VALUES ('j1','llm_error',NULL,0,0,0,0,0,0,1234,1)`)
+  old.close()
+  const migrated = openDb(dbPath)
+  const cols = migrated.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'error_message')).toBe(true)
+  // no backfill: existing row stays NULL
+  const rows = migrated.$client.prepare('SELECT distill_job_id, error_message FROM memory_distill_runs').all() as { distill_job_id: string; error_message: string | null }[]
+  expect(rows.find((r) => r.distill_job_id === 'j1')!.error_message).toBeNull()
+  migrated.$client.close()
+  // 幂等：reopen 不抛（guard 跳过 ALTER，否则 duplicate column 报错）
+  const reopened = openDb(dbPath)
+  expect((reopened.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]).some((c) => c.name === 'error_message')).toBe(true)
+  reopened.$client.close()
+})
