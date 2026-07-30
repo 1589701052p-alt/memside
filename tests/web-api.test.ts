@@ -143,3 +143,21 @@ test('getDistillRunSourceInput returns null on 404', async () => {
   expect(called).toBe('/api/distill-runs/j1/source-input')
   expect(r).toBeNull()
 })
+
+// --- Task 5: distill-error-capture -- errorMessage 类型 ---
+// 锁回归：getDistillRun 返回的 detail 含 errorMessage 字段。
+test('getDistillRun returns errorMessage in detail', async () => {
+  let called = ''
+  const fake = (url: string) => {
+    called = url
+    return Promise.resolve({ ok: true, json: async () => ({
+      distillJobId: 'j1', outcome: 'llm_error', errorMessage: '500 boom',
+      rawCount: 0, acceptedCount: 0, dedupedCount: 0, filteredCount: 0,
+      storedCount: 0, discardedCount: 0, durationMs: 1, ts: 1,
+      cwd: null, runtime: 'claude-code', createdAt: 1, sourceAgentId: null, rawOutput: null,
+    }) } as any)
+  }
+  const r = await getDistillRun('j1', fake as any)
+  expect(called).toBe('/api/distill-runs/j1')
+  expect(r.errorMessage).toBe('500 boom')
+})
