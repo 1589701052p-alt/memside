@@ -108,3 +108,15 @@ test('DistillRunRow renders truncated errorMessage for llm_error', () => {
   expect(src).toContain('r.errorMessage')
   expect(src).toContain('textOverflow')
 })
+
+// LLM 凭证 UI 配置（2026-07-30）：设置区块常驻生效回显行 + 保存/测试连接/清除。
+// 兜底回归（CLAUDE.md 最低限度）：生效回显行与三按钮必须存在于 App.tsx 源码，
+// refactor 删除即变红。
+test('App.tsx 含 LLM 设置区块：生效回显行 + 保存/测试连接/清除', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(src).toContain('当前生效')
+  expect(src).toContain('测试连接')
+  expect(src).toContain('getLlmSettings')
+  expect(src).toContain('saveLlmSettings')
+  expect(src).toContain('testLlmConnection')
+})

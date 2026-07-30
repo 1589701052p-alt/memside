@@ -3,10 +3,11 @@ import {
   listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput,
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput,
+  getLlmSettings, saveLlmSettings, testLlmConnection,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
-  type DistillRunListItem,
+  type DistillRunListItem, type LlmSettingsState,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel } from './ui-utils'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -238,6 +239,9 @@ export default function App() {
         )}
       </div>
 
+      {/* LLM 设置区块 - 生效回显行 + 保存/测试连接/清除 */}
+      <LlmSettings />
+
       {error ? (
         <div
           style={{
@@ -340,6 +344,87 @@ export default function App() {
         <DistillRunModal jobId={runDetailFor} onClose={() => setRunDetailFor(null)} />
       ) : null}
     </div>
+  )
+}
+
+/**
+ * LLM 设置区块（spec：状态可见性 + 生效回显硬需求）。
+ * 常驻生效回显行：当前生效来源 · baseURL · model · 打码 token。
+ * 三输入框 + 保存 / 测试连接 / 清除；token 留空保存 = 保持原值。
+ */
+function LlmSettings() {
+  const [state, setState] = useState<LlmSettingsState | null>(null)
+  const [baseURL, setBaseURL] = useState('')
+  const [token, setToken] = useState('')
+  const [model, setModel] = useState('')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = async () => {
+    try { setState(await getLlmSettings()); setError(null) }
+    catch (e) { setError(String(e)) } // fetch 失败显错误（不静默）
+  }
+  useEffect(() => { void refresh() }, [])
+
+  const onSave = async () => {
+    setBusy(true); setMsg(null)
+    try {
+      setState(await saveLlmSettings({
+        ...(baseURL !== '' ? { baseURL } : {}),
+        ...(token !== '' ? { token } : {}),
+        ...(model !== '' ? { model } : {}),
+      }))
+      setToken(''); setMsg('已保存')
+    } catch (e) { setMsg(`保存失败: ${e}`) }
+    finally { setBusy(false) }
+  }
+  const onClear = async () => {
+    setBusy(true); setMsg(null)
+    try { setState(await saveLlmSettings({ clear: true })); setBaseURL(''); setModel(''); setMsg('已清除 UI 配置') }
+    catch (e) { setMsg(`清除失败: ${e}`) }
+    finally { setBusy(false) }
+  }
+  const onTest = async () => {
+    setBusy(true); setMsg(null)
+    try {
+      const r = await testLlmConnection({
+        ...(baseURL !== '' ? { baseURL } : {}),
+        ...(token !== '' ? { token } : {}),
+        ...(model !== '' ? { model } : {}),
+      })
+      setMsg(r.ok ? '连接成功' : `连接失败: ${r.error ?? '未知错误'}`)
+    } catch (e) { setMsg(`测试失败: ${e}`) }
+    finally { setBusy(false) }
+  }
+
+  const eff = state?.effective ?? null
+  return (
+    <section style={{ margin: '12px 0', padding: 12, border: '1px solid #ddd', borderRadius: 8 }}>
+      <h3 style={{ margin: '0 0 8px' }}>LLM 设置</h3>
+      {/* 生效回显行（硬需求）：让用户一眼看到当前实际生效的是哪套 API */}
+      <div style={{ marginBottom: 8, fontSize: 13 }}>
+        当前生效：{eff
+          ? <><b>{llmSourceLabel(eff.source)}</b>{' · '}{eff.baseURL ?? '官方端点'}{' · '}{eff.model ?? '默认模型'}{' · '}token <code>{eff.tokenMasked}</code></>
+          : <b>未配置</b>}
+      </div>
+      {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <input style={{ flex: '2 1 260px' }} placeholder={state?.saved?.baseURL ?? 'baseURL（留空=官方端点）'}
+          value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
+        <input style={{ flex: '2 1 260px' }} placeholder={state?.saved ? `token（留空保持 ${state.saved.tokenMasked}）` : 'token'}
+          value={token} onChange={(e) => setToken(e.target.value)} />
+        <input style={{ flex: '1 1 180px' }} placeholder={state?.saved?.model ?? 'model（留空=默认）'}
+          value={model} onChange={(e) => setModel(e.target.value)} />
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button disabled={busy} onClick={() => void onSave()}>保存</button>
+        <button disabled={busy} onClick={() => void onTest()}>测试连接</button>
+        <button disabled={busy} onClick={() => void onClear()}>清除</button>
+        {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
+        {msg ? <span style={{ color: msg.startsWith('连接失败') || msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
+      </div>
+    </section>
   )
 }
 
