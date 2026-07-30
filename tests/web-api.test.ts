@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard, listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection } from '@/web/api'
+import { listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard, listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection, type MemoryItem } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
 // not unit-tested; this client is the testable seam — a `fetchFn` param lets
@@ -211,4 +211,33 @@ test('testLlmConnection POST 到 /api/settings/llm/test 并透传 {ok,error}', a
   expect(JSON.parse(captured!.body)).toEqual({ baseURL: 'https://a', token: 'sk-test', model: 'm' })
   expect(r.ok).toBe(false)
   expect(r.error).toBe('unauthorized')
+})
+
+// --- Task 5: origin/evidence 类型 + 透传（origin-driven value judgment）---
+// 锁回归：MemoryItem 类型必须声明 origin/evidence（spec §R1），且 listMemories
+// 把后端返回的对应字段原样穿出（不做字段筛选）。访问 items[0].origin/.evidence
+// 在 TS 层即要求 MemoryItem 声明这两个字段--若类型漏声明，typecheck 直接红；
+// 运行时断言锁定 listMemories 不丢字段。双向锁：类型 + 运行时。
+
+// 类型层锁：MemoryItem 必须含可选 origin/evidence（与 valueClass 同 optionality）。
+// 这两句在编译期求值；若 MemoryItem 漏掉任一字段，tsc 报 TS2339，typecheck 红。
+const _task5TypeLockItem: MemoryItem = { id: '1', title: 't', status: 'candidate' }
+const _task5OriginType: string | null | undefined = _task5TypeLockItem.origin
+const _task5EvidenceType: string | null | undefined = _task5TypeLockItem.evidence
+void _task5OriginType
+void _task5EvidenceType
+
+test('listMemories 透传 origin/evidence 字段', async () => {
+  const fixture = {
+    items: [{
+      id: '1', title: 't', status: 'candidate',
+      origin: 'user-stated', evidence: '用户原话摘抄',
+    }],
+  }
+  const fetchFn = (async (_url: string) =>
+    new Response(JSON.stringify(fixture), { status: 200 })) as any
+  const items = await listMemories(fetchFn, 'candidate')
+  // items: MemoryItem[] -- 访问 .origin/.evidence 要求类型声明这两个字段
+  expect(items[0]!.origin).toBe('user-stated')
+  expect(items[0]!.evidence).toBe('用户原话摘抄')
 })

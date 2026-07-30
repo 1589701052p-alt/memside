@@ -483,6 +483,39 @@ test('GET /api/memories list response does NOT contain turns (lazy load only)', 
   expect(body).not.toContain('"turns"')
 })
 
+// --- Task 5: origin/evidence 透传锁定（origin-driven value judgment）---
+// 锁回归：store.createCandidate 已写 origin/evidence 列（Task 3 schema/store），
+// server 的 GET /api/memories 直接序列化 drizzle 行（c.json({ items: rows })），
+// 不做字段白名单，origin/evidence 自动透传。本测试锁定该透传契约，防止未来
+// server 改成显式 pick 字段时静默丢掉出处信息（spec §R1 核心数据）。
+// 预期 server 零改动即绿；若红，说明 server 引入了字段筛选，需补齐。
+test('GET /api/memories 透传 origin/evidence（server 零改动，测试锁定透传）', async () => {
+  const c = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/r', title: '退款窗口', bodyMd: '14 天内可退',
+    tags: [], sourceKind: 'conversation', runtime: null, sourceCwd: '/r',
+    origin: 'user-stated', evidence: '用户原话：这个商品支持 14 天退款',
+  })
+  const r = await req('/api/memories?status=candidate')
+  expect(r.status).toBe(200)
+  expect(r.body.items.length).toBe(1)
+  expect(r.body.items[0].id).toBe(c.id)
+  expect(r.body.items[0].origin).toBe('user-stated')
+  expect(r.body.items[0].evidence).toBe('用户原话：这个商品支持 14 天退款')
+})
+
+// 负向锁定：未传 origin/evidence 的候选（手动记忆/老行）序列化为 null，不报错、
+// 不漏字段。防止 rowToMemory / drizzle 行缺列时 undefined 被当作已标注。
+test('GET /api/memories 未标注出处的候选 origin/evidence 为 null', async () => {
+  await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: '手动记忆', bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null,
+  })
+  const r = await req('/api/memories?status=candidate')
+  expect(r.status).toBe(200)
+  expect(r.body.items[0].origin).toBeNull()
+  expect(r.body.items[0].evidence).toBeNull()
+})
+
 // --- Task 6: status 过滤 + discards 端点 + 4 个写路由 ---------------------
 // 锁定回归：GET /api/memories?status=… 服务端过滤、GET /api/discards 审计列表、
 // /api/status 含 discards 计数、archive/unarchive/restore/promote 4 写路由。
