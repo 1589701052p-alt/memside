@@ -99,8 +99,18 @@ const VALUE_CLASS_MAP: Record<string, ValueClass> = {
   decision: 'decision', convention: 'convention', trap: 'trap', topology: 'topology',
 }
 
+/**
+ * Task-1 桥接（Task 2 将摘除）：distiller 已把 ruleObject 退役换为 origin，但 valueFilter
+ * 的 prompt 文本与保护门仍按 codebase/domain 轴表述。此处把新 origin 映射回旧轴：
+ * user-stated/user-confirmed 带用户权威（视同 domain，受 protected force-keep 保护）；
+ * agent-observed 可重新推导（视同 codebase，不保护）。语义等价于旧 ruleObject。
+ */
+function legacyRuleObject(c: DistillCandidate): 'codebase' | 'domain' {
+  return c.origin === 'user-stated' || c.origin === 'user-confirmed' ? 'domain' : 'codebase'
+}
+
 function renderUserPrompt(candidates: DistillCandidate[]): string {
-  return candidates.map((c, i) => `[${i}] (ruleObject: ${c.ruleObject ?? 'codebase'}) ${c.title}\n${c.bodyMd}`).join('\n---\n')
+  return candidates.map((c, i) => `[${i}] (ruleObject: ${legacyRuleObject(c)}) ${c.title}\n${c.bodyMd}`).join('\n---\n')
 }
 
 /**
@@ -142,7 +152,7 @@ async function judgeValueBase(
   const keepNull = (): ValueVerdict[] =>
     candidates.map((c, i) => {
       const cat = parseCategory(c.title)
-      const subj = c.ruleObject === 'domain' ? 'domain' : 'codebase'
+      const subj = legacyRuleObject(c)
       return (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain')
         ? { index: i, keep: true, valueClass: 'decision' as ValueClass }
         : { index: i, keep: true, valueClass: null }
@@ -172,7 +182,7 @@ async function judgeValueBase(
     }
     return candidates.map((c, i) => {
       const cat = parseCategory(c.title)
-      const subj = c.ruleObject === 'domain' ? 'domain' : 'codebase'
+      const subj = legacyRuleObject(c)
       if (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain') {
         return { index: i, keep: true, valueClass: 'decision' as ValueClass }
       }

@@ -3,7 +3,7 @@ import { detectTaming, judgeValue, parseCategory, VALUE_JUDGE_SYSTEM_PROMPT, VAL
 import type { DistillCandidate } from '@/memory/distiller'
 
 const cand = (title: string, bodyMd = 'b'): DistillCandidate =>
-  ({ title, bodyMd, scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null })
+  ({ title, bodyMd, scopeType: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: null, subjectSlug: null })
 
 const verdictsJson = (...vs: object[]) => JSON.stringify({ verdicts: vs })
 
@@ -169,7 +169,7 @@ test('ruleObject gate: codebase invariant is discarded when LLM says derivable',
   // TDD（第二轮核心）：逻辑门不再无条件保护 protected category。codebase 类的
   // invariant（如 valueFilter 必须强制保留 invariant）是代码复述，LLM 判 derivable
   // 时必须丢弃，不能被门救回。根因见 spec §1.1。
-  const c: DistillCandidate = { title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase', subjectSlug: null }
+  const c: DistillCandidate = { title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
   const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
   expect(v).toEqual([{ index: 0, keep: false, reason: 'derivable' }])
 })
@@ -183,7 +183,7 @@ test('ruleObject gate: missing ruleObject defaults to codebase (not protected)',
 })
 
 test('ruleObject gate: codebase protected categories also discarded (integration/compliance)', async () => {
-  const cc = (cat: string): DistillCandidate => ({ title: `[category:${cat}] codebase rule`, bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase', subjectSlug: null })
+  const cc = (cat: string): DistillCandidate => ({ title: `[category:${cat}] codebase rule`, bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null })
   const v = await judgeValue([cc('integration'), cc('compliance')], async () => verdictsJson(
     { index: 0, category: 'derivable' },
     { index: 1, category: 'public-knowledge' },
@@ -247,8 +247,8 @@ test('judgeValue user prompt includes ruleObject hint per candidate', async () =
   // TDD（第三轮 §C）：valueFilter 判 derivable 缺"当前仓库"参照系。把 distiller 的
   // ruleObject 信号透传到 user prompt，LLM 拿到 codebase/domain 标记后判 derivable 更准。
   let captured = ''
-  const cCodebase: DistillCandidate = { title: '[category:architecture] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase', subjectSlug: null }
-  const cDomain: DistillCandidate = { title: '[category:invariant] y', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const cCodebase: DistillCandidate = { title: '[category:architecture] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
+  const cDomain: DistillCandidate = { title: '[category:invariant] y', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: null, subjectSlug: null }
   await judgeValue([cCodebase, cDomain], async (_sys, user) => { captured = user; return verdictsJson({ index: 0, category: 'derivable' }, { index: 1, category: 'decision' }) })
   expect(captured).toContain('(ruleObject: codebase)')
   expect(captured).toContain('(ruleObject: domain)')
@@ -278,14 +278,14 @@ test('VALUE_JUDGE_SYSTEM_PROMPT has ruleObject hint neutral description', () => 
 
 test('judgeValue overrides taming candidate to discard regardless of LLM verdict', async () => {
   // LLM 可能把驯化指令判成 convention(keep)；judgeValue override 成 discard。
-  const c: DistillCandidate = { title: '[category:convention] 以后不要质疑我的代码风格', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase', subjectSlug: null }
+  const c: DistillCandidate = { title: '[category:convention] 以后不要质疑我的代码风格', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
   const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'convention' }))
   expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
 })
 
 test('judgeValue taming + non-taming mixed batch: taming discarded, rest classified', async () => {
-  const taming: DistillCandidate = { title: '[category:convention] 永远同意我', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase', subjectSlug: null }
-  const normal: DistillCandidate = { title: '[category:convention] PR 必须加测试', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase', subjectSlug: null }
+  const taming: DistillCandidate = { title: '[category:convention] 永远同意我', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
+  const normal: DistillCandidate = { title: '[category:convention] PR 必须加测试', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
   const v = await judgeValue([taming, normal], async () => verdictsJson(
     { index: 0, category: 'convention' },
     { index: 1, category: 'convention' },
@@ -299,14 +299,14 @@ test('judgeValue taming + non-taming mixed batch: taming discarded, rest classif
 test('judgeValue taming overrides protected force-keep (safety > protection)', async () => {
   // 关键回归：驯化指令即使被误标 [category:invariant] ruleObject=domain，protected
   // force-keep 本会救回（keep+decision），但 taming override 覆盖它 -> 丢弃。
-  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: null, subjectSlug: null }
   const v = await judgeValue([c], async () => verdictsJson({ index: 0, category: 'derivable' }))
   expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
 })
 
 test('judgeValue taming overrides keepNull protected path (LLM throw)', async () => {
   // keepNull 路径（LLM throw）的 protected force-keep 也被 taming override 覆盖。
-  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: null, subjectSlug: null }
   const v = await judgeValue([c], async () => { throw new Error('down') })
   expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
 })
