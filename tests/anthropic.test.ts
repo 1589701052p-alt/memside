@@ -1,5 +1,5 @@
 import { test, expect, mock, beforeEach } from 'bun:test'
-import { makeLLMCall, DISTILL_MODEL } from '@/anthropic'
+import { makeLLMCall, DISTILL_MODEL, testConnection } from '@/anthropic'
 import { DEFAULT_LLM_MAX_TOKENS } from '@/llm'
 
 // These tests assert that the proxy auth fields resolved by `loadClaudeCreds`
@@ -14,12 +14,17 @@ import { DEFAULT_LLM_MAX_TOKENS } from '@/llm'
 
 const ctorCalls: Array<Record<string, unknown>> = []
 const createCalls: Array<Record<string, unknown>> = []
+// second-arg (RequestOptions) capture + failure injection for testConnection tests
+const createOpts: Array<unknown> = []
+let createError: Error | null = null
 
 function FakeAnthropic(this: any, opts: Record<string, unknown> = {}) {
   ctorCalls.push(opts)
   this.messages = {
-    create: async (args: Record<string, unknown>) => {
+    create: async (args: Record<string, unknown>, opts2?: Record<string, unknown>) => {
+      if (createError) throw createError
       createCalls.push(args)
+      createOpts.push(opts2)
       return { content: [{ type: 'text', text: '{"candidates":[]}' }] }
     },
   }
@@ -30,6 +35,8 @@ mock.module('@anthropic-ai/sdk', () => ({ default: FakeAnthropic }))
 beforeEach(() => {
   ctorCalls.length = 0
   createCalls.length = 0
+  createOpts.length = 0
+  createError = null
 })
 
 test('constructs Anthropic client with creds baseURL and uses creds model (proxy path)', async () => {
@@ -114,4 +121,68 @@ test('makeLLMCall honors opts.maxTokens override', async () => {
   })
   await callLLM('sys', 'user', { maxTokens: 512 })
   expect(createCalls[0].max_tokens).toBe(512)
+})
+
+// --- Task 3: UI 配置注入点 + testConnection ---
+
+test('callLLM 把 loadUiConfig 的结果传给 loadClaudeCreds（UI 级注入点）', async () => {
+  const seen: unknown[] = []
+  const call = makeLLMCall({
+    loadClaudeCreds: (ui?: any) => {
+      seen.push(ui)
+      return { apiKey: 'k', model: 'm', source: 'ui' }
+    },
+    loadUiConfig: () => ({ token: 'sk-ui-token-123456', baseURL: 'https://ui.example.com' }),
+  })
+  await call('sys', 'user')
+  expect(seen).toEqual([{ token: 'sk-ui-token-123456', baseURL: 'https://ui.example.com' }])
+})
+
+test('callLLM 无 loadUiConfig 时以 undefined 调 loadClaudeCreds（向后兼容无参写法）', async () => {
+  const seen: unknown[] = []
+  const call = makeLLMCall({
+    loadClaudeCreds: (ui?: any) => {
+      seen.push(ui)
+      return { apiKey: 'k', model: 'm', source: 'test' }
+    },
+  })
+  await call('sys', 'user')
+  expect(seen).toEqual([undefined])
+})
+
+test('testConnection: SDK 成功 -> {ok:true}', async () => {
+  const r = await testConnection({ token: 'sk-abcdefghijklmn' })
+  expect(r).toEqual({ ok: true })
+})
+
+test('testConnection: SDK 抛 401 -> {ok:false,error 含 401}', async () => {
+  createError = new Error('401 {"error":{"type":"authentication_error","message":"invalid x-api-key"}}')
+  const r = await testConnection({ token: 'sk-abcdefghijklmn' })
+  expect(r.ok).toBe(false)
+  expect(r.error).toContain('401')
+})
+
+test('testConnection: 走 cfg.baseURL 与 cfg.model 进 SDK', async () => {
+  const r = await testConnection({
+    token: 'sk-abcdefghijklmn',
+    baseURL: 'https://ui.example.com',
+    model: 'ui-model-x',
+  })
+  expect(r).toEqual({ ok: true })
+  // ctor 收到 token + baseURL
+  expect(ctorCalls[0].apiKey).toBe('sk-abcdefghijklmn')
+  expect(ctorCalls[0].baseURL).toBe('https://ui.example.com')
+  // create 收到 cfg.model 与 max_tokens=1（最小请求）
+  expect(createCalls[0].model).toBe('ui-model-x')
+  expect(createCalls[0].max_tokens).toBe(1)
+  // 默认 15s 超时经第二参传入
+  expect(createOpts[0]).toEqual({ timeout: 15_000 })
+})
+
+test('testConnection: cfg.model 缺省回退 DISTILL_MODEL，opts.timeoutMs 覆盖默认超时', async () => {
+  const r = await testConnection({ token: 'sk-abcdefghijklmn' }, { timeoutMs: 1234 })
+  expect(r).toEqual({ ok: true })
+  expect(createCalls[0].model).toBe(DISTILL_MODEL)
+  expect(createOpts[0]).toEqual({ timeout: 1234 })
+  expect('baseURL' in ctorCalls[0]).toBe(false)
 })
