@@ -2,10 +2,10 @@ import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
-import { createCandidate, promoteCandidate, saveSourceInput } from '@/memory/store'
+import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns } from '@/db/schema'
 
 // EBUSY-safe pattern (same as store-promote.test.ts / adapter-claude.test.ts):
 // wipe `root` once in beforeAll, give each test its own fresh subdir, and
@@ -591,4 +591,57 @@ test('POST /api/discards/:id/promote on already-promoted returns 409', async () 
 test('POST /api/discards/:id/promote on missing id returns 404', async () => {
   const r = await req('/api/discards/nope/promote', { method: 'POST' })
   expect(r.status).toBe(404)
+})
+
+// --- Task 5: distill-runs 端点 + /api/status 计数 --------------------------
+// 锁定回归：distill 工作记录透明化。GET /api/distill-runs 列表（不含 rawOutput）、
+// GET /api/distill-runs/:jobId 详情（含 rawOutput）、GET .../source-input 原始输入、
+// /api/status 增 distillRuns 计数（按 outcome 分桶、近 24h）。
+async function seedRunRow(jobId: string, outcome: string, cwd = '/repo', agentId: string | null = null) {
+  await db.insert(memoryDistillJobs).values({ id: jobId, debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd, sourceAgentId: agentId, status: 'done', attempts: 0, nextRunAt: 0, createdAt: 100, finishedAt: 200 })
+  await saveDistillRun(db, jobId, { outcome: outcome as any, rawOutput: { candidates: [{ title: '[category:convention] x' }] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 5 })
+}
+
+test('GET /api/distill-runs lists runs without rawOutput', async () => {
+  await seedRunRow('job-x1', 'produced')
+  const r = await req('/api/distill-runs')
+  expect(r.status).toBe(200)
+  expect(r.body.items.length).toBe(1)
+  expect(r.body.items[0].outcome).toBe('produced')
+  expect(r.body.items[0].cwd).toBe('/repo')
+  expect(JSON.stringify(r.body)).not.toContain('rawOutput')  // 列表不含 rawOutput
+})
+
+test('GET /api/distill-runs/:jobId returns detail with rawOutput', async () => {
+  await seedRunRow('job-x2', 'produced')
+  const r = await req('/api/distill-runs/job-x2')
+  expect(r.status).toBe(200)
+  expect((r.body.rawOutput as any)?.candidates?.length).toBe(1)
+})
+
+test('GET /api/distill-runs/:jobId 404 when missing', async () => {
+  const r = await req('/api/distill-runs/nope')
+  expect(r.status).toBe(404)
+})
+
+test('GET /api/distill-runs/:jobId/source-input returns turns', async () => {
+  await saveSourceInput(db, 'job-x3', [{ role: 'user', content: 'hello' }] as any)
+  const r = await req('/api/distill-runs/job-x3/source-input')
+  expect(r.status).toBe(200)
+  expect(r.body.turnCount).toBe(1)
+  expect(r.body.turns[0].content).toBe('hello')
+})
+
+test('GET /api/distill-runs/:jobId/source-input 404 when no snapshot', async () => {
+  const r = await req('/api/distill-runs/no-snap/source-input')
+  expect(r.status).toBe(404)
+})
+
+test('GET /api/status includes distillRuns counts', async () => {
+  await seedRunRow('job-x4', 'produced')
+  await seedRunRow('job-x5', 'empty_output')
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.distillRuns).toBeDefined()
+  expect(r.body.distillRuns.total).toBeGreaterThanOrEqual(2)
 })
