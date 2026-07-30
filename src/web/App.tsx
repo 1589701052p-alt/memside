@@ -7,24 +7,26 @@ import {
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from './ui-utils'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
  * valueBadge,不必经 props 透传。
  *
- * 优先级:decision/convention=高(0),trap/topology=中(1),null=未评估(2)。
- * 候选队列按此排序,高价值先审;未评估条目可一键批量拒绝。
+ * 6 筐优先级:user-rule/decision=高(0),preference/convention/trap/topology=中(1),
+ * null=未评估(2)。候选队列按此排序,高价值先审;未评估条目可一键批量拒绝。
+ * 出处驱动的价值判定（2026-07-30）扩 6 筐。
  */
 const VALUE_LABEL: Record<string, string> = {
-  decision: '高·决策', convention: '高·约定', trap: '中·陷阱', topology: '中·拓扑',
+  'user-rule': '高·规矩', decision: '高·决策',
+  preference: '中·偏好', convention: '中·约定', trap: '中·陷阱', topology: '中·拓扑',
 }
 function valueBadge(vc: string | null | undefined): string {
   return vc && VALUE_LABEL[vc] ? VALUE_LABEL[vc] : '未评估'
 }
 function priorityRank(vc: string | null | undefined): number {
-  if (vc === 'decision' || vc === 'convention') return 0
-  if (vc === 'trap' || vc === 'topology') return 1
+  if (vc === 'user-rule' || vc === 'decision') return 0
+  if (vc && VALUE_LABEL[vc]) return 1
   return 2
 }
 
@@ -504,8 +506,14 @@ function MemoryCard({
         <>
           <strong>{m.title}</strong>
           <span style={{ marginLeft: 8, fontSize: 12, color: '#888' }}>{valueBadge(m.valueClass)}</span>
+          {(() => { const ob = originBadge(m.origin); return ob ? (
+            <span style={{ marginLeft: 8, fontSize: 12, color: ob.color }}>{ob.label}</span>
+          ) : null })()}
           {m.subjectSlug ? (
             <span style={{ marginLeft: 8, fontSize: 12, color: '#36c' }}>[{m.subjectSlug}]</span>
+          ) : null}
+          {m.evidence ? (
+            <p style={{ color: '#6a1b9a', fontSize: 13, margin: '4px 0' }}>出处：{m.evidence}</p>
           ) : null}
           {m.bodyMd && <p style={{ color: '#555' }}>{m.bodyMd}</p>}
           <small>
@@ -573,7 +581,7 @@ function DiscardCard({ d, onPromote }: { d: DiscardItem; onPromote: () => void }
   return (
     <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16, marginBottom: 12 }}>
       <strong>{d.title}</strong>
-      <span style={{ marginLeft: 8, fontSize: 12, color: '#c00' }}>{d.reason}</span>
+      <span style={{ marginLeft: 8, fontSize: 12, color: '#c00' }}>{discardReasonLabel(d.reason)}</span>
       {d.bodyMd && <p style={{ color: '#555' }}>{d.bodyMd}</p>}
       <small>
         {d.scopeType ?? '未知 scope'} · 来源: <span title={d.sourceCwd ?? ''}>{sourceLabel}</span>

@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -139,4 +139,26 @@ test('llmSourceLabel 映射各来源', () => {
   expect(llmSourceLabel('env:authToken')).toBe('进程 env')
   expect(llmSourceLabel('credentials.json:apiKey')).toBe('credentials.json')
   expect(llmSourceLabel(null)).toBe('未配置')
+})
+
+// --- originBadge / discardReasonLabel ---
+// 出处驱动的价值判定（2026-07-30）：审批卡片 origin 徽标（user-stated/user-confirmed/
+// agent-observed 三态 -> {label,color}，老行未标注返回 null 不显示）+ AI 自动拒绝理由
+// 中文化。纯函数，可单测（CLAUDE.md「首选可断言面」）。
+// 设计依据：docs/superpowers/specs/2026-07-30-origin-driven-value-judgment-design.md。
+
+test('originBadge: user-stated/user-confirmed/agent-observed/null 映射', () => {
+  expect(originBadge('user-stated')).toEqual({ label: '用户陈述', color: '#6a1b9a' })
+  expect(originBadge('user-confirmed')).toEqual({ label: '用户采纳', color: '#00838f' })
+  expect(originBadge('agent-observed')).toEqual({ label: 'agent 观察', color: '#999' })
+  expect(originBadge(null)).toBeNull()
+  expect(originBadge(undefined)).toBeNull()
+})
+
+test('discardReasonLabel: 四理由中文化 + 未知原样', () => {
+  expect(discardReasonLabel('public-knowledge')).toBe('公开知识')
+  expect(discardReasonLabel('derivable')).toBe('可从代码推导')
+  expect(discardReasonLabel('taming')).toBe('驯化指令')
+  expect(discardReasonLabel('fleeting')).toBe('一次性/琐事')
+  expect(discardReasonLabel('bogus')).toBe('bogus')
 })
