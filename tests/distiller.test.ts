@@ -250,14 +250,19 @@ test('distillTranscript returns filteredTurns equal to filterTranscriptForDistil
   expect(result.filteredTurns[1]!.content).not.toContain('X'.repeat(100))
 })
 
-test('distillTranscript failure degrades to empty filteredTurns', async () => {
+test('distillTranscript failure preserves filteredTurns (source input not cleared on llm_error)', async () => {
+  // 修复回归（spec 2026-07-29-distill-error-capture §source input 清空修复）：
+  // 历史 bug 在 callThrew 时用 `filteredTurns: callThrew ? [] : filtered` 清空，
+  // 导致 llm_error job 的 source input 丢失（turnCount:0）。修复后 filteredTurns 恒为
+  // 过滤快照（与调用成败无关）。此测试曾断言 filteredTurns=[]，现已更新为期望真实 filtered。
+  const { filterTranscriptForDistill } = await import('@/memory/pure')
+  const turns: TranscriptTurn[] = [{ role: 'user', content: 'hi' }]
   const result = await distillTranscript({
-    turns: [{ role: 'user', content: 'hi' }],
-    runtime: 'claude-code', cwd: '/r', existingSlugs: [],
+    turns, runtime: 'claude-code', cwd: '/r', existingSlugs: [],
     callLLM: async () => { throw new Error('api down') },
   })
   expect(result.candidates).toEqual([])
-  expect(result.filteredTurns).toEqual([])
+  expect(result.filteredTurns).toEqual(filterTranscriptForDistill(turns))
 })
 
 // subject-keyed 聚合（spec §4.3）：subjectSlug 解析 + existingSlugs 清单进 prompt。
@@ -379,4 +384,63 @@ test('distillTranscript preserves format-invalid candidates in rawOutput (rawCou
   expect(r.rawCount).toBe(2)                      // 原始两条都计
   expect((r.rawOutput as any)?.candidates?.length).toBe(2)  // rawOutput 保留被丢的
   expect(r.callThrew).toBe(false)
+})
+
+test('distillTranscript captures last LLM error message when all attempts throw', async () => {
+  // 3 次 attempt 都抛错：errorMessage 应为最后一次的 message（spec §透传路径）。
+  let calls = 0
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'x' }],
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => {
+      calls++
+      throw new Error(calls <= 2 ? 'timeout' : '500 Internal Server Error')
+    },
+  })
+  expect(result.candidates).toEqual([])
+  expect(result.callThrew).toBe(true)
+  expect(result.errorMessage).toBe('500 Internal Server Error')
+  expect(calls).toBe(3)  // callWithRetry maxRetries=2 -> 3 attempts
+})
+
+test('distillTranscript errorMessage is null on retry-success', async () => {
+  // attempt 0 抛错（记 lastErrorMessage）、attempt 1 成功产出候选：
+  // callThrew=false（最后 attempt 重置并成功）、有候选 -> errorMessage=null（spec §透传路径）。
+  let calls = 0
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'we refund within 14 days' }],
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => {
+      calls++
+      if (calls === 1) throw new Error('timeout')
+      return JSON.stringify({ candidates: [{ title: '[category:invariant] refunds 14d', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
+    },
+  })
+  expect(result.candidates.length).toBe(1)
+  expect(result.errorMessage).toBeNull()
+})
+
+test('distillTranscript errorMessage is null on parse failure (call did not throw)', async () => {
+  // callLLM 成功返回非 JSON：callThrew=false、无候选 -> empty_output，errorMessage=null。
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'x' }],
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => 'not json',
+  })
+  expect(result.candidates).toEqual([])
+  expect(result.callThrew).toBe(false)
+  expect(result.errorMessage).toBeNull()
+})
+
+test('distillTranscript preserves filteredTurns when callThrew (regression: source input must not be cleared)', async () => {
+  // 回归防护：callThrew 时 filteredTurns 必须保留（spec §source input 修复）。
+  // 历史 bug：distiller.ts 曾用 `filteredTurns: callThrew ? [] : filtered` 清空，
+  // 导致 llm_error job 的 source input 丢失（turnCount:0）。此测试锁住修复。
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'meaningful turn that must be preserved' }],
+    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => { throw new Error('api down') },
+  })
+  expect(result.callThrew).toBe(true)
+  expect(result.filteredTurns.length).toBeGreaterThan(0)
 })

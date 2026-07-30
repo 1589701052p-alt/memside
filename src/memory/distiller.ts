@@ -106,13 +106,16 @@ export interface DistillInput {
 
 export interface DistillResult {
   candidates: DistillCandidate[]
-  filteredTurns: TranscriptTurn[]   // 实际喂给模型的过滤版，零偏差快照源
+  filteredTurns: TranscriptTurn[]
   /** LLM 原始解析输出（candidates 数组原样，含被格式校验丢弃的）。无候选/跳过/报错时为 null。 */
   rawOutput: unknown | null
   /** LLM 返回的原始候选数（含格式不合格被丢的）。 */
   rawCount: number
   /** 底层 LLM 调用是否抛错（scheduler 据此判 llm_error vs empty_output）。 */
   callThrew: boolean
+  /** LLM 调用错误描述（最后一次 attempt 的错误 message）。仅 llm_error 时非 null；
+   *  produced/empty_output/skipped 时 null。retry-success 时 null（错误被成功覆盖）。 */
+  errorMessage: string | null
 }
 
 function renderUserPrompt(
@@ -169,6 +172,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     // matching the catch() degrade contract) from "model returned unparseable
     // output" (turns WERE sent -> return filtered snapshot).
     let callThrew = false
+    let lastErrorMessage: string | null = null
     const wrappedCall: LLMCall = async (sys, user, opts) => {
       // reset per attempt: a prior failed attempt must not stain a later success.
       // callWithRetry re-invokes wrappedCall on throw; without this reset, an
@@ -179,6 +183,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         return await input.callLLM(sys, user, opts)
       } catch (e) {
         callThrew = true
+        lastErrorMessage = e instanceof Error ? e.message : String(e)
         throw e
       }
     }
@@ -190,7 +195,10 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     }) as { candidates?: unknown } | undefined
     const rawOutput: unknown = parsed ?? null
     if (!parsed || !Array.isArray(parsed.candidates)) {
-      return { candidates: [], filteredTurns: callThrew ? [] : filtered, rawOutput, rawCount: 0, callThrew }
+      // filteredTurns 恒为过滤快照（调用前已算出，与调用成败无关）。
+      // 历史 bug 曾在 callThrew 时清空 -> llm_error job 丢失 source input（spec §source input 修复）。
+      return { candidates: [], filteredTurns: filtered, rawOutput, rawCount: 0, callThrew,
+        errorMessage: callThrew ? lastErrorMessage : null }
     }
     const rawCount = parsed.candidates.length
     const out: DistillCandidate[] = []
@@ -220,9 +228,12 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         subjectSlug: normalizeSubjectSlug(o.subjectSlug),
       })
     }
-    return { candidates: out, filteredTurns: filtered, rawOutput, rawCount, callThrew }
-  } catch {
+    return { candidates: out, filteredTurns: filtered, rawOutput, rawCount, callThrew, errorMessage: null }
+  } catch (e) {
     // Never throw: distill failures degrade to "no candidates this round".
-    return { candidates: [], filteredTurns: [], rawOutput: null, rawCount: 0, callThrew: true }
+    // 顶层兜底（detectErrorSignals/filterTranscriptForDistill 等纯函数抛错时），
+    // 不可达路径，errorMessage 仍透出异常 message 供诊断。
+    return { candidates: [], filteredTurns: [], rawOutput: null, rawCount: 0, callThrew: true,
+      errorMessage: e instanceof Error ? e.message : String(e) }
   }
 }
