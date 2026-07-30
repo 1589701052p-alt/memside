@@ -29,6 +29,8 @@ export const memories = sqliteTable(
     version: integer('version').notNull().default(1),
     valueClass: text('value_class'), // nullable: decision|convention|trap|topology; null = unevaluated
     subjectSlug: text('subject_slug'), // nullable: kebab-case 主题归组键；null = 未分组（平铺注入）
+    origin: text('origin'), // nullable: user-stated|user-confirmed|agent-observed；老行 NULL = 未标注（spec §数据模型）
+    evidence: text('evidence'), // nullable: 出处原句摘抄；老行 NULL
   },
   (t) => ({
     scopeStatusIdx: index('idx_memories_scope_status').on(t.scopeType, t.scopeId, t.status),

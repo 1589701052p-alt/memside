@@ -216,6 +216,38 @@ test('migration adds subject_slug to pre-existing db, idempotent, no backfill', 
   reopened.$client.close()
 })
 
+test('fresh db has origin/evidence columns', () => {
+  db = openDb(join(dir, 'oe.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'origin')).toBe(true)
+  expect(cols.some((c) => c.name === 'evidence')).toBe(true)
+})
+
+test('migration adds origin/evidence to pre-existing db, idempotent, no backfill', () => {
+  const dbPath = join(dir, 'oldoe.db')
+  // 旧形态库：有 subject_slug、无 origin/evidence（出处驱动价值判定之前的形态）。
+  // source_kind CHECK 含 'subagent' -> 不触发表重建，隔离测试 origin/evidence ALTER 路径。
+  const old = new Database(dbPath)
+  old.exec(`CREATE TABLE memories (id TEXT PRIMARY KEY, scope_type TEXT NOT NULL CHECK (scope_type IN ('project','global')), scope_id TEXT, runtime TEXT, title TEXT NOT NULL, body_md TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL, source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual','subagent')), source_cwd TEXT, source_event_id TEXT, distill_job_id TEXT, distill_action TEXT, supersedes_id TEXT, superseded_by_id TEXT, approved_at INTEGER, created_at INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 1, value_class TEXT, subject_slug TEXT, CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL)))`)
+  old.exec(`INSERT INTO memories (id, scope_type, scope_id, title, body_md, tags, status, source_kind, created_at, version) VALUES ('p1','project','/r','t','b','[]','candidate','manual',1,1)`)
+  old.close()
+  const migrated = openDb(dbPath)
+  const cols = migrated.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'origin')).toBe(true)
+  expect(cols.some((c) => c.name === 'evidence')).toBe(true)
+  // no backfill: existing row stays NULL（NULL = 未标注，spec §数据模型）
+  const rows = migrated.$client.prepare('SELECT id, origin, evidence FROM memories').all() as { id: string; origin: string | null; evidence: string | null }[]
+  expect(rows.find((r) => r.id === 'p1')!.origin).toBeNull()
+  expect(rows.find((r) => r.id === 'p1')!.evidence).toBeNull()
+  migrated.$client.close()
+  // 幂等：reopen 不抛（guard 跳过 ALTER，否则 duplicate column 报错）
+  const reopened = openDb(dbPath)
+  const reopenedCols = reopened.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+  expect(reopenedCols.some((c) => c.name === 'origin')).toBe(true)
+  expect(reopenedCols.some((c) => c.name === 'evidence')).toBe(true)
+  reopened.$client.close()
+})
+
 test('memories.source_kind accepts subagent (CHECK widened)', () => {
   // 旧 CHECK ('conversation','error','manual') 会拒绝 'subagent'；扩展后必须接受。
   // 沿用 schema.test.ts 既有风格：raw db.insert(memories)（本文件已 import memories + eq）。

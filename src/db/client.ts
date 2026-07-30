@@ -34,6 +34,8 @@ export function openDb(path: string) {
       created_at INTEGER NOT NULL,
       version INTEGER NOT NULL DEFAULT 1,
       subject_slug TEXT,
+      origin TEXT,
+      evidence TEXT,
       CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL))
     );
     CREATE INDEX IF NOT EXISTS idx_memories_scope_status ON memories(scope_type, scope_id, status);
@@ -220,6 +222,19 @@ export function openDb(path: string) {
         raw.exec('ROLLBACK')
         throw e
       }
+    }
+  }
+  // Idempotent migration: add origin/evidence to pre-existing memories tables.
+  // 出处驱动价值判定（spec §数据模型）。无 backfill（老行 NULL = 未标注）。
+  // 刻意放在 subagent 表重建块之后：旧库若走重建，memories_new 同样没有这两列，
+  // 由这里的 ALTER 统一补齐--fresh DDL / 重建 / 直接 ALTER 三条路径殊途同归。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memories)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'origin')) {
+      raw.exec('ALTER TABLE memories ADD COLUMN origin TEXT')
+    }
+    if (!cols.some((c) => c.name === 'evidence')) {
+      raw.exec('ALTER TABLE memories ADD COLUMN evidence TEXT')
     }
   }
   // Idempotent migration: add error_message to pre-existing memory_distill_runs.
