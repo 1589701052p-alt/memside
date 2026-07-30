@@ -562,6 +562,7 @@ export interface DistillRunRecord {
   storedCount: number
   discardedCount: number
   durationMs: number
+  errorMessage: string | null
 }
 
 export interface DistillRunRow {
@@ -575,6 +576,7 @@ export interface DistillRunRow {
   storedCount: number
   discardedCount: number
   durationMs: number
+  errorMessage: string | null
   ts: number
 }
 
@@ -588,13 +590,14 @@ export async function saveDistillRun(
     distilledCount: record.rawCount, acceptedCount: record.acceptedCount,
     dedupedCount: record.dedupedCount, filteredCount: record.filteredCount,
     storedCount: record.storedCount, discardedCount: record.discardedCount,
-    durationMs: record.durationMs, ts: now,
+    durationMs: record.durationMs, errorMessage: record.errorMessage, ts: now,
   }).onConflictDoUpdate({
     target: memoryDistillRuns.distillJobId,
     set: { outcome: record.outcome, rawOutputJson, distilledCount: record.rawCount,
       acceptedCount: record.acceptedCount, dedupedCount: record.dedupedCount,
       filteredCount: record.filteredCount, storedCount: record.storedCount,
-      discardedCount: record.discardedCount, durationMs: record.durationMs, ts: now },
+      discardedCount: record.discardedCount, durationMs: record.durationMs,
+      errorMessage: record.errorMessage, ts: now },
   })
 }
 
@@ -607,7 +610,7 @@ function rowToRun(r: any): DistillRunRow {
     distillJobId: r.distillJobId, outcome: r.outcome as DistillOutcome, rawOutput,
     rawCount: r.distilledCount, acceptedCount: r.acceptedCount, dedupedCount: r.dedupedCount,
     filteredCount: r.filteredCount, storedCount: r.storedCount, discardedCount: r.discardedCount,
-    durationMs: r.durationMs, ts: r.ts,
+    durationMs: r.durationMs, errorMessage: r.errorMessage ?? null, ts: r.ts,
   }
 }
 
@@ -629,6 +632,7 @@ export interface DistillRunListRow {
   storedCount: number
   discardedCount: number
   durationMs: number
+  errorMessage: string | null
   ts: number
   cwd: string | null
   runtime: string
@@ -650,7 +654,8 @@ export async function listRecentDistillRuns(
     rawCount: memoryDistillRuns.distilledCount, acceptedCount: memoryDistillRuns.acceptedCount,
     dedupedCount: memoryDistillRuns.dedupedCount, filteredCount: memoryDistillRuns.filteredCount,
     storedCount: memoryDistillRuns.storedCount, discardedCount: memoryDistillRuns.discardedCount,
-    durationMs: memoryDistillRuns.durationMs, ts: memoryDistillRuns.ts,
+    durationMs: memoryDistillRuns.durationMs, errorMessage: memoryDistillRuns.errorMessage,
+    ts: memoryDistillRuns.ts,
   }
   const runRows = await db.select(cols).from(memoryDistillRuns)
     .orderBy(desc(memoryDistillRuns.ts)).limit(limit).all()
@@ -664,7 +669,7 @@ export async function listRecentDistillRuns(
       distillJobId: r.distillJobId, outcome: r.outcome as DistillOutcome,
       rawCount: r.rawCount, acceptedCount: r.acceptedCount, dedupedCount: r.dedupedCount,
       filteredCount: r.filteredCount, storedCount: r.storedCount, discardedCount: r.discardedCount,
-      durationMs: r.durationMs, ts: r.ts,
+      durationMs: r.durationMs, errorMessage: r.errorMessage ?? null, ts: r.ts,
       cwd: j?.cwd ?? null, runtime: j?.runtime ?? '', createdAt: j?.createdAt ?? 0,
       sourceAgentId: j?.sourceAgentId ?? null,
     }

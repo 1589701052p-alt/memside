@@ -223,7 +223,7 @@ test('getSourceInput returns null on malformed turns_json (deser failure, no cra
 
 test('saveDistillRun inserts a row, getDistillRun reads it back', async () => {
   await db.insert(memoryDistillJobs).values({ id: 'job-r1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/repo', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 100, finishedAt: 200 })
-  await saveDistillRun(db, 'job-r1', { outcome: 'produced', rawOutput: { candidates: [{ title: 'x' }] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 42 })
+  await saveDistillRun(db, 'job-r1', { outcome: 'produced', rawOutput: { candidates: [{ title: 'x' }] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 42, errorMessage: null })
   const run = await getDistillRun(db, 'job-r1')
   expect(run?.outcome).toBe('produced')
   expect(run?.rawCount).toBe(1)
@@ -232,8 +232,8 @@ test('saveDistillRun inserts a row, getDistillRun reads it back', async () => {
 })
 
 test('saveDistillRun UPSERT overwrites on same distillJobId', async () => {
-  await saveDistillRun(db, 'job-r2', { outcome: 'empty_output', rawOutput: null, rawCount: 0, acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0, durationMs: 5 })
-  await saveDistillRun(db, 'job-r2', { outcome: 'produced', rawOutput: null, rawCount: 3, acceptedCount: 2, dedupedCount: 2, filteredCount: 1, storedCount: 1, discardedCount: 1, durationMs: 9 })
+  await saveDistillRun(db, 'job-r2', { outcome: 'empty_output', rawOutput: null, rawCount: 0, acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0, durationMs: 5, errorMessage: null })
+  await saveDistillRun(db, 'job-r2', { outcome: 'produced', rawOutput: null, rawCount: 3, acceptedCount: 2, dedupedCount: 2, filteredCount: 1, storedCount: 1, discardedCount: 1, durationMs: 9, errorMessage: null })
   const run = await getDistillRun(db, 'job-r2')
   expect(run?.outcome).toBe('produced')
   expect(run?.rawCount).toBe(3)
@@ -253,8 +253,8 @@ test('getDistillRun returns null rawOutput on malformed raw_output_json', async 
 test('listRecentDistillRuns returns rows newest-first with job metadata, no rawOutput', async () => {
   await db.insert(memoryDistillJobs).values({ id: 'job-l1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/a', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 10, finishedAt: 20 })
   await db.insert(memoryDistillJobs).values({ id: 'job-l2', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/b', sourceAgentId: 'ag1', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 30, finishedAt: 40 })
-  await saveDistillRun(db, 'job-l1', { outcome: 'produced', rawOutput: { candidates: [] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 1 })
-  await saveDistillRun(db, 'job-l2', { outcome: 'empty_output', rawOutput: null, rawCount: 0, acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0, durationMs: 1 })
+  await saveDistillRun(db, 'job-l1', { outcome: 'produced', rawOutput: { candidates: [] }, rawCount: 1, acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 1, errorMessage: null })
+  await saveDistillRun(db, 'job-l2', { outcome: 'empty_output', rawOutput: null, rawCount: 0, acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0, durationMs: 1, errorMessage: null })
   const rows = await listRecentDistillRuns(db)
   expect(rows.length).toBe(2)
   expect(rows[0]!.ts).toBeGreaterThanOrEqual(rows[1]!.ts)
@@ -270,4 +270,34 @@ test('openDb creates memory_distill_runs with all columns', () => {
     'distill_job_id', 'outcome', 'raw_output_json', 'distilled_count', 'accepted_count',
     'deduped_count', 'filtered_count', 'stored_count', 'discarded_count', 'duration_ms', 'ts',
   ]))
+})
+
+test('saveDistillRun persists errorMessage; getDistillRun reads it back', async () => {
+  await saveDistillRun(db, 'job-em1', { outcome: 'llm_error', rawOutput: null, rawCount: 0,
+    acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 42, errorMessage: '500 Internal Server Error' })
+  const run = await getDistillRun(db, 'job-em1')
+  expect(run?.errorMessage).toBe('500 Internal Server Error')
+  expect(run?.outcome).toBe('llm_error')
+})
+
+test('saveDistillRun UPSERT overwrites errorMessage', async () => {
+  await saveDistillRun(db, 'job-em2', { outcome: 'llm_error', rawOutput: null, rawCount: 0,
+    acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 5, errorMessage: 'timeout' })
+  await saveDistillRun(db, 'job-em2', { outcome: 'produced', rawOutput: null, rawCount: 1,
+    acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0,
+    durationMs: 9, errorMessage: null })
+  const run = await getDistillRun(db, 'job-em2')
+  expect(run?.errorMessage).toBeNull()
+  expect(run?.outcome).toBe('produced')
+})
+
+test('listRecentDistillRuns returns errorMessage in each row', async () => {
+  await saveDistillRun(db, 'job-em3', { outcome: 'llm_error', rawOutput: null, rawCount: 0,
+    acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 1, errorMessage: 'fetch failed' })
+  const rows = await listRecentDistillRuns(db)
+  const row = rows.find((r) => r.distillJobId === 'job-em3')
+  expect(row?.errorMessage).toBe('fetch failed')
 })
