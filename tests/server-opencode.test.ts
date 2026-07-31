@@ -135,3 +135,55 @@ test('POST /hooks/opencode/capture 缺 sessionId 时 debounceKey 回退 cwd:open
   expect(res.status).toBe(202)
   expect(enqueueCalls[0]).toMatchObject({ runtime: 'opencode', cwd: '/p', debounceKey: '/p:opencode', sessionId: '' })
 })
+
+// final-review Important #1 回归锁：malformed messages 不得逃逸路由 -> 500，必须 202 ack。
+// 背景：capture 路由镜像 claude code Stop（parseTranscriptFile 在 IIFE try/catch 内），
+// 但 opencode 版一度把 parseOpencodeMessages 放在 IIFE 之外同步执行——body.messages 为
+// 非数组真值（`??` 只挡 null/undefined，`{}`/`42`/字符串会漏过）或单条 message 缺 parts 时，
+// parseOpencodeMessages 抛 TypeError，逃逸 async 路由 -> 500，违反「<50ms 202 ack」契约。
+// 真实 opencode 版本的 message 形态是文档化验证空缺，单个畸形 idle payload 即可触发 500，
+// plugin 的 catch 吞掉错误但捕获信号被静默丢失而非记为 memory.capture 广播。
+// 修复：parseOpencodeMessages 移入 IIFE try/catch + 入参/消息级 parts 守卫（跳过不抛）。
+// 本测试锁定：畸形 messages -> 202（非 500）+ memory.capture 广播仍发（信号未丢）。
+test('POST /hooks/opencode/capture 畸形 messages 仍 202（非 500）+ capture 广播', async () => {
+  const opencodeFake: RuntimeAdapter = {
+    kind: 'opencode',
+    capture: async () => [],
+    inject: async () => '',
+  }
+  const enqueueCalls: { runtime: string; cwd: string; debounceKey: string; sessionId?: string }[] = []
+  const bc: unknown[] = []
+  const app = createApp({
+    db,
+    adapter: new ClaudeCodeAdapter(db),
+    opencodeAdapter: opencodeFake,
+    enqueueDistillJob: async (_d, input) => { enqueueCalls.push(input); return { jobId: 'j3', nextRunAt: 0 } },
+    broadcast: (m: unknown) => { bc.push(m) },
+  })
+
+  // 畸形用例 1：messages 是非数组真值（字符串）——`??` 不挡，须 Array.isArray 守卫
+  const res1 = await app.request('/hooks/opencode/capture', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId: 's1', cwd: '/p', messages: 'not-an-array' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(res1.status).toBe(202) // 关键断言：202 非 500
+  expect(bc.some((m: any) => m.type === 'memory.capture')).toBe(true) // 捕获信号未丢
+
+  // 畸形用例 2：单条 message 缺 parts（真实 opencode 版本可能的形态偏差）
+  const bc2: unknown[] = []
+  const app2 = createApp({
+    db,
+    adapter: new ClaudeCodeAdapter(db),
+    opencodeAdapter: opencodeFake,
+    enqueueDistillJob: async (_d, input) => { enqueueCalls.push(input); return { jobId: 'j4', nextRunAt: 0 } },
+    broadcast: (m: unknown) => { bc2.push(m) },
+  })
+  const res2 = await app2.request('/hooks/opencode/capture', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId: 's2', cwd: '/p', messages: [{ info: { role: 'user' } }] }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(res2.status).toBe(202) // 关键断言：202 非 500
+  expect(bc2.some((m: any) => m.type === 'memory.capture')).toBe(true) // 捕获信号未丢
+})

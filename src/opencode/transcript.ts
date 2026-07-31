@@ -17,13 +17,16 @@ export type OpencodePart =
  * - user/assistant TextPart -> {role, content}
  * - ToolPart 按 callID 配对，tool result error -> isError；output 作为 tool turn content
  * - reasoning/subtask/step/patch/snapshot/... 一律过滤（对齐 filterTranscriptForDistill 只保留 user/assistant text + tool I/O）
- * 纯函数，malformed part 跳过不抛。
+ * 纯函数，malformed part 跳过不抛。入参非数组或单条 message 缺 parts 也跳过不抛（final-review Important #1）：
+ * 真实 opencode 版本的 message 形态是文档化验证空缺，畸形 payload 不得让 capture 路由 500。
  */
 export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTurn[] {
+  if (!Array.isArray(messages)) return []
   const turns: TranscriptTurn[] = []
   // 第一遍：收集 tool_use（assistant 发起），按 callID 记 toolName
   const toolNames = new Map<string, string>()
   for (const m of messages) {
+    if (!Array.isArray(m.parts)) continue
     for (const p of m.parts) {
       const tp = p as any
       if (tp.type === 'tool' && tp.callID && tp.input !== undefined && tp.output === undefined) {
@@ -32,6 +35,7 @@ export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTu
     }
   }
   for (const m of messages) {
+    if (!Array.isArray(m.parts)) continue
     for (const p of m.parts) {
       if (p.type === 'text') {
         turns.push({ role: m.info.role, content: (p as any).text ?? '' })

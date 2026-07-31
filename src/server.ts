@@ -273,9 +273,13 @@ export function createApp(deps: AppDeps) {
     const sessionId = body.sessionId ?? ''
     const sourceEventId = body.sourceEventId ?? `opencode-idle-${Date.now()}`
     const debounceKey = sessionId || `${cwd}:opencode`
-    const turns = parseOpencodeMessages(body.messages ?? [])
+    // parseOpencodeMessages 在 IIFE try/catch 内（对齐 claude code Stop 路由 server.ts:224-238）：
+    // 同步抛出会逃逸 async 路由 -> 500，违反「<50ms 202 ack」契约。body.messages 非数组真值
+    // （`??` 只挡 null/undefined）或缺 parts 的畸形 payload 由 transcript.ts 守卫跳过不抛，
+    // 双保险：即便守卫漏网，IIFE catch 也记 memory.enqueue.failed 而非 500。
     void (async () => {
       try {
+        const turns = parseOpencodeMessages(Array.isArray(body.messages) ? body.messages : [])
         const { jobId } = await deps.enqueueDistillJob(deps.db, {
           sourceEventId, runtime: 'opencode', cwd, debounceKey, sessionId,
         })

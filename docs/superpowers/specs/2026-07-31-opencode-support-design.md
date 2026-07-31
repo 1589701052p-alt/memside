@@ -93,7 +93,7 @@ opencode-plugin/
 
 | 钩子 | 行为 |
 |---|---|
-| `event` | 过滤 `event.type === 'session.idle'`；从 `event.properties` 取 `sessionID`；cwd 用 plugin 闭包的 `directory`（PluginInput 字段）；调 `client.session.messages({sessionID})` 拉全部消息 → `fetch POST http://127.0.0.1:<port>/hooks/opencode/capture` body `{sessionId, cwd, messages, sourceEventId}`（原始 opencode 消息，daemon 侧 `parseOpencodeMessages` 转换--plugin 独立 JS 不能 import `src/`）。best-effort：catch 一切错误静默，不抛回 opencode。 |
+| `event` | 过滤 `event.type === 'session.idle'`；从 `event.properties` 取 `sessionID`；cwd 用 plugin 闭包的 `directory`（PluginInput 字段）；调 `client.session.messages({sessionID})` 拉全部消息 → `fetch POST http://127.0.0.1:<port>/hooks/opencode/capture` body `{sessionId, cwd, messages}`（`sourceEventId` 可选、由 server 兜底生成 `opencode-idle-${Date.now()}`，plugin 不发；去重全在 daemon 侧，plugin 无客户端高水位。原始 opencode 消息，daemon 侧 `parseOpencodeMessages` 转换--plugin 独立 JS 不能 import `src/`）。best-effort：catch 一切错误静默，不抛回 opencode。 |
 | `experimental.chat.messages.transform` | 取 `directory` 作 cwd → `fetch GET http://127.0.0.1:<port>/hooks/opencode/inject?cwd=<cwd>` 拿 `{block}`；`block` 非空时 prepend 到 `output.messages` 首条 `role==='user'` 消息的 `parts` 前（`{type:'text', text:block}`）。**幂等守卫**：首条 user message 已含 `--- BEGIN INJECTED MEMORY ---` 标记则跳过（对齐 superpowers + 复用 `formatMemoryBlock` 既有标记）。 |
 
 网络约定：plugin 跑在 opencode 进程，fetch `127.0.0.1`。Bun `fetch` **不默认尊重
