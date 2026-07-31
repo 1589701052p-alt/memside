@@ -22,7 +22,10 @@ export interface InjectInput {
 
 export interface RuntimeAdapter {
   readonly kind: RuntimeKind
-  /** Poll/accept captured events. claude code reads webhook queue; opencode stub returns []. */
+  /** Poll/accept captured events. claude code reads webhook queue; opencode
+   *  adapter has a real queue like claude code, but real capture goes via the
+   *  memory_distill_events DB table written by the /hooks/opencode/capture route
+   *  (server.ts) -- this method stays for unit tests / future adapters. */
   capture(): Promise<CaptureEvent[]>
   /** Render+return the injection block for a session start. null = no inject. */
   inject(input: InjectInput): Promise<string | null>

@@ -10,10 +10,10 @@ import type { RuntimeAdapter, CaptureEvent, InjectInput } from './types'
  *   a claude-code hook fires. Events buffer in an in-memory queue.
  * - `capture()`: drains and returns the queue (empties it). The scheduler
  *   polls this to enqueue distill jobs.
- * - `inject({cwd})`: queries approved memories for the project + runtime and
- *   renders the markdown block the SessionStart hook prepends. Returns null
- *   when there is nothing to inject (no db, no approved memories, or any
- *   store error) so injection never throws to the caller.
+ * - `inject({cwd})`: queries approved memories for the project (cross-runtime,
+ *   spec §5) and renders the markdown block the SessionStart hook prepends.
+ *   Returns null when there is nothing to inject (no db, no approved memories,
+ *   or any store error) so injection never throws to the caller.
  */
 export class ClaudeCodeAdapter implements RuntimeAdapter {
   readonly kind = 'claude-code' as const
@@ -35,7 +35,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   async inject(input: InjectInput): Promise<string | null> {
     if (!this.db) return null
     try {
-      const set = await listApprovedByScope(this.db, { projectId: input.cwd, runtime: 'claude-code' })
+      const set = await listApprovedByScope(this.db, { projectId: input.cwd })
       return formatMemoryBlock(set)
     } catch {
       // injection must never throw to the caller (SessionStart hook)

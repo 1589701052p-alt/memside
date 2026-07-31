@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { createApp } from '@/server'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
+import { OpencodeAdapter } from '@/adapter/opencode'
 import { enqueueDistillJob, tick } from '@/scheduler'
 import { createCandidate } from '@/memory/store'
 import { makeLoadTranscript } from '@/daemon'
@@ -55,7 +56,8 @@ afterEach(() => {
 
 test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => {
   const adapter = new ClaudeCodeAdapter(db)
-  const app = createApp({ db, adapter, enqueueDistillJob, broadcast: () => {} })
+  const opencodeAdapter = new OpencodeAdapter(db)
+  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast: () => {} })
 
   // 1. claude code Stop hook fires with a transcript_path pointing at a REAL
   //    JSONL file containing a business rule. The collector acks 202 and

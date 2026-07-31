@@ -141,3 +141,11 @@ test('App.tsx VALUE_LABEL covers 6 buckets incl user-rule + preference (source t
   expect(src).toContain("'user-rule'")
   expect(src).toContain('preference')
 })
+
+// opencode 支持：sourceLabel 必须能产出 'opencode' 标签，且 'opencode' 字符串存在于
+// App.tsx 源码中。refactor 删除即变红。
+// 设计依据：docs/superpowers/specs/2026-07-31-opencode-support-design.md §UI sourceLabel。
+test('App.tsx sourceLabel 含 opencode (source text)', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(src).toMatch(/opencode/)
+})

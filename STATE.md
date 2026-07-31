@@ -476,3 +476,85 @@ review verdict=Clean，1 条 Minor 注释 finding 一轮 fix wave 修后 scoped 
 6. Task 6：Web UI 徽标/evidence 行未做浏览器视觉手测（无浏览器面），建议交互环境过一遍
    审批 tab（老行无 origin/evidence 时不显徽标为预期）。
 
+## opencode 支持完整闭环（2026-07-31）
+
+opencode 支持完整闭环 landed（分支 `feat/opencode-support`）。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-07-31-opencode-support*`。
+
+- **Task 1**：`parseOpencodeMessages`（`src/opencode/transcript.ts`）— opencode 全量 messages JSON
+  转换为 `TranscriptTurn[]`，适配 claude/openai 角色映射（user/assistant → user/assistant，
+  tool 结果转为 tool role + tool_call_id）。
+- **Task 2**：`listApprovedByScope` 跨 runtime 共享（`src/memory/store.ts`）— `getApproved` 改为
+  按 `scopeType + scopeId` 查询，不再过滤 `runtime`，让 claude code 和 opencode 共用 project 记忆。
+- **Task 3**：`OpencodeAdapter`（`src/adapter/opencode.ts`）— 实现 `RuntimeAdapter` 接口，
+  `inject` 方法走 `listApprovedByScope` 获取 approved 记忆，包 `## Learned context` 块返回。
+- **Task 4**：daemon 双 adapter 接线（`src/daemon.ts`）— daemon 同时实例化 `ClaudeCodeAdapter` 和
+  `OpencodeAdapter`，分别注入 `AppDeps.adapter` / `AppDeps.opencodeAdapter`。
+- **Task 5**：daemon 两路由（`src/server.ts`）— `POST /hooks/opencode/capture`（idle hook 全量
+  messages 接收，fire-and-forget IIFE enqueueDistillJob + events 行，202 ack）+ `GET
+  /hooks/opencode/inject`（opencodeAdapter.inject，query 传 cwd）。
+- **Task 6**：opencode 两 plugin 钩子（`src/opencode/plugin.ts`）— `idle` hook（会话空闲 POST
+  /hooks/opencode/capture 含全量 messages）+ `messages.transform` hook（新会话 GET
+  /hooks/opencode/inject 注入记忆块）。
+- **Task 7**：`installOpencodePlugin`（`src/install.ts`）— 本地 plugin 文件安装到
+  `~/.config/opencode/plugins/` + 更新 `opencode.json` 注册；`start-and-install` 自动调用。
+- **Task 8**：Web UI sourceLabel + README/STATE 收尾 — App.tsx `sourceLabel` 加 `runtime==='opencode'`
+  分支；README 去 opencode 限制 + 加 opencode 用法；STATE.md 本段。
+
+执行：subagent-driven（8 实现 task 各 implementer + reviewer；终审 pending）。
+`bun run typecheck && bun test` 546/546 全绿。
+
+### 验证缺口（post-merge 手动 live smoke，spec §测试策略 live-only）
+
+opencode 1.15.5 真实环境手动验证（非本机，需 opencode 可执行环境）：
+
+1. **local-path plugin 加载**：`~/.config/opencode/plugins/memside.js` 是否被 opencode
+   正确加载并注册 idle / messages.transform 钩子。
+2. **session.idle payload 形状**：opencode idle hook 实际发出的 POST body 字段
+   （sessionId/cwd/messages）是否与 `plugin.ts` 假设一致（依赖 opencode 文档，未在
+   1.15.5 上实测）。
+3. **`client.session.messages` return 形状**：`messages.transform` hook 的 GET /hooks/opencode/inject
+   返回的 `{block}` 形状是否被 opencode 正确解析为注入上下文（`additionalContext` envelope
+   格式差异风险）。
+4. **Bun fetch vs 代理**：plugin 中 `fetch`（Bun 运行时）在用户有系统代理时的行为
+   （`NO_PROXY` 等效绕过 loopback 需求）。
+5. **messages.transform 幂等性**：多次 GET /hooks/opencode/inject（如重试）是否重复注入
+   （server 侧无状态 GET，幂等由 opencode 保证，需验证）。
+6. **opencode.json ~ 扩展**：`installOpencodePlugin` 写入 `~/.config/opencode/opencode.json`
+   时 `~` 是否被 shell 展开（Bun 的 `homedir()` vs shell tilde 差异）。
+
+以上 6 项验证缺口不阻塞合并，但需在 opencode 环境中手动验证后标记为已解决。
+
+### Live smoke 结果（2026-07-31，真实 opencode 1.15.5 + Bun 1.3.14 + 系统代理 :7897）
+
+本机真实 opencode 环境全闭环验证通过，6 项缺口全部闭合：
+
+1. **plugin 加载** ✅ — `opencode run` 与 `opencode serve` 两种模式均加载 memside plugin，
+   idle + messages.transform 两钩子注册生效。
+2. **session.idle payload** ✅ — `event.properties.sessionID`（字符串 `ses_...`）确认；
+   插件据此拉全量 messages。
+3. **client.session.messages 形状** ✅（**修复**）— SDK 期望 `client.session.messages({ path: { id: sessionID } })`，
+   非 `{ sessionID }`（后者把字面量对象拼进 URL 报 "Expected a string starting with ses"）；
+   返回 `res.data` 为 `{info:{role}, parts:[]}` 数组。
+4. **Bun fetch vs 代理** ✅（**修复**）— Bun fetch 原生尊重 `HTTP_PROXY`/`HTTPS_PROXY` 且不豁免
+   loopback，系统代理 :7897 会把 `127.0.0.1:7777` 请求转发出去 -> 502，capture+inject 双双静默失效。
+   修复：plugin 启动时 `process.env.NO_PROXY` 追加 `127.0.0.1,localhost`（追加非覆盖，保留出站代理）。
+5. **messages.transform 幂等** ✅ — `INJECT_MARK` 守卫 + 首条 user message 注入；多次触发不重复。
+6. **opencode.json 路径** ✅ — install 用 `homedir()` 解析，写入正斜杠路径
+   `C:/Users/admin/.config/opencode/memside-opencode`，opencode 正确加载（无 shell tilde 问题）。
+
+**全闭环 end-to-end**（capture -> distill -> approve -> inject）：
+- **capture**：真实 `opencode run` 会话 -> session.idle -> plugin fetch messages -> POST `/hooks/opencode/capture`
+  （NO_PROXY 生效）-> daemon 存 1221-byte 真实 transcript -> enqueue（runtime=opencode）。
+- **distill**：distiller 调 LLM 11.2s -> outcome=`produced` -> 1 候选入库。
+  （另：琐碎 2-turn 问答正确产出 `empty_output`，非 bug。）
+- **approve**：`POST /api/memories/:id/promote` -> status=approved。
+- **inject**：`GET /hooks/opencode/inject?cwd=...` 返回 1690-byte 块，含刚批准的 opencode-runtime
+  记忆 `[bun-proxy-bypass]` + 5 条 claude-code 记忆（**跨 runtime 共享**实证）。
+  真实 `opencode run` LLM 确认上下文开头见 `BEGIN INJECTED MEMORY` 块，首条即 opencode-runtime 记忆。
+
+**随验证落地的代码改动**（本分支 commit）：
+- `opencode-plugin/memside.js`：NO_PROXY loopback 旁路 + `path:{id}` SDK 签名 + `Array.isArray(res.data)` 归一化。
+- `tests/plugin-opencode.test.ts`：3 条源码层文本断言守卫（CLAUDE.md 运行时组件兜底面），回退任一修复即红。
+- `bun run typecheck && bun test` 550/550 全绿。
+

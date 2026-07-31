@@ -14,6 +14,7 @@ import { loadUiLlmConfig } from './settings'
 import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
+import { OpencodeAdapter } from './adapter/opencode'
 import { installHooks } from './install'
 
 export interface DaemonOpts {
@@ -149,8 +150,12 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   sweepStuckRunning(db)
 
   const adapter = new ClaudeCodeAdapter(db)
+  // opencode runtime adapter（Task 4 接线）：与 claude adapter 共享同一 db，
+  // project 记忆跨 runtime 共享（spec §5，listApprovedByScope 已去 runtime 过滤）。
+  // /hooks/opencode/inject 走它；capture 路由与 plugin 安装在 Task 5/6/7 落地。
+  const opencodeAdapter = new OpencodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
-  const app = createApp({ db, adapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir })
+  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {

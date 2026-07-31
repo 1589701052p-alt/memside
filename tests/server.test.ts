@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { openDb } from '@/db/client'
 import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
+import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
 import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards } from '@/db/schema'
 
@@ -18,6 +19,7 @@ let dir = ''
 let db: ReturnType<typeof openDb>
 let app: ReturnType<typeof createApp>
 let adapter: ClaudeCodeAdapter
+let opencodeAdapter: OpencodeAdapter
 let enqueueCalls: { sourceEventId: string; runtime: string; cwd: string; debounceKey: string; sessionId?: string; sourceAgentId?: string | null }[]
 let broadcastCalls: unknown[]
 
@@ -31,11 +33,13 @@ beforeEach(() => {
   mkdirSync(dir, { recursive: true })
   db = openDb(join(dir, 't.db'))
   adapter = new ClaudeCodeAdapter(db)
+  opencodeAdapter = new OpencodeAdapter(db)
   enqueueCalls = []
   broadcastCalls = []
   app = createApp({
     db,
     adapter,
+    opencodeAdapter,
     enqueueDistillJob: async (_d, input) => {
       enqueueCalls.push(input)
       return { jobId: 'j', nextRunAt: 0 }
@@ -106,6 +110,7 @@ test('collector acks 202 even when enqueue rejects, and broadcasts memory.enqueu
   app = createApp({
     db,
     adapter,
+    opencodeAdapter,
     enqueueDistillJob: async () => { throw new Error('SQLITE_BUSY') },
     broadcast: (m: unknown) => { bc.push(m) },
   })
@@ -200,7 +205,7 @@ test('collector SubagentStop with agent_id hitting subagent file (double-fallbac
 test('collector SubagentStop still acks 202 when enqueue rejects, broadcasts failure', async () => {
   const bc: unknown[] = []
   app = createApp({
-    db, adapter,
+    db, adapter, opencodeAdapter,
     enqueueDistillJob: async () => { throw new Error('SQLITE_BUSY') },
     broadcast: (m: unknown) => { bc.push(m) },
   })

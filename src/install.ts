@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -145,4 +145,68 @@ export function installHooks(opts: InstallOpts): void {
   }
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+}
+
+export interface InstallOpencodePluginOpts {
+  port: number
+  /**
+   * Override the opencode config dir (default `~/.config/opencode`). Tests pass
+   * a tmp dir so they never touch the real user config.
+   */
+  baseDir?: string
+  /** Repo `opencode-plugin/` source dir (copied verbatim, then port-baked). */
+  pluginSrcDir: string
+}
+
+/**
+ * Install the opencode plugin (Task 6 artifact) into the user's opencode config
+ * dir and idempotently merge its path into `opencode.json`'s `plugin` array.
+ *
+ * Mirrors `installHooks`'s idempotent-merge pattern, but uses a path substring
+ * (`memside-opencode`) as the self-identification marker: opencode's `plugin`
+ * entries are plain strings with no header slot (unlike claude code's curl
+ * `-H "x-memside-tag: ..."`), so the installed directory name is the natural
+ * grep-able handle. A prior memside entry is filtered out before the fresh
+ * absolute path is pushed, so re-running with a new port replaces rather than
+ * appends. User-authored plugin entries (e.g. `superpowers@git+...`) are
+ * always preserved.
+ *
+ * The absolute path is written with forward slashes to avoid `~` / backslash
+ * expansion differences across opencode versions (design §6, failure mode 6).
+ *
+ * Never throws on malformed `opencode.json` (treated as an empty document so
+ * install always succeeds); `cpSync` / IO errors still surface.
+ */
+export function installOpencodePlugin(opts: InstallOpencodePluginOpts): void {
+  const ocdDir = opts.baseDir ?? join(resolveHome(), '.config', 'opencode')
+  mkdirSync(ocdDir, { recursive: true })
+  const destDir = join(ocdDir, 'memside-opencode')
+  // 复制 plugin 目录（package.json + memside.js，Task 6 产物）
+  cpSync(opts.pluginSrcDir, destDir, { recursive: true })
+  // 端口烘焙：读 memside.js 把 __MEMSIDE_PORT__ 占位替换为实际端口
+  const jsPath = join(destDir, 'memside.js')
+  let js = readFileSync(jsPath, 'utf-8')
+  js = js.replace(/__MEMSIDE_PORT__/g, String(opts.port))
+  writeFileSync(jsPath, js)
+  // 幂等合并 opencode.json 的 plugin 数组
+  const settingsPath = join(ocdDir, 'opencode.json')
+  let cfg: Record<string, unknown> = {}
+  if (existsSync(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        cfg = parsed as Record<string, unknown>
+      }
+    } catch {
+      // malformed opencode.json: start fresh so install always succeeds
+      cfg = {}
+    }
+  }
+  let plugin = Array.isArray(cfg.plugin) ? (cfg.plugin as string[]) : []
+  // drop any prior memside-opencode entry (idempotent replace)
+  plugin = plugin.filter((p) => typeof p === 'string' && !p.includes('memside-opencode'))
+  // absolute path with forward slashes (avoid `~` expansion differences)
+  plugin.push(destDir.replace(/\\/g, '/'))
+  cfg.plugin = plugin
+  writeFileSync(settingsPath, JSON.stringify(cfg, null, 2) + '\n')
 }

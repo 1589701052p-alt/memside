@@ -6,9 +6,12 @@ import { z } from 'zod'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
+import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, MemoryNotFoundError } from '@/memory/store'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
+import { parseOpencodeMessages } from '@/opencode/transcript'
+import type { OpencodeMessage } from '@/opencode/transcript'
 import type { EnqueueInput } from '@/scheduler'
 import { loadUiLlmConfig, saveUiLlmConfig, maskToken, type UiLlmConfig } from '@/settings'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
@@ -17,6 +20,11 @@ import { testConnection as defaultTestConnection } from './anthropic'
 export interface AppDeps {
   db: DbClient
   adapter: ClaudeCodeAdapter
+  /** opencode runtime adapter（Task 4 接线）。与 `adapter`（claude code）并列；
+   * 现有 `/hooks/claude/SessionStart` 与 `/inject` 仍走 `adapter`（claude），
+   * `/hooks/opencode/inject` 走 `opencodeAdapter`。用 `RuntimeAdapter` 接口类型
+   * 而非具体类，便于测试注入 fake（真实实例化在 daemon.ts: `new OpencodeAdapter(db)`）。 */
+  opencodeAdapter: RuntimeAdapter
   enqueueDistillJob: (db: DbClient, input: EnqueueInput) => Promise<{ jobId: string; nextRunAt: number }>
   broadcast: (msg: unknown) => void
   /** 一键启动（生产模式）：vite build 产物目录（src/web/dist）。提供时
@@ -237,6 +245,54 @@ export function createApp(deps: AppDeps) {
     const { cwd } = await c.req.json().catch(() => ({ cwd: '' }))
     const block = await deps.adapter.inject({ cwd })
     return c.json({ block })
+  })
+
+  // opencode injector（Task 4 接线）：opencode plugin 的 messages.transform 钩子
+  // 在新会话首条 user 消息前 GET 这个端点，把审批记忆块注入会话上下文（对齐 claude
+  // code 的 /inject + SessionStart 闭环，但 opencode 走 query 传 cwd + opencodeAdapter）。
+  // 与上面 /inject 的差异仅在用 opencodeAdapter（跨 runtime 共享记忆，spec §5）。
+  // capture 路由（POST /hooks/opencode/capture，Task 5）注册在下方。
+  app.get('/hooks/opencode/inject', async (c) => {
+    const cwd = c.req.query('cwd') ?? ''
+    const block = await deps.opencodeAdapter.inject({ cwd })
+    return c.json({ block })
+  })
+
+  // opencode capture（Task 5 接线）：opencode idle hook 在会话空闲时 POST 全量 messages。
+  // 与 claude code Stop 路由（server.ts:222-238）同构：fire-and-forget IIFE 转 turns ->
+  // enqueueDistillJob + memory_distill_events 行 -> 202 同步 ack（<50ms 契约）。
+  // 差异：opencode transcript 是 inline messages（非 JSONL 文件），由 parseOpencodeMessages
+  // 转换；debounceKey 优先用 sessionId（多 opencode 会话隔离），缺省回退 `${cwd}:opencode`。
+  // 错误信号不走单独路由：全量 transcript 内的 isError turn 由 distiller 的 detectErrorSignals
+  // 提取（对齐 claude code PostToolUse 跳过决策，server.ts:154-157）。
+  app.post('/hooks/opencode/capture', async (c) => {
+    const body = await c.req.json().catch(() => ({}) as {
+      sessionId?: string; cwd?: string; messages?: OpencodeMessage[]; sourceEventId?: string
+    })
+    const cwd = body.cwd ?? ''
+    const sessionId = body.sessionId ?? ''
+    const sourceEventId = body.sourceEventId ?? `opencode-idle-${Date.now()}`
+    const debounceKey = sessionId || `${cwd}:opencode`
+    // parseOpencodeMessages 在 IIFE try/catch 内（对齐 claude code Stop 路由 server.ts:224-238）：
+    // 同步抛出会逃逸 async 路由 -> 500，违反「<50ms 202 ack」契约。body.messages 非数组真值
+    // （`??` 只挡 null/undefined）或缺 parts 的畸形 payload 由 transcript.ts 守卫跳过不抛，
+    // 双保险：即便守卫漏网，IIFE catch 也记 memory.enqueue.failed 而非 500。
+    void (async () => {
+      try {
+        const turns = parseOpencodeMessages(Array.isArray(body.messages) ? body.messages : [])
+        const { jobId } = await deps.enqueueDistillJob(deps.db, {
+          sourceEventId, runtime: 'opencode', cwd, debounceKey, sessionId,
+        })
+        await deps.db.insert(memoryDistillEvents).values({
+          distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
+          kind: 'conversation', payload: JSON.stringify(turns),
+        })
+      } catch (e) {
+        deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) })
+      }
+    })()
+    deps.broadcast({ type: 'memory.capture', sourceEventId })
+    return c.json({ ok: true }, 202)
   })
 
   // --- Memory API ---------------------------------------------------------

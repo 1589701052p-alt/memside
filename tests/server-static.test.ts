@@ -3,6 +3,7 @@ import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
+import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
 
 // 一键启动（2026-07-28-one-click-launch）：锁 createApp 的 staticDir 托管行为。
@@ -31,6 +32,7 @@ function makeApp(staticDir?: string) {
   return createApp({
     db,
     adapter: new ClaudeCodeAdapter(db),
+    opencodeAdapter: new OpencodeAdapter(db),
     enqueueDistillJob: async () => ({ jobId: 'j', nextRunAt: 0 }),
     broadcast: () => {},
     staticDir,
