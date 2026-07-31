@@ -2,34 +2,48 @@ import type { DistillCandidate } from '@/memory/distiller'
 import type { LLMCall } from '@/llm'
 import { callWithRetry } from './retry'
 
-export type ValueClass = 'decision' | 'convention' | 'trap' | 'topology'
-export type DiscardReason = 'public-knowledge' | 'derivable' | 'taming'
+export type ValueClass = 'user-rule' | 'decision' | 'preference' | 'convention' | 'trap' | 'topology'
+export type DiscardReason = 'public-knowledge' | 'derivable' | 'taming' | 'fleeting'
 
 export type ValueVerdict =
   | { index: number; keep: false; reason: DiscardReason }
   | { index: number; keep: true; valueClass: ValueClass }
   | { index: number; keep: true; valueClass: null }
 
-export const VALUE_JUDGE_SYSTEM_PROMPT = `You are memside-value-judge. Classify each candidate memory into exactly one
-category by these criteria:
+export const VALUE_JUDGE_SYSTEM_PROMPT = `You are memside-value-judge. Assign exactly one category to each candidate memory.
 
-1. public-knowledge - obtainable via Google / official docs / source within ~10s
-   (language syntax, stdlib, third-party API, generic algorithms, public standards).
-   Project-specific business rules, contracts, and SLAs do not belong here.
-2. derivable - re-derivable by reading THIS repository's current code/files/docs
-   without the conversation. If the candidate describes the codebase being worked
-   on (file paths, function/symbol names, config defaults, internal module
-   behavior, file contents), it is derivable even when rationale is given.
-3. decision - the WHY behind a choice: abandoned alternatives, constraints that
-   drove the decision.
-4. convention - an unwritten team rule / reviewer preference not documented anywhere.
-5. trap - counterintuitive behavior, known gotcha, recurring pitfall.
-6. topology - a cross-boundary connection (cross-module/service/team/repo) invisible
-   from any single vantage point.
+Each candidate carries an origin tag: user-stated (the user said it in this session),
+user-confirmed (the agent proposed it and the user explicitly adopted it), or
+agent-observed (the agent derived it on its own).
 
-Each candidate is marked with a ruleObject hint: codebase (describes the current repository's own code/config/modules) or domain (describes something outside the repository). Apply the 6 categories above as written - a codebase-ruleObject candidate that describes this repository's own design decisions, implementation rules, or internal behavior is derivable.
+Retain categories (assign the best fit):
+1. user-rule - an explicit rule or hard constraint the user laid down: workflow rules,
+   quality bars, safety constraints.
+2. decision - the WHY behind a choice the user made or adopted: abandoned alternatives,
+   driving constraints.
+3. preference - the user's personal preferences and collaboration habits.
+4. convention - an unwritten team/repo norm that holds steady without being stated by
+   the user in this session.
+5. trap - counterintuitive behavior, known gotchas, postmortem lessons from incidents.
+6. topology - a cross-boundary connection (cross-module/service/repo) invisible from
+   any single vantage point.
 
-Pick the best-fitting category for each candidate. 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
+Drop categories (assign only when the stated test passes):
+7. public-knowledge - TEST: could an engineer who never read this repo and never saw
+   this session write this entry from general knowledge or official docs alone?
+   ("Python dicts preserve insertion order" -> yes; "refunds only within 14 days of
+   shipment in this product" -> no.)
+8. derivable - TEST: reading only this repository's code/docs/config, never this
+   conversation, could one re-derive this entry's content? ("the token mask retains the
+   first 6 and last 4 chars" -> yes; "the credential chain puts UI first because stale
+   env vars once caused a 401 outage" -> no - the code shows the order, not the why.)
+   HARD RULE: never assign derivable to a candidate whose origin is user-stated or
+   user-confirmed.
+9. fleeting - TEST: in a brand-new session three months from now, would this entry
+   still bind or inform? ("let's stop here for today" -> no; "every change lands via
+   branch + PR" -> yes.)
+
+输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
 {
   "verdicts": [
     {"index": 0, "category": "decision"},
@@ -37,12 +51,6 @@ Pick the best-fitting category for each candidate. 输出格式如下（仅示�
   ]
 }
 Emit one verdict per candidate, keyed by index.`
-
-export function parseCategory(title: string): string | null {
-  const m = /^\s*\[category:([^\]]+)\]/i.exec(title)
-  if (!m) return null
-  return m[1]!.trim().toLowerCase()
-}
 
 const TAMING_PATTERNS: readonly string[] = [
   // A 压制异议/批评/质疑
@@ -85,29 +93,27 @@ export function detectTaming(title: string, bodyMd: string): boolean {
   }
 }
 
-/** Distill categories whose candidates valueFilter must NEVER discard:
- *  business hard rules / external contracts / regulatory constraints.
- *  Force-kept with valueClass='decision' (non-null -> immune to the Web UI
- *  "批量拒绝未评估" button, which targets value_class IS NULL). */
-export const VALUE_PROTECTED_CATEGORIES = new Set(['invariant', 'integration', 'compliance'])
-
 const VALID_CATEGORIES = new Set([
-  'public-knowledge', 'derivable', 'decision', 'convention', 'trap', 'topology',
+  'user-rule', 'decision', 'preference', 'convention', 'trap', 'topology',
+  'public-knowledge', 'derivable', 'fleeting',
 ])
-const DISCARD_CATEGORIES = new Set(['public-knowledge', 'derivable'])
+const DISCARD_CATEGORIES = new Set(['public-knowledge', 'derivable', 'fleeting'])
 const VALUE_CLASS_MAP: Record<string, ValueClass> = {
-  decision: 'decision', convention: 'convention', trap: 'trap', topology: 'topology',
+  'user-rule': 'user-rule', decision: 'decision', preference: 'preference',
+  convention: 'convention', trap: 'trap', topology: 'topology',
 }
 
 function renderUserPrompt(candidates: DistillCandidate[]): string {
-  return candidates.map((c, i) => `[${i}] (ruleObject: ${c.ruleObject ?? 'codebase'}) ${c.title}\n${c.bodyMd}`).join('\n---\n')
+  return candidates.map((c, i) =>
+    `[${i}] (origin: ${c.origin}) ${c.title}\n${c.bodyMd}${c.evidence ? `\n出处: ${c.evidence}` : ''}`,
+  ).join('\n---\n')
 }
 
 /**
  * Validate parsed value-judge output for retry-worthiness. Returns an error
  * message to retry, or null to accept. Checks: parsed has a `verdicts` array,
  * each verdict has a numeric `index` in [0, n), and a `category` string that is
- * one of the 6 VALID_CATEGORIES. Exhausted retries fall through to the existing
+ * one of the 9 VALID_CATEGORIES. Exhausted retries fall through to the existing
  * per-verdict hallucinated-category -> keep+null mapping.
  */
 function valueShouldRetry(n: number): (parsed: unknown) => string | null {
@@ -128,10 +134,13 @@ function valueShouldRetry(n: number): (parsed: unknown) => string | null {
 }
 
 /**
- * Existing value-classification logic (rounds 1-3): keepNull fallback + LLM 6-class
- * classify + protected-category force-keep. Behavior identical to pre-fix6 judgeValue.
- * Extracted (fix6) so judgeValue can layer the taming override on top without touching
- * this logic - see I3-style specific-source guard sensitivity in STATE.md.
+ * Origin-driven value classification (9 类：6 留 + 3 丢) + stated 免疫 derivable 兜底。
+ * keepNull 失败兜底：用户陈述类（user-stated/user-confirmed）给 decision（免疫 Web UI
+ * "批量拒绝未评估" 按钮，该按钮 target value_class IS NULL），agent-observed 给 null。
+ * 主路径映射 LLM 9 类 verdict：retain 6 类 -> keep+valueClass；drop 3 类（public-knowledge
+ * /derivable/fleeting）-> discard。代码硬兜底（spec §R2，7-30 误杀回归锁）：origin 非
+ * agent-observed 的候选被判 derivable 时改判 keep+decision（prompt 已禁考 Q2，LLM 违规
+ * 时代码再兜一道）。judgeValueBase 吞自身 LLM 错误（全 keep+null/decision），不冒泡。
  */
 async function judgeValueBase(
   candidates: DistillCandidate[],
@@ -140,13 +149,12 @@ async function judgeValueBase(
   const n = candidates.length
   if (n === 0) return []
   const keepNull = (): ValueVerdict[] =>
-    candidates.map((c, i) => {
-      const cat = parseCategory(c.title)
-      const subj = c.ruleObject === 'domain' ? 'domain' : 'codebase'
-      return (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain')
-        ? { index: i, keep: true, valueClass: 'decision' as ValueClass }
-        : { index: i, keep: true, valueClass: null }
-    })
+    candidates.map((c, i) => ({
+      index: i,
+      keep: true,
+      // R3 失败兜底（spec）：用户陈述类给 decision（免疫批量拒绝），observed 给 null。
+      valueClass: c.origin === 'agent-observed' ? null : ('decision' as ValueClass),
+    }))
   try {
     const parsed = await callWithRetry({
       call: callLLM,
@@ -161,22 +169,28 @@ async function judgeValueBase(
       const o = v as { index?: unknown; category?: unknown }
       if (typeof o.index !== 'number' || o.index < 0 || o.index >= n) continue
       if (typeof o.category !== 'string' || !VALID_CATEGORIES.has(o.category)) {
-        byIndex.set(o.index, { index: o.index, keep: true, valueClass: null })
+        // 与 keepNull 一致（spec §R3）：stated/confirmed -> decision（免疫批量拒绝未评估），
+        // observed -> null。幻觉类别兜底不能比 LLM-整体失败兜底更弱。
+        byIndex.set(o.index, { index: o.index, keep: true,
+          valueClass: candidates[o.index]!.origin === 'agent-observed' ? null : ('decision' as ValueClass) })
         continue
       }
       if (DISCARD_CATEGORIES.has(o.category)) {
-        byIndex.set(o.index, { index: o.index, keep: false, reason: o.category as DiscardReason })
+        // 代码硬兜底（spec §R2，7-30 误杀回归锁）：用户陈述类免疫 derivable。
+        // prompt 已禁考 Q2；LLM 违规时这里改判 keep+decision。fleeting 不免疫
+        //（Q3 是 AI 对用户话语的判断权，"今天先到这吧" 该丢）。
+        if (o.category === 'derivable' && candidates[o.index]!.origin !== 'agent-observed') {
+          byIndex.set(o.index, { index: o.index, keep: true, valueClass: 'decision' })
+        } else {
+          byIndex.set(o.index, { index: o.index, keep: false, reason: o.category as DiscardReason })
+        }
       } else {
         byIndex.set(o.index, { index: o.index, keep: true, valueClass: VALUE_CLASS_MAP[o.category] })
       }
     }
-    return candidates.map((c, i) => {
-      const cat = parseCategory(c.title)
-      const subj = c.ruleObject === 'domain' ? 'domain' : 'codebase'
-      if (cat && VALUE_PROTECTED_CATEGORIES.has(cat) && subj === 'domain') {
-        return { index: i, keep: true, valueClass: 'decision' as ValueClass }
-      }
-      return byIndex.get(i) ?? { index: i, keep: true, valueClass: null }
+    return candidates.map((c, i) => byIndex.get(i) ?? {
+      index: i, keep: true,
+      valueClass: c.origin === 'agent-observed' ? null : ('decision' as ValueClass),
     })
   } catch {
     return keepNull()
@@ -184,13 +198,14 @@ async function judgeValueBase(
 }
 
 /**
- * Classify each candidate into one of 6 categories (rules 1-6) + apply taming override
- * (fix6). Code maps public-knowledge/derivable => discard, decision/convention/trap/
- * topology => keep with valueClass; protected categories (invariant/integration/
- * compliance × ruleObject=domain) are force-kept with valueClass='decision' inside
- * judgeValueBase. judgeValueBase swallows its own LLM errors (all keep+null/decision),
- * never bubbles. The taming override (fix6) runs last and overrides protected force-keep
- * (safety > protection): a taming instruction is discarded even if mislabeled invariant.
+ * Classify each candidate into one of 9 categories (6 retain + 3 drop) + apply taming
+ * override (fix6). Code maps public-knowledge/derivable/fleeting => discard,
+ * user-rule/decision/preference/convention/trap/topology => keep with valueClass;
+ * stated-immune backstop (spec §R2) re-classifies non-observed candidates that the LLM
+ * wrongly tagged derivable to keep+decision. judgeValueBase swallows its own LLM errors
+ * (all keep+null/decision), never bubbles. The taming override (fix6) runs last and
+ * overrides the stated-immune backstop (safety > stated-immune): a taming instruction is
+ * discarded even if it would otherwise be retained.
  */
 export async function judgeValue(
   candidates: DistillCandidate[],
@@ -199,9 +214,8 @@ export async function judgeValue(
   const n = candidates.length
   if (n === 0) return []
   const base = await judgeValueBase(candidates, callLLM)
-  // 第六轮第 4 项：taming override，最后跑，覆盖 protected force-keep（安全 > 保护）。
-  // 驯化指令即使被误标 [category:invariant] ruleObject=domain，仍丢弃--合法 business
-  // invariant 不会含反馈压制词，无现实冲突。
+  // 第六轮第 4 项：taming override，最后跑，覆盖 stated 免疫（安全 > stated 免疫）。
+  // 驯化指令即使 origin=user-stated，仍丢弃--合法用户规则不会含反馈压制词，无现实冲突。
   return base.map((v, i) =>
     detectTaming(candidates[i]!.title, candidates[i]!.bodyMd)
       ? { index: i, keep: false, reason: 'taming' }

@@ -166,11 +166,10 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter
       // only runs on survivors (no wasted calls, no per-dupe mis-classification).
       const deduped = await dedupCandidates(db, deps.callLLM, candidates, job.cwd ?? null)
-      // Value filter: classify each survivor. public-knowledge/derivable =>
-      // discard (audit-logged); decision/convention/trap/topology => keep with
-      // valueClass; protected categories (invariant/integration/compliance) are
-      // force-kept with valueClass='decision' inside judgeValue. judgeValue
-      // swallows its own LLM errors (all keep+null/decision), never bubbles.
+      // Value filter: 九分类（spec §R2）。public-knowledge/derivable/fleeting => discard
+      // (audit-logged)；6 价值筐 => keep with valueClass。用户陈述类免疫 derivable
+      // （judgeValue 代码兜底）。judgeValue swallows its own LLM errors
+      // （stated->decision / observed->null），never bubbles.
       const verdicts = await judgeValue(deduped, deps.callLLM)
       const keepWithClass: { cand: DistillCandidate; valueClass: ValueClass | null }[] = []
       const discarded: DiscardRecord[] = []
@@ -206,6 +205,8 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           sourceEventId: job.sourceEventId,
           valueClass: k.valueClass,
           subjectSlug: k.cand.subjectSlug,
+          origin: k.cand.origin,      // spec §模块改动点 3：出处随候选入库
+          evidence: k.cand.evidence,  // 出处原句摘抄
         })
       }
       // 去门（spec §5）：0 产出 job 也存过滤版输入，让用户看到「模型看到了什么却返回 0」。

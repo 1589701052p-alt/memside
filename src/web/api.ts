@@ -25,6 +25,10 @@ export interface MemoryItem {
   createdAt?: number
   version?: number
   valueClass?: string | null
+  /** 出处（spec §R1）；老行/手动记忆为 null。user-stated|user-confirmed|agent-observed。 */
+  origin?: string | null
+  /** 出处原句摘抄（spec §R1）；老行/无标注为 null。 */
+  evidence?: string | null
   subjectSlug?: string | null
 }
 

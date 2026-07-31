@@ -188,8 +188,8 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
 test('dedupCandidates keeps non-duplicate and drops duplicate in a multi-candidate group', async () => {
   const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'existing', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()
-  const cand0: DistillCandidate = { title: '[category:x] dup-of-existing', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
-  const cand1: DistillCandidate = { title: '[category:y] genuinely-new', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const cand0: DistillCandidate = { title: '[category:x] dup-of-existing', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
+  const cand1: DistillCandidate = { title: '[category:y] genuinely-new', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
   // Verdict index 0 = duplicate, index 1 = new. Exercises globalIndex mapping:
   // index 1 must be kept (not index 0).
   const keep = await dedupCandidates(db, async () => JSON.stringify({
@@ -204,8 +204,8 @@ test('dedupCandidates groups by scope and compares each only against same-scope 
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, projEx.id)).run()
   const globEx = await realCreateCandidate(db, { scopeType: 'global', scopeId: null, title: 'global-existing-title', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, globEx.id)).run()
-  const projectCand: DistillCandidate = { title: '[category:x] proj-cand', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
-  const globalCand: DistillCandidate = { title: '[category:y] glob-cand', bodyMd: 'b', scopeType: 'global', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const projectCand: DistillCandidate = { title: '[category:x] proj-cand', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
+  const globalCand: DistillCandidate = { title: '[category:y] glob-cand', bodyMd: 'b', scopeType: 'global', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
   const prompts: string[] = []
   let callCount = 0
   const keep = await dedupCandidates(db, async (_sys, user) => {
@@ -233,7 +233,7 @@ test('dedupCandidates bubbles listForDedupByScope DB errors (spec §8)', async (
   // bubbles to tick's catch (infrastructure fault -> job retry), NOT swallowed.
   const db2 = openDb(join(dir, 't2.db'))
   db2.$client.close()
-  const cand: DistillCandidate = { title: '[category:x] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: null }
+  const cand: DistillCandidate = { title: '[category:x] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
   await expect(dedupCandidates(db2, async () => 'x', [cand], '/r')).rejects.toThrow()
 })
 
@@ -284,6 +284,33 @@ test('tick passes valueClass into createCandidate for kept candidates', async ()
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
   expect(captured.valueClass).toBe('decision')
+})
+
+test('tick 入库候选携带 origin/evidence（用户陈述类端到端入库）', async () => {
+  // Task 4（origin-driven value judgment）：distill 产出的 origin/evidence 必须随
+  // createCandidate 入库（spec §模块改动点 3）。用既有 tick harness：enqueue job +
+  // fake loadTranscript + callCount 分派 mock。distill 返回一条 origin='user-stated'、
+  // evidence='任何改动必须走分支+PR' 的候选；无 existing -> dedup 短路；judgeValue
+  // 返回 keep（category=decision）。断言 createCandidate 收到的 input.origin /
+  // input.evidence 与候选一致（断言聚焦 origin/evidence 流转，不强约束 valueClass）。
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: '任何改动必须走分支+PR' }], fullLength: 1 }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:convention] 任何改动必须走分支+PR', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: '任何改动必须走分支+PR' }] })
+      // callCount === 2: judgeValue（dedup 无 existing 短路，不调 LLM）-> keep
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(callCount).toBe(2) // distill + judgeValue；dedup 短路
+  expect(captured).not.toBeNull()
+  expect(captured.origin).toBe('user-stated')
+  expect(captured.evidence).toBe('任何改动必须走分支+PR')
 })
 
 test('tick keeps all as valueClass=null when judgeValue LLM throws, job still done', async () => {
@@ -340,7 +367,7 @@ test('tick: protected invariant candidate survives with valueClass=decision (e2e
     loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refunds only within 14 days' }], fullLength: 1 }),
     callLLM: async () => {
       callCount++
-      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] })
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: '退款须在发货后14天内' }] })
       // dedup short-circuits (1 candidate, no existing) -> call 2 is judgeValue;
       // judgeValue LLM wrongly says derivable -> logic gate must override to keep+decision
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })

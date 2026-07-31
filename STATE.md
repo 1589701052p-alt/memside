@@ -430,3 +430,49 @@ review verdict=Clean，1 条 Minor 注释 finding 一轮 fix wave 修后 scoped 
 
 执行：`bun run typecheck && bun test` 518/518 全绿。
 
+## 出处驱动的价值判定（origin-driven value judgment，2026-07-30）
+
+把价值判定锚点从「domain vs codebase」换成「用户陈述 vs 可重新推导」。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-07-30-origin-driven-value-judgment*`（8 个 task）。
+
+- **事故根因**：旧 judge 的 derivable 规则「描述本仓库的、哪怕带 rationale 也算 derivable -> 丢」
+  把用户亲口确认的决策（凭证链优先级、UI 回显硬性要求等）和源码琐事一刀切。7-30 新代码上线后
+  实测：8 条候选全数被判 derivable 丢弃、0 条入库。
+- **新判定规则全集（spec §R0-R4）**：
+  - R0 驯化守卫（纯代码，不变）。
+  - R1 出处门：distiller 每条候选带 `origin`（user-stated/user-confirmed/agent-observed）
+    + `evidence`（原话摘句）；贴金防护--标了 stated/confirmed 却摘不出原话 -> 降级 agent-observed。
+  - R2 九分类 judge（6 留 3 丢）：6 价值筐（user-rule/decision/preference/convention/trap/
+    topology，扩编补「用户立的规矩」「偏好」「事故教训」缺口）+ 3 丢弃理由各配考题
+    （Q1 公开知识 / Q2 仓库重推 / Q3 时效 fleeting）。**Q2 仅对 agent-observed 合法**：
+    prompt 禁考 + 代码硬兜底（stated/confirmed 被判 derivable -> 改判 keep+decision）双保险。
+    Q3 是 AI 对用户话语的判断权（随口琐事可丢，但理由只能是 fleeting）。
+  - R3 LLM 失败全保留（stated->decision / observed->null）。
+  - R4 dedup / 审计表 / 提升按钮不动。
+- **诚实声明**：开发仓库自身源码实现细节不记（翻代码就能知道，不算记忆）；但蒸馏器看不到
+  仓库源码，Q2 只能启发式推断。Q2 的安全性靠 origin 门禁 + 代码兜底，不靠模型聪明。
+- **数据模型**：memories 加 `origin`/`evidence` 两列（幂等 ALTER，刻意放在 subagent 表重建块
+  之后覆盖所有升级路径）；value_class 6 枚举 / memory_discards.reason 加 fleeting 均免迁移
+  （自由文本列）。
+- **Web UI**：审批卡片 origin 徽标（用户陈述/用户采纳/agent 观察）+ evidence 出处行
+  （「出处：原话」紫色）+ 6 筐徽标；DiscardCard fleeting 中文文案。
+
+执行：subagent-driven（8 task 各 implementer + reviewer；终审 pending）。
+`bun run typecheck && bun test` 522/522 全绿。
+
+### 已知 follow-up（本轮 deferred，非阻塞）
+
+1. **valueFilter 幻觉类别兜底不全**（Task 2 minor）：per-verdict hallucinated-category
+   路径（valueFilter.ts:171-174）对 stated/confirmed 也只给 keep+null，未给 decision ->
+   这类候选落到 valueClass:null，不免疫「批量拒绝未评估」。非安全缺口（stated 不会被丢弃，
+   只是没打 decision 标），与 keepNull/return 段的 stated->decision 不一致。后续可统一。
+2. **grep 预检（第二期）**：scheduler 本机可读 job.cwd 仓库，可从候选抽符号 token grep
+   把「仓库实锤」证据附给判定器，让 Q2 从启发式升级为带证判定。纯增量（判定规则不用改），
+   本次不做--一次改太多变量不好归因。
+3. **存量 573 候选不重判**（非目标）：可用现有「批量拒绝未评估」+ 手动审批自行清理。
+4. **evidence 暂仅审批卡片可见**：注入块（formatMemoryBlock）未呈现 evidence，留第二期。
+5. Task 1 遗留：scheduler.test.ts 若干 mock JSON 残留 dead `ruleObject` 字段（harmless，
+   distiller 忽略）；valueFilter.ts:106 bridge 注释已随 Task 2 重写移除。
+6. Task 6：Web UI 徽标/evidence 行未做浏览器视觉手测（无浏览器面），建议交互环境过一遍
+   审批 tab（老行无 origin/evidence 时不显徽标为预期）。
+

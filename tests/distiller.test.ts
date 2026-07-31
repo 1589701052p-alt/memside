@@ -116,83 +116,65 @@ test('detectErrorSignals still sees original (unfiltered) tool failure', async (
   expect(captured).toContain('boom')
 })
 
-test('DISTILLER_SYSTEM_PROMPT rejects codebase implementation details', () => {
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('被开发仓库自身源码的实现细节')
+test('DISTILLER_SYSTEM_PROMPT drops blanket repo-detail REJECT, mandates user-stated rules', () => {
+  // Task 1：旧「Also REJECT 被开发仓库自身源码的实现细节」整句被换为「翻翻代码就能重新知道
+  // 不算记忆 / 用户亲口陈述的关于本仓库的规则必须记」。锁替换发生 + 旧措辞消失。
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('必须记')
+  expect(DISTILLER_SYSTEM_PROMPT).not.toContain('被开发仓库自身源码的实现细节')
 })
 
-test('distillTranscript defaults missing ruleObject to codebase', async () => {
-  // TDD: 第二轮条件门要求 DistillCandidate 带 ruleObject。LLM 漏标时 distiller
-  // 必须默认 codebase（精度优先：不保护，走 derivable 判定）。
+test('distillTranscript parses origin/evidence (user-stated)', async () => {
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: '任何改动必须走分支+PR' }],
+    runtime: 'claude-code', cwd: '/x', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [{
+      title: '[category:convention] 任何改动必须走分支+PR', bodyMd: 'b',
+      scope: 'project', runtime: 'claude-code', distillAction: 'new',
+      origin: 'user-stated', evidence: '任何改动必须走分支+PR',
+    }] }),
+  })
+  expect(result.candidates[0]!.origin).toBe('user-stated')
+  expect(result.candidates[0]!.evidence).toBe('任何改动必须走分支+PR')
+})
+
+test('distillTranscript downgrades stated-origin with empty evidence to agent-observed (贴金防护)', async () => {
+  // 回归锁（spec §R1）：标了 user-stated 却摘不出原话 -> 降级 agent-observed，
+  // 防止弱模型乱贴高价值标签骗取 derivable 免疫。
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
-    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    runtime: 'claude-code', cwd: '/x', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [{
+      title: '[category:convention] t', bodyMd: 'b', origin: 'user-stated', evidence: '  ',
+    }] }),
   })
-  expect(result.candidates.length).toBe(1)
-  expect(result.candidates[0]!.ruleObject).toBe('codebase')
+  expect(result.candidates[0]!.origin).toBe('agent-observed')
+  expect(result.candidates[0]!.evidence).toBeNull()
 })
 
-test('distillTranscript parses explicit ruleObject=domain', async () => {
-  const result = await distillTranscript({
-    turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
-    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] }),
-  })
-  expect(result.candidates.length).toBe(1)
-  expect(result.candidates[0]!.ruleObject).toBe('domain')
-})
-
-test('distillTranscript retries when ruleObject is invalid', async () => {
-  // TDD: distillShouldRetry 必须对非法 ruleObject 触发重试；第二次返回合法值。
+test('distillTranscript defaults missing/invalid origin to agent-observed after retry', async () => {
+  // 非法 origin 触发一次 retry（shouldRetry）；retry 耗尽后降级 agent-observed 不丢候选。
   let calls = 0
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
-    runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
-    callLLM: async () => {
-      calls++
-      if (calls === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'bogus' }] })
-      return JSON.stringify({ candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] })
-    },
+    runtime: 'claude-code', cwd: '/x', existingSlugs: [],
+    callLLM: async () => { calls++; return JSON.stringify({ candidates: [{
+      title: '[category:convention] t', bodyMd: 'b', origin: 'bogus',
+    }] }) },
   })
-  expect(calls).toBe(2)
-  expect(result.candidates[0]!.ruleObject).toBe('domain')
+  expect(calls).toBeGreaterThan(1)
+  expect(result.candidates[0]!.origin).toBe('agent-observed')
 })
 
-test('DISTILLER_SYSTEM_PROMPT contains ruleObject field + DOMAIN-not-codebase invariant def', () => {
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('"ruleObject"')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('codebase = ')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('domain = ')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain("DOMAIN (NOT about this codebase's own implementation)")
-})
-
-test('DISTILLER_SYSTEM_PROMPT has ruleObject judgement heuristic (grep-able concrete things)', () => {
-  // TDD（第三轮 §B）：dogfood 场景 ruleObject 偏 domain，加判定启发让 LLM 区分
-  // "仓库内能 grep 到的具体东西" vs "仓库外业务概念"。
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('grep')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('具体东西')
-})
-
-test('DISTILLER_SYSTEM_PROMPT has generic placeholder ruleObject examples', () => {
-  // TDD（第三轮 §B）：通用占位符示例（X 模块的 Y 函数 / W 配置为值 V 等），
-  // 示判定模式而非具体答案。
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('X 模块的 Y 函数')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('W 配置为值 V')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('外部系统 X 的 SLA 要求 Y')
-})
-
-test('DISTILLER_SYSTEM_PROMPT ruleObject examples do not hardcode real memory symbols (anti-overfitting)', () => {
-  // TDD（第三轮 §B 防过拟合硬约束）：示例不得针对已有记忆。断言 prompt 的示例区
-  // 不含当前 dogfood 产物的真实符号--否则等于 hardcode 答案，换仓库就失效。
-  // 注意：主体 prompt 仍会提到 valueFilter/daemon 等（作为 category 说明），这里只
-  // 断言"通用示例"这一段不含这些词。取 ruleObject 示例段（"通用示例"到段尾）校验。
-  const prompt = DISTILLER_SYSTEM_PROMPT
-  const exampleStart = prompt.indexOf('通用示例')
-  expect(exampleStart).toBeGreaterThan(-1)
-  const exampleSection = prompt.slice(exampleStart)
-  // 真实记忆符号不得出现在示例段
-  for (const real of ['valueFilter', 'token 预算', 'dedup', '64k', '条件门']) {
-    expect(exampleSection).not.toContain(real)
-  }
+test('DISTILLER_SYSTEM_PROMPT carries origin/evidence rules and drops the blanket repo-detail REJECT', () => {
+  // prompt 文本断言（与既有 distiller prompt 测试同模式）：
+  // 含 origin/evidence 说明 + 贴金硬约束；「用户亲口陈述的关于本仓库的规则/决策/约束必须记」；
+  // 不再有 ruleObject 段。
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('user-stated')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('user-confirmed')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('agent-observed')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('evidence')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('必须记')
+  expect(DISTILLER_SYSTEM_PROMPT).not.toContain('ruleObject')
 })
 
 test('DISTILLER_SYSTEM_PROMPT has [stated] origin discipline with放宽 + REJECT + hard约束', () => {

@@ -147,6 +147,39 @@ test('createCandidate defaults valueClass to null when omitted', async () => {
   expect(m.valueClass).toBeNull()
 })
 
+test('createCandidate stores origin/evidence and reads them back', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/r', title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', runtime: null,
+    origin: 'user-stated', evidence: '记住用 bun 而非 node',
+  })
+  expect(m.origin).toBe('user-stated')
+  expect(m.evidence).toBe('记住用 bun 而非 node')
+  const got = await getMemoryById(db, m.id)
+  expect(got?.memory.origin).toBe('user-stated')
+  expect(got?.memory.evidence).toBe('记住用 bun 而非 node')
+})
+
+test('createCandidate defaults origin/evidence to null when omitted', async () => {
+  const m = await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null,
+  })
+  expect(m.origin).toBeNull()
+  expect(m.evidence).toBeNull()
+})
+
+test('openDb creates memories with all columns (incl. origin/evidence)', () => {
+  const cols = (db.$client.prepare('PRAGMA table_info(memories)').all() as { name: string }[])
+    .map((r) => r.name)
+  expect(cols).toEqual(expect.arrayContaining([
+    'id', 'scope_type', 'scope_id', 'runtime', 'title', 'body_md', 'tags', 'status',
+    'source_kind', 'source_cwd', 'source_event_id', 'distill_job_id', 'distill_action',
+    'supersedes_id', 'superseded_by_id', 'approved_at', 'created_at', 'version',
+    'value_class', 'subject_slug', 'origin', 'evidence',
+  ]))
+})
+
 test('logDiscards writes rows with title/bodyMd/reason/distillJobId', async () => {
   // need a distill job row for the FK
   db.insert(memoryDistillJobs).values({ id: 'j1', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code', cwd: '/r', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 0 }).run()

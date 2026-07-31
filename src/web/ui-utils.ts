@@ -77,3 +77,35 @@ export function llmSourceLabel(source: string | null): string {
   if (source.startsWith('credentials.json')) return 'credentials.json'
   return source
 }
+
+/**
+ * 出处徽标（审批卡片用）。null/undefined（老行未标注）不显示。纯函数，可单测。
+ *
+ * user-stated 紫（用户主动陈述，最高可信）/ user-confirmed 青（用户采纳 agent 建议）/
+ * agent-observed 灰（agent 自行观察，需审慎审批）。老行无 origin 字段返回 null。
+ *
+ * 设计依据：docs/superpowers/specs/2026-07-30-origin-driven-value-judgment-design.md。
+ */
+export function originBadge(origin: string | null | undefined): { label: string; color: string } | null {
+  if (origin === 'user-stated') return { label: '用户陈述', color: '#6a1b9a' }
+  if (origin === 'user-confirmed') return { label: '用户采纳', color: '#00838f' }
+  if (origin === 'agent-observed') return { label: 'agent 观察', color: '#999' }
+  return null
+}
+
+/**
+ * AI 自动拒绝理由中文化（DiscardCard 用）。未知 reason 原样显示（向后兼容老数据）。
+ * 四理由对应 spec 的 fleeting 价值判定：公开知识 / 可从代码推导 / 驯化指令 / 一次性·琐事。
+ * 纯函数，可单测。
+ *
+ * 设计依据：docs/superpowers/specs/2026-07-30-origin-driven-value-judgment-design.md。
+ */
+export function discardReasonLabel(reason: string): string {
+  const m: Record<string, string> = {
+    'public-knowledge': '公开知识',
+    derivable: '可从代码推导',
+    taming: '驯化指令',
+    fleeting: '一次性/琐事',
+  }
+  return m[reason] ?? reason
+}

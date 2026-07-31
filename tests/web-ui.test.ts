@@ -120,3 +120,24 @@ test('App.tsx 含 LLM 设置区块：生效回显行 + 保存/测试连接/清�
   expect(src).toContain('saveLlmSettings')
   expect(src).toContain('testLlmConnection')
 })
+
+// 出处驱动的价值判定（2026-07-30）：审批卡片 origin 徽标 + evidence 出处行 +
+// VALUE_LABEL 扩 6 筐（user-rule/preference 新增）+ DiscardCard 拒绝理由中文化。
+// React 组件不单测，源码文本断言锁住 UI 锚点 + 6 筐映射 + 接线，refactor 删除即变红。
+// 设计依据：docs/superpowers/specs/2026-07-30-origin-driven-value-judgment-design.md。
+test('App.tsx renders origin badge + evidence 出处 line (source text)', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  // evidence 出处行
+  expect(src).toContain('出处：')
+  // origin 徽标接线（ui-utils 纯函数调用）
+  expect(src).toContain('originBadge(')
+  // DiscardCard 拒绝理由中文化接线
+  expect(src).toContain('discardReasonLabel(')
+})
+
+test('App.tsx VALUE_LABEL covers 6 buckets incl user-rule + preference (source text)', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  // 6 筐映射必须含 user-rule（高·规矩）与 preference（中·偏好）
+  expect(src).toContain("'user-rule'")
+  expect(src).toContain('preference')
+})

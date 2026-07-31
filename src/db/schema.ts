@@ -29,6 +29,8 @@ export const memories = sqliteTable(
     version: integer('version').notNull().default(1),
     valueClass: text('value_class'), // nullable: decision|convention|trap|topology; null = unevaluated
     subjectSlug: text('subject_slug'), // nullable: kebab-case 主题归组键；null = 未分组（平铺注入）
+    origin: text('origin'), // nullable: user-stated|user-confirmed|agent-observed；老行 NULL = 未标注（spec §数据模型）
+    evidence: text('evidence'), // nullable: 出处原句摘抄；老行 NULL
   },
   (t) => ({
     scopeStatusIdx: index('idx_memories_scope_status').on(t.scopeType, t.scopeId, t.status),
@@ -90,7 +92,7 @@ export const memoryDiscards = sqliteTable(
       .references(() => memoryDistillJobs.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
     bodyMd: text('body_md').notNull(),
-    reason: text('reason').notNull(), // 'public-knowledge' | 'derivable' | 'taming'
+    reason: text('reason').notNull(), // 'public-knowledge' | 'derivable' | 'taming' | 'fleeting'
     ts: integer('ts').notNull(),
     // 以下 6 列为本需求新增（nullable；迁移前老行为 NULL）：
     scopeType: text('scope_type'), // 'project' | 'global'

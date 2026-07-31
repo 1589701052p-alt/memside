@@ -13,7 +13,8 @@ import {
 } from './pure'
 
 import type { ExistingMemoryForDedup } from './dedup'
-import type { ValueClass } from './valueFilter'
+import type { DistillOrigin } from './distiller'
+import type { DiscardReason, ValueClass } from './valueFilter'
 
 export interface MemoryInput {
   scopeType: MemoryScope
@@ -30,6 +31,10 @@ export interface MemoryInput {
   valueClass?: ValueClass | null
   /** 主题归组键（spec §4.4）；缺省/null = 未分组。 */
   subjectSlug?: string | null
+  /** 出处（spec §R1）；缺省/null = 未标注（老行/手动记忆/promoteDiscard 提升行）。 */
+  origin?: DistillOrigin | null
+  /** 出处原句摘抄；缺省/null = 无。 */
+  evidence?: string | null
 }
 
 export interface Memory {
@@ -53,6 +58,8 @@ export interface Memory {
   version: number
   valueClass: ValueClass | null
   subjectSlug: string | null
+  origin: DistillOrigin | null
+  evidence: string | null
 }
 
 function parseTags(s: string): string[] {
@@ -75,6 +82,8 @@ function rowToMemory(r: any): Memory {
     approvedAt: r.approvedAt ?? null, createdAt: r.createdAt, version: r.version,
     valueClass: (r.valueClass ?? null) as ValueClass | null,
     subjectSlug: r.subjectSlug ?? null,
+    origin: (r.origin ?? null) as DistillOrigin | null,
+    evidence: r.evidence ?? null,
   }
 }
 
@@ -90,6 +99,7 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null,
     approvedAt: null, createdAt: now, version: 1, valueClass: input.valueClass ?? null,
     subjectSlug: input.subjectSlug ?? null,
+    origin: input.origin ?? null, evidence: input.evidence ?? null,
   })
   return rowToMemory({ id, scopeType: input.scopeType, scopeId: input.scopeId, runtime: input.runtime,
     title: input.title, bodyMd: input.bodyMd, tags: JSON.stringify(input.tags), status: 'candidate',
@@ -97,7 +107,7 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
     distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null, approvedAt: null,
     createdAt: now, version: 1, valueClass: input.valueClass ?? null,
-    subjectSlug: input.subjectSlug ?? null })
+    subjectSlug: input.subjectSlug ?? null, origin: input.origin ?? null, evidence: input.evidence ?? null })
 }
 
 export async function getMemoryById(db: DbClient, id: string): Promise<{ memory: Memory } | null> {
@@ -386,7 +396,7 @@ export async function restoreMemory(db: DbClient, id: string): Promise<Memory> {
 export interface DiscardRecord {
   title: string
   bodyMd: string
-  reason: 'public-knowledge' | 'derivable' | 'taming'
+  reason: DiscardReason
   scopeType: 'project' | 'global'
   scopeId: string | null
   sourceCwd: string | null

@@ -20,31 +20,19 @@ Write a matching category as a "[category:xxx]" prefix on each candidate title:
 9. [category:convention] - stable team / reviewer preferences a future agent should respect
 10. [category:quality-bar] - what counts as "done" in this project
 
-对每条候选标记 ruleObject：
-- codebase = 这条规则描述的是当前仓库自身的代码、配置、模块行为或实现逻辑。
-  判据：规则的主语是仓库内的具体组件/符号/流程（如 valueFilter、daemon、scheduler、
-  某个函数的调用约定）。脱离这个仓库，规则就失去所指对象。
-- domain = 这条规则描述的是仓库之外的东西：用户的业务规则、外部系统契约、法规约束、
-  跨项目的领域知识。判据：换一个仓库这条规则依然成立、依然有意义。
-
-拿不准时标 codebase。
-
-判定时问自己：这条规则的主语，是这个仓库里能 grep 到的具体东西（文件、函数、配置项、模块名、某个常量值），还是一个仓库之外的业务/领域概念？
-- 如果主语是仓库内的具体东西，即使规则本身听起来像"通用经验"，它也是 codebase--因为脱离这个仓库它就失去所指对象，或可从源码重新读出。
-- 如果主语是仓库外的业务/领域概念（用户业务规则、外部系统契约、法规、跨项目共识），且换一个仓库依然成立，才是 domain。
-
-通用示例（仅示判定模式，勿照抄内容）：
-  codebase: "X 模块的 Y 函数以 Z 方式调用" -- 主语是仓库内符号
-  codebase: "本项目把 W 配置为值 V" -- 主语是仓库内配置项
-  codebase: "A 组件的 B 行为在 C 条件下触发" -- 主语是仓库内组件
-  domain: "用户业务的退款须在发货后 N 天内" -- 主语是外部业务规则
-  domain: "外部系统 X 的 SLA 要求 Y" -- 主语是仓库外契约
-  domain: "法规要求 Z" -- 主语是仓库外法规
-
 对每条候选标记 subjectSlug：这条记忆的主题标识（kebab-case，2~4 个英文小写
 单词，如 refund-policy、hook-install）。同一主题的记忆必须共用同一个 slug--
 优先从 user prompt 的 "Existing subject slugs" 清单里复用；只有确实是清单
 没有的新主题才造新 slug。拿不准主题可以不输出该字段。
+
+对每条候选标记 origin（出处）：
+- user-stated = 用户原话明确说出的规则、决策、约束、偏好。
+- user-confirmed = agent 提出、用户明确采纳（"对"/"就这么办"/"可以"）。
+- agent-observed = 其余一切（agent 从工具报错/代码阅读/事件自行总结）。
+
+每条候选必须带 evidence：从 transcript 摘抄的出处原句（不超过 1 句；user-confirmed
+摘 agent 提议句 + 用户采纳句；agent-observed 摘观察依据的对话片段）。
+硬约束：找不到原话出处，就不许标 user-stated / user-confirmed，只能标 agent-observed。
 
 Cross-cutting properties:
 - atomic and generalizable; survives outside the event that produced it.
@@ -63,7 +51,9 @@ Origin discipline（[stated] 起源判定）：记用户或领域在会话中明
 硬约束：记 rationale 时必须能在所给 transcript 中找到 agent 原话出处；找不到出处的不记（防止脑补）。
 
 REJECT fleeting status updates, moods, one-off acknowledgements.
-Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部实现、配置默认值、符号名）--这些可从仓库源码重新推导，不是持久记忆。不要总结 agent 读到的文件内容。
+不要复述 agent 读到的文件内容或符号细节（那些翻翻代码就能重新知道，不算记忆）。
+但用户亲口陈述的关于本仓库的规则、决策、约束、偏好必须记--用户说过就是价值，
+与它在代码里能否看到无关。
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，不要 markdown 围栏，不要在 JSON 前后加任何解释文字，键与字符串值用双引号，最后一个属性后无逗号，不要用单引号）：
 {
@@ -74,11 +64,14 @@ Also REJECT 被开发仓库自身源码的实现细节（文件内容、内部�
       "scope": "project",
       "runtime": "claude-code",
       "distillAction": "new",
-      "ruleObject": "codebase",
+      "origin": "user-stated",
+      "evidence": "每个 PR 必须在 CHANGELOG.md 的 Unreleased 部分加一条",
       "subjectSlug": "refund-policy"
     }
   ]
 }`
+
+export type DistillOrigin = 'user-stated' | 'user-confirmed' | 'agent-observed'
 
 export interface DistillCandidate {
   title: string
@@ -86,10 +79,10 @@ export interface DistillCandidate {
   scopeType: MemoryScope
   runtime: RuntimeTag
   distillAction: 'new' | 'update_of' | 'duplicate_of' | 'conflict_with'
-  /** 瞬态：规则对象是当前仓库自身代码(codebase) 还是外部业务领域(domain)。
-   *  valueFilter 条件门据此决定是否强制保留 protected category。不入库。
-   *  distiller 漏标/非法时默认 'codebase'（精度优先：不保护）。 */
-  ruleObject: 'codebase' | 'domain'
+  /** 出处（spec §R1）。LLM 漏标/非法 -> 'agent-observed'（精度优先：不保护）。 */
+  origin: DistillOrigin
+  /** 出处原句摘抄。stated/confirmed 但 evidence 空 -> origin 降级 agent-observed（贴金防护）。 */
+  evidence: string | null
   /** 主题归组键（spec §4.3）。LLM 漏标/非法时 normalizeSubjectSlug 降级为 null。 */
   subjectSlug: string | null
 }
@@ -149,13 +142,13 @@ function distillShouldRetry(parsed: unknown): string | null {
     if (!c.title.includes('[category:')) {
       return `候选 ${i} 的 title 缺少 [category:xxx] 前缀`
     }
-    const subj = (c as { ruleObject?: unknown }).ruleObject
-    if (subj !== undefined && subj !== 'codebase' && subj !== 'domain') {
-      return `候选 ${i} 的 ruleObject 非法（必须是 codebase 或 domain）`
-    }
     const slug = (c as { subjectSlug?: unknown }).subjectSlug
     if (slug !== undefined && typeof slug !== 'string') {
       return `候选 ${i} 的 subjectSlug 必须是字符串`
+    }
+    const og = (c as { origin?: unknown }).origin
+    if (og !== undefined && og !== 'user-stated' && og !== 'user-confirmed' && og !== 'agent-observed') {
+      return `候选 ${i} 的 origin 非法（必须是 user-stated/user-confirmed/agent-observed）`
     }
   }
   return null
@@ -215,16 +208,21 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         o.distillAction === 'conflict_with'
           ? o.distillAction
           : 'new'
-      const rawSubject = o.ruleObject
-      const ruleObject: 'codebase' | 'domain' =
-        rawSubject === 'domain' ? 'domain' : 'codebase'
+      const rawOrigin = o.origin
+      let origin: DistillOrigin =
+        rawOrigin === 'user-stated' || rawOrigin === 'user-confirmed' ? rawOrigin : 'agent-observed'
+      const evidence =
+        typeof o.evidence === 'string' && o.evidence.trim() ? o.evidence.trim() : null
+      // 贴金防护（spec §R1）：摘不出原话就不许戴 user-stated/user-confirmed 的帽子。
+      if (origin !== 'agent-observed' && evidence === null) origin = 'agent-observed'
       out.push({
         title: o.title,
         bodyMd: o.bodyMd,
         scopeType: scope,
         runtime: rt as RuntimeTag,
         distillAction: action,
-        ruleObject,
+        origin,
+        evidence,
         subjectSlug: normalizeSubjectSlug(o.subjectSlug),
       })
     }
