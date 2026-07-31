@@ -1,6 +1,6 @@
 # memside
 
-AI agent (目前仅支持Claude Code) 的本地记忆 sidecar。它监听你的 claude code 会话,把反复出现的经验教训、踩过的坑、团队约定提炼成简洁的记忆条目,经你 web UI 审批后,在未来的会话里自动注入--全程不阻塞你的工作。
+AI agent (Claude Code / opencode) 的本地记忆 sidecar。它监听你的 AI agent 会话,把反复出现的经验教训、踩过的坑、团队约定提炼成简洁的记忆条目,经你 web UI 审批后,在未来的会话里自动注入--全程不阻塞你的工作。
 
 ```
    claude code 会话
@@ -128,6 +128,15 @@ memside 的所有命令都通过 `src/cli.ts` 入口跑。clone 后直接用 `bu
 - 重新跑 `install` 会替换旧的 memside hook 条目(按 `x-memside-tag` 标记识别),不影响你自己写的其他 hook。
 - 端口用 `MEMSIDE_PORT` 环境变量改(默认 7777)。
 
+### opencode 支持
+
+memside 同时支持 **Claude Code** 和 **opencode** 两个 runtime。`start-and-install` 命令会自动安装 opencode plugin（写入 `~/.config/opencode/opencode.json`），无需额外操作。
+
+- **捕获**：opencode 会话空闲时通过 `idle` hook 把全量 messages 发送到 `/hooks/opencode/capture`，经 `parseOpencodeMessages` 转换为 turns 后进入 distill 管线。
+- **注入**：opencode 新会话首条 user 消息前通过 `messages.transform` hook GET `/hooks/opencode/inject`，返回 approved 记忆块注入上下文。
+- **跨 runtime 共享**：project 记忆在 claude code 和 opencode 间共享——用 opencode 开会话也能看到同一项目下的记忆块。
+- **Web UI**：记忆卡片的 runtime 标注显示 `opencode`，来源标签标注 `opencode`。
+
 ## 验证安装(可选)
 
 想确认整个链路真的通了,跑自动化验证脚本(用临时 DB,不碰你的真实数据):
@@ -201,7 +210,6 @@ bun run dev:web       # 只起 vite dev(5173)——需要 daemon 已单独在跑
 
 ## 已知限制(MVP)
 
-- **仅 claude code。** opencode adapter 是 stub(`src/adapter/opencode.ts`);MVP 没接 opencode 的 hook / 注入。
 - **无 archive / unarchive UI。** store 实现了 `archiveMemory` / `unarchiveMemory`(且有单测),但没暴露 HTTP 路由或 web UI 按钮。approved 条目可 reject/edit,但不能从 UI archive。需要的话直接调 store API。
 - **无实时 WS 推送。** web UI 轮询 `/api/memories`;`/ws/memories` 广播 seam 已预留但未接。
 - **单用户、本地。** 无鉴权、无多用户。

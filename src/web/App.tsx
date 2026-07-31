@@ -467,7 +467,9 @@ function MemoryCard({
     ? (m.sourceCwd.split(/[\\/]/).filter(Boolean).pop() ?? m.sourceCwd)
     : m.sourceKind === 'manual'
       ? '手动'
-      : '未知'
+      : m.runtime === 'opencode'
+        ? 'opencode'
+        : '未知'
   const time = formatMemoryTime(m.createdAt)
   async function save() {
     setEditError(null)
