@@ -161,6 +161,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         cwd: job.cwd ?? '',
         existingSlugs,
         callLLM: deps.callLLM,
+        sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
       })
       const durationMs = Date.now() - t0
       // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter

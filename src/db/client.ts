@@ -237,6 +237,13 @@ export function openDb(path: string) {
       raw.exec('ALTER TABLE memories ADD COLUMN evidence TEXT')
     }
   }
+  // Idempotent backfill: subagent 蒸馏候选 origin 强制降级 agent-observed（spec §3.4）。
+  // subagent 的 role:user 是主 agent task brief，非真人陈述。范围限定 candidate
+  // （approved origin 仅影响 UI 徽标；rejected 无意义）。放在 origin ALTER 块之后确保列已存在。
+  // 守卫 (origin IS NULL OR origin != 'agent-observed')：幂等 + 覆盖 NULL 行 + 避免重复 WAL 写。
+  {
+    raw.exec("UPDATE memories SET origin = 'agent-observed' WHERE source_kind = 'subagent' AND status = 'candidate' AND (origin IS NULL OR origin != 'agent-observed')")
+  }
   // Idempotent migration: add error_message to pre-existing memory_distill_runs.
   // llm_error 时存 LLM 调用错误描述（spec 数据模型）。无 backfill（老行 NULL）。
   {

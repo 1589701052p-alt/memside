@@ -426,3 +426,52 @@ test('distillTranscript preserves filteredTurns when callThrew (regression: sour
   expect(result.callThrew).toBe(true)
   expect(result.filteredTurns.length).toBeGreaterThan(0)
 })
+
+test('distillTranscript 强制降级 subagent 候选 origin 为 agent-observed（核心回归锁）', async () => {
+  // spec §3.2：subagent 的 role:user 是主 agent task brief，非真人陈述。
+  // 即使 LLM 标 user-stated 且 evidence 非空（贴金防护不会降级），subagent 仍强制降级。
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'You are implementing Task 1: ...' }],
+    runtime: 'claude-code', cwd: '/x', existingSlugs: [],
+    sourceKind: 'subagent',
+    callLLM: async () => JSON.stringify({ candidates: [{
+      title: '[category:convention] 不改任务范围外代码', bodyMd: 'b',
+      scope: 'project', runtime: 'claude-code', distillAction: 'new',
+      origin: 'user-stated', evidence: 'Do not change anything outside this task scope',
+    }] }),
+  })
+  expect(result.candidates[0]!.origin).toBe('agent-observed')
+  // evidence 保留作观察依据（spec §3.2：只摘 origin 帽子，不动 evidence）
+  expect(result.candidates[0]!.evidence).toBe('Do not change anything outside this task scope')
+})
+
+test('distillTranscript 不传 sourceKind 时 conversation 路径保留 user-stated（守默认方向）', async () => {
+  // spec §3.1：sourceKind 可选默认 'conversation'。主会话 user-stated 不被降级，
+  // 既有行为不变（27 个既有调用点都不传 sourceKind）。
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: '任何改动必须走分支+PR' }],
+    runtime: 'claude-code', cwd: '/x', existingSlugs: [],
+    callLLM: async () => JSON.stringify({ candidates: [{
+      title: '[category:convention] 任何改动必须走分支+PR', bodyMd: 'b',
+      scope: 'project', runtime: 'claude-code', distillAction: 'new',
+      origin: 'user-stated', evidence: '任何改动必须走分支+PR',
+    }] }),
+  })
+  expect(result.candidates[0]!.origin).toBe('user-stated')
+})
+
+test('distillTranscript subagent 也覆盖 user-confirmed（不只 stated）', async () => {
+  // spec §3.2：subagent 降级对 stated 与 confirmed 一视同仁。user-confirmed + 非空 evidence
+  // 时贴金防护不会降级，唯有 subagent 标志把它压成 agent-observed。
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'You are implementing Task 2: ...' }],
+    runtime: 'claude-code', cwd: '/x', existingSlugs: [],
+    sourceKind: 'subagent',
+    callLLM: async () => JSON.stringify({ candidates: [{
+      title: '[category:architecture] x', bodyMd: 'b',
+      scope: 'project', runtime: 'claude-code', distillAction: 'new',
+      origin: 'user-confirmed', evidence: '用户采纳：本地 plugin 文件（推荐）',
+    }] }),
+  })
+  expect(result.candidates[0]!.origin).toBe('agent-observed')
+})
