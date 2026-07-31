@@ -25,6 +25,12 @@ test('backfill 把 subagent candidate origin 降级为 agent-observed，conversa
     status: 'candidate', sourceKind: 'conversation', sourceCwd: '/r', runtime: null,
     createdAt: 2, version: 1, origin: 'user-stated', evidence: 'real user',
   })
+  await db.insert(memories).values({
+    id: '03BACKFILL', scopeType: 'project', scopeId: '/r',
+    title: '[category:convention] t3', bodyMd: 'b', tags: '[]',
+    status: 'candidate', sourceKind: 'subagent', sourceCwd: '/r', runtime: null,
+    createdAt: 3, version: 1, origin: null, evidence: null,
+  })
   db.$client.close()
 
   // 重开：迁移块跑回填
@@ -33,11 +39,15 @@ test('backfill 把 subagent candidate origin 降级为 agent-observed，conversa
   expect(sub[0]!.origin).toBe('agent-observed')     // subagent 被降级
   const conv = await db.select().from(memories).where(eq(memories.id, '02BACKFILL'))
   expect(conv[0]!.origin).toBe('user-stated')       // conversation 不动
+  const nul = await db.select().from(memories).where(eq(memories.id, '03BACKFILL'))
+  expect(nul[0]!.origin).toBe('agent-observed')   // NULL origin 的 subagent 也被回填（guard 的 origin IS NULL 分支）
 
   // 幂等：再重开一次，值不变
   db.$client.close()
   db = openDb(path)
   const sub2 = await db.select().from(memories).where(eq(memories.id, '01BACKFILL'))
   expect(sub2[0]!.origin).toBe('agent-observed')
+  const nul2 = await db.select().from(memories).where(eq(memories.id, '03BACKFILL'))
+  expect(nul2[0]!.origin).toBe('agent-observed')
   db.$client.close()
 })
