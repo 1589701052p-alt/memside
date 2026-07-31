@@ -35,7 +35,7 @@ test('createCandidate writes subjectSlug; listApprovedByScope projects it', asyn
   const m = await createCandidate(db!, { ...base, subjectSlug: 'refund-policy' })
   expect(m.subjectSlug).toBe('refund-policy')
   await promoteCandidate(db!, m.id, { action: 'approve' })
-  const set = await listApprovedByScope(db!, { projectId: '/repo', runtime: 'claude-code' })
+  const set = await listApprovedByScope(db!, { projectId: '/repo' })
   expect(set.byScope.project[0]!.subjectSlug).toBe('refund-policy')
 })
 

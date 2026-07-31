@@ -118,12 +118,13 @@ export async function getMemoryById(db: DbClient, id: string): Promise<{ memory:
 
 /**
  * Load approved memories for injection. project scope = exact projectId match;
- * global = all. runtime filter: current-runtime-tagged + untagged (null) pass;
- * other-runtime-tagged excluded.
+ * global = all. runtime 不参与匹配（跨 runtime 共享，spec §5）：runtime 列仅作来源
+ * 标记（createCandidate 写入不变），claude-code 与 opencode 在同 cwd 互相注入 project
+ * 记忆；global 记忆本就全共享。老记忆 runtime=null 本就全共享，行为不变。
  */
 export async function listApprovedByScope(
   db: DbClient,
-  opts: { projectId: string; runtime: 'claude-code' | 'opencode' },
+  opts: { projectId: string },
 ): Promise<InjectableMemorySet> {
   const projectRows = await db.select().from(memories).where(
     and(eq(memories.scopeType, 'project'), eq(memories.scopeId, opts.projectId), eq(memories.status, 'approved')),
@@ -131,7 +132,6 @@ export async function listApprovedByScope(
   const globalRows = await db.select().from(memories).where(
     and(eq(memories.scopeType, 'global'), eq(memories.status, 'approved')),
   ).orderBy(desc(memories.createdAt))
-  const filterRuntime = (r: any) => r.runtime === null || r.runtime === opts.runtime
   const toRow = (r: any) => ({
     id: r.id, scopeType: r.scopeType as MemoryScope, scopeId: r.scopeId, runtime: (r.runtime ?? null) as RuntimeTag,
     title: r.title, bodyMd: r.bodyMd, createdAt: r.createdAt, version: r.version, tags: parseTags(r.tags),
@@ -139,8 +139,8 @@ export async function listApprovedByScope(
   })
   return {
     byScope: {
-      project: projectRows.filter(filterRuntime).map(toRow),
-      global: globalRows.filter(filterRuntime).map(toRow),
+      project: projectRows.map(toRow),
+      global: globalRows.map(toRow),
     },
   }
 }

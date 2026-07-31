@@ -42,17 +42,38 @@ test('createCandidate stores row as candidate', async () => {
   expect(m.version).toBe(1)
 })
 
-test('listApprovedByScope returns only approved, runtime-filtered', async () => {
+// 跨 runtime 共享决策（spec §5）：runtime 不再参与 inject 匹配，project 记忆跨
+// claude-code/opencode 共享。runtime 列退为来源标记（createCandidate 写入不变）。
+// 老记忆 runtime=null 本就全共享（旧 filterRuntime 的 r.runtime === null 分支），
+// 去 runtime 过滤后行为不变。
+test('listApprovedByScope returns approved by scope (runtime null global shared)', async () => {
   const m = await createCandidate(db, {
     scopeType: 'global', scopeId: null, title: 'g1', bodyMd: 'b',
     tags: [], sourceKind: 'manual', runtime: null,
   })
   // approve it via raw update (promote lands in Task 7)
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, m.id)).run()
-  const set = await listApprovedByScope(db, { projectId: 'p1', runtime: 'claude-code' })
-  // global + no runtime tag -> injected for any runtime
+  const set = await listApprovedByScope(db, { projectId: 'p1' })
+  // global + null runtime -> 全共享（spec §5：老记忆行为不变）
   expect(set.byScope.global.length).toBe(1)
   expect(set.byScope.project.length).toBe(0)
+})
+
+// 跨 runtime 共享决策（spec §5）：project 记忆不再按 runtime 隔离，claude code 与
+// opencode 在同 cwd 互相注入。opencode inject 路径不传 runtime，claude-code 产出的
+// project 记忆仍可见；runtime 列作为来源标记仍由 toRow 读出。
+test('listApprovedByScope 跨 runtime 共享：claude-code runtime 记忆对 opencode 可见', async () => {
+  const cwd1 = '/repo-cross'
+  // seed 一条 project approved 记忆，runtime='claude-code'（模拟 claude code 蒸馏产出）
+  const m = await createCandidate(db, {
+    scopeType: 'project', scopeId: cwd1, title: 'claude-produced', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', runtime: 'claude-code', sourceCwd: cwd1,
+  })
+  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, m.id)).run()
+  // 不传 runtime（模拟 opencode inject 路径），claude-code runtime 记忆仍可见
+  const set = await listApprovedByScope(db, { projectId: cwd1 })
+  expect(set.byScope.project.length).toBe(1)
+  expect(set.byScope.project[0]!.runtime).toBe('claude-code')  // 来源标记仍读出
 })
 
 test('getMemoryById returns row', async () => {
