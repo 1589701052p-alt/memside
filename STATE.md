@@ -558,3 +558,28 @@ opencode 1.15.5 真实环境手动验证（非本机，需 opencode 可执行环
 - `tests/plugin-opencode.test.ts`：3 条源码层文本断言守卫（CLAUDE.md 运行时组件兜底面），回退任一修复即红。
 - `bun run typecheck && bun test` 550/550 全绿。
 
+## subagent 蒸馏 origin 强制降级（2026-07-31）
+
+修复 subagent 蒸馏任务候选 origin 错标：subagent transcript 的 role:user 是
+主 agent 派发的 task brief（非真人陈述），distiller 不知来源导致 47/52 条候选
+被错标 user-stated/confirmed，被双重保护（derivable 免疫 + decision 兜底）锁定
+只能逐条人工拒。设计 spec / 计划见 `docs/superpowers/specs|plans/
+2026-07-31-subagent-origin-downgrade*`。
+
+1. `DistillInput.sourceKind`（distiller.ts）可选字段默认 'conversation'；subagent
+   时候选 origin 强制降级 agent-observed（贴金防护之后，最防御），evidence 保留。
+2. scheduler tick 调 distillTranscript 传 `sourceKind: job.sourceAgentId ? 'subagent'
+   : 'conversation'`（复用 :186/:200 谓词）。
+3. client.ts openDb 加幂等回填 UPDATE（source_kind='subagent' AND status='candidate'
+   -> origin='agent-observed'，守卫 `AND (origin IS NULL OR origin != 'agent-observed')`
+   覆盖 NULL 行 + 避免重复 WAL 写）。
+
+后果：降级后这些候选失去 stated 双重保护，回正常价值判定（临时指令可能被丢、
+持久约定以 agent-observed 身份留下）。主会话侧 5 条 conversation 错标本轮不碰，
+留人工。回填需重启 daemon 生效（与已知债务 #4 同款）。
+
+执行：subagent-driven（3 实现 task 各 implementer + reviewer，全部 review clean，
+3 条 deferred minor 见 sdd ledger；终审 pending）。`bun run typecheck && bun test`
+555/555 全绿。
+
+
