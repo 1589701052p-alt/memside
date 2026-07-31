@@ -525,3 +525,36 @@ opencode 1.15.5 真实环境手动验证（非本机，需 opencode 可执行环
 
 以上 6 项验证缺口不阻塞合并，但需在 opencode 环境中手动验证后标记为已解决。
 
+### Live smoke 结果（2026-07-31，真实 opencode 1.15.5 + Bun 1.3.14 + 系统代理 :7897）
+
+本机真实 opencode 环境全闭环验证通过，6 项缺口全部闭合：
+
+1. **plugin 加载** ✅ — `opencode run` 与 `opencode serve` 两种模式均加载 memside plugin，
+   idle + messages.transform 两钩子注册生效。
+2. **session.idle payload** ✅ — `event.properties.sessionID`（字符串 `ses_...`）确认；
+   插件据此拉全量 messages。
+3. **client.session.messages 形状** ✅（**修复**）— SDK 期望 `client.session.messages({ path: { id: sessionID } })`，
+   非 `{ sessionID }`（后者把字面量对象拼进 URL 报 "Expected a string starting with ses"）；
+   返回 `res.data` 为 `{info:{role}, parts:[]}` 数组。
+4. **Bun fetch vs 代理** ✅（**修复**）— Bun fetch 原生尊重 `HTTP_PROXY`/`HTTPS_PROXY` 且不豁免
+   loopback，系统代理 :7897 会把 `127.0.0.1:7777` 请求转发出去 -> 502，capture+inject 双双静默失效。
+   修复：plugin 启动时 `process.env.NO_PROXY` 追加 `127.0.0.1,localhost`（追加非覆盖，保留出站代理）。
+5. **messages.transform 幂等** ✅ — `INJECT_MARK` 守卫 + 首条 user message 注入；多次触发不重复。
+6. **opencode.json 路径** ✅ — install 用 `homedir()` 解析，写入正斜杠路径
+   `C:/Users/admin/.config/opencode/memside-opencode`，opencode 正确加载（无 shell tilde 问题）。
+
+**全闭环 end-to-end**（capture -> distill -> approve -> inject）：
+- **capture**：真实 `opencode run` 会话 -> session.idle -> plugin fetch messages -> POST `/hooks/opencode/capture`
+  （NO_PROXY 生效）-> daemon 存 1221-byte 真实 transcript -> enqueue（runtime=opencode）。
+- **distill**：distiller 调 LLM 11.2s -> outcome=`produced` -> 1 候选入库。
+  （另：琐碎 2-turn 问答正确产出 `empty_output`，非 bug。）
+- **approve**：`POST /api/memories/:id/promote` -> status=approved。
+- **inject**：`GET /hooks/opencode/inject?cwd=...` 返回 1690-byte 块，含刚批准的 opencode-runtime
+  记忆 `[bun-proxy-bypass]` + 5 条 claude-code 记忆（**跨 runtime 共享**实证）。
+  真实 `opencode run` LLM 确认上下文开头见 `BEGIN INJECTED MEMORY` 块，首条即 opencode-runtime 记忆。
+
+**随验证落地的代码改动**（本分支 commit）：
+- `opencode-plugin/memside.js`：NO_PROXY loopback 旁路 + `path:{id}` SDK 签名 + `Array.isArray(res.data)` 归一化。
+- `tests/plugin-opencode.test.ts`：3 条源码层文本断言守卫（CLAUDE.md 运行时组件兜底面），回退任一修复即红。
+- `bun run typecheck && bun test` 550/550 全绿。
+

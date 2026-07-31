@@ -254,6 +254,12 @@ opencode plugin ✓）。`start`（仅 daemon）不变——daemon 自动服务�
 5. **`messages.transform` 触发频率与幂等**：实测每步触发，标记守卫生效。
 6. **opencode.json `~` 路径展开**：opencode 是否自动展开 `~`；若否，install 写绝对路径。
 
+> **2026-07-31 live smoke 结果**：以上 6 项全部在本机真实 opencode 1.15.5 + Bun 1.3.14 +
+> 系统代理 :7897 环境闭合。缺口 4 暴露真实缺陷并修复（Bun fetch 尊重 `HTTP_PROXY` 且不豁免
+> loopback -> plugin 需追加 `NO_PROXY=127.0.0.1,localhost`）；缺口 3 修复 SDK 签名为
+> `client.session.messages({ path: { id: sessionID } })`。全闭环 capture->distill->approve->inject
+> 端到端通过（含跨 runtime 共享）。详见 `STATE.md`「Live smoke 结果」段。
+
 ## 测试策略
 
 **首选可断言面（纯函数 / 纯数据）**
