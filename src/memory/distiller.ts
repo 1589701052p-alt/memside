@@ -95,6 +95,8 @@ export interface DistillInput {
   existingSlugs: string[]
   /** Injected seam; production wires the real Anthropic call, tests pass a mock. */
   callLLM: LLMCall
+  /** 来源类型。subagent -> 候选 origin 强制降级 agent-observed；可选，默认 'conversation'（spec §3.1）。 */
+  sourceKind?: 'subagent' | 'conversation'
 }
 
 export interface DistillResult {
@@ -215,6 +217,9 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         typeof o.evidence === 'string' && o.evidence.trim() ? o.evidence.trim() : null
       // 贴金防护（spec §R1）：摘不出原话就不许戴 user-stated/user-confirmed 的帽子。
       if (origin !== 'agent-observed' && evidence === null) origin = 'agent-observed'
+      // subagent 降级（spec §3.2）：subagent 的 role:user 是主 agent 派发的 task brief，
+      // 非真人陈述。强制 agent-observed，不享受 stated 免疫。evidence 保留作观察依据。
+      if (input.sourceKind === 'subagent') origin = 'agent-observed'
       out.push({
         title: o.title,
         bodyMd: o.bodyMd,
