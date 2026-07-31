@@ -186,7 +186,7 @@ memside 直接读 claude code 自己的 settings,所以 claude code 能跑,disti
 
 ```bash
 netstat -ano | findstr :7777      # Windows,拿 PID
-taskkill //PID <pid> //F
+taskkill /PID <pid> /F            # cmd / PowerShell；Git Bash 下用 //PID //F
 # 或 posix:
 lsof -ti:7777 | xargs kill -9
 ```
@@ -195,7 +195,7 @@ lsof -ti:7777 | xargs kill -9
 
 **拒绝过的记忆又出现了。** 不应该--rejected 的条目保持 rejected。如果出现,提 issue。
 
-**停掉后台任务后 daemon 进程残留。** Windows 上杀 background task 可能留下 bun 进程占 7777。回收:`netstat -ano | findstr :7777` 拿到 PID,再 `taskkill //PID <pid> //F`。
+**停掉后台任务后 daemon 进程残留。** Windows 上杀 background task 可能留下 bun 进程占 7777。回收:`netstat -ano | findstr :7777` 拿到 PID,再 `taskkill /PID <pid> /F`(cmd / PowerShell；Git Bash 下用 `//PID //F`)。
 
 ## 开发
 

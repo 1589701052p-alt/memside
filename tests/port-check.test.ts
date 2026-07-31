@@ -154,10 +154,51 @@ test('reclaim: Windows calls taskkill per unique PID', async () => {
     ],
     ctx,
   )
+  // 用单斜杠 /PID、/F：Bun.spawn 不经 shell（CreateProcess 直传参数），MSYS 的
+  // // -> / 转义不生效，taskkill 会以 "Invalid argument - '//PID'" 拒绝（exit 1），
+  // 导致杀进程静默失败、端口仍被占、daemon 兜底抛 EADDRINUSE。见 portCheck.ts reclaim。
   expect(calls).toEqual([
-    ['taskkill', '//PID', '18196', '//F'],
-    ['taskkill', '//PID', '21044', '//F'],
+    ['taskkill', '/PID', '18196', '/F'],
+    ['taskkill', '/PID', '21044', '/F'],
   ])
+})
+
+// 回归（2026-07-31）：taskkill 非零退出必须 warn，不能静默吞掉。原先 reclaim 只
+// catch 抛出的异常，对 taskkill 退出码 1（如旧实现传 //PID 被拒、或进程已退出）视而
+// 不见，杀失败后直接继续 startDaemon，端口仍占 -> EADDRINUSE。这条测试锁住「非零退出
+// 要告警、但不中止」的契约。
+test('reclaim: Windows taskkill non-zero exit warns but does not throw', async () => {
+  const warns: string[] = []
+  const origWarn = console.warn
+  console.warn = (s: string) => { warns.push(s) }
+  const ctx: PortCheckCtx = {
+    platform: 'win32',
+    spawn: async () => ({ stdout: '', exitCode: 1 }),
+  }
+  try {
+    await reclaim([{ port: 7777, pid: 18196, cmdline: 'a' }], ctx)
+  } finally {
+    console.warn = origWarn
+  }
+  expect(warns.some((s) => s.includes('18196') && s.includes('非零'))).toBe(true)
+})
+
+// 回归（2026-07-31）：wmic 在 Windows 11（build 22483+）已被移除，getCmdlineWin 拿不
+// 到命令行时必须降级 PowerShell Get-CimInstance（spec §1.4 列出的替代方案），否则用户
+// 在新 Win11 上永远看到 "(命令行未知)"，端口回收防呆的 UX 价值归零。
+test('Windows: empty wmic falls back to PowerShell Get-CimInstance for cmdline', async () => {
+  const ctx: PortCheckCtx = {
+    platform: 'win32',
+    spawn: fakeSpawn({
+      'netstat -ano': '  TCP    127.0.0.1:7777  0.0.0.0:0  LISTENING  18196\r\n',
+      // wmic 在新 Win11 不存在 / 返回空 -> 触发降级
+      'wmic process where ProcessId=18196 get CommandLine /value': '',
+      "powershell -NoProfile -Command (Get-CimInstance Win32_Process -Filter 'ProcessId=18196').CommandLine":
+        'bun run src/cli.ts start\r\n',
+    }),
+  }
+  const holders = await findPortHolders([7777], ctx)
+  expect(holders).toEqual([{ port: 7777, pid: 18196, cmdline: 'bun run src/cli.ts start' }])
 })
 
 test('reclaim: posix uses process.kill SIGKILL', async () => {
