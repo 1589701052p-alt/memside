@@ -59,10 +59,21 @@ async function findByNetstat(ports: number[], ctx: PortCheckCtx): Promise<PortHo
 }
 
 async function getCmdlineWin(pid: number, ctx: PortCheckCtx): Promise<string> {
+  // wmic 在新 Windows 11（build 22483+）已移除，取不到时降级 PowerShell
+  // Get-CimInstance（spec §1.4 列出的替代方案）。两者都失败 -> 空字符串，不阻塞。
   try {
     const out = await ctx.spawn(['wmic', 'process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/value'])
     const m = out.stdout.match(/CommandLine=(.*)/)
-    return m ? m[1].trim() : ''
+    if (m && m[1].trim()) return m[1].trim()
+  } catch {
+    // wmic 不存在时 Bun.spawn 抛错，落降级分支
+  }
+  try {
+    const out = await ctx.spawn([
+      'powershell', '-NoProfile', '-Command',
+      `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`,
+    ])
+    return out.stdout.trim()
   } catch {
     return ''
   }
@@ -120,8 +131,13 @@ export async function promptReclaim(holders: PortHolder[], ctx: ReclaimCtx): Pro
 
 /**
  * 杀掉 holders 里的占用进程。只杀占端口的那一个 PID（不递归父/子），同 PID
- * 去重只杀一次。杀失败（进程已退出/权限不足）打印 warn，不抛、不中止。
- * Windows: taskkill //PID <pid> //F；posix: process.kill(pid, 'SIGKILL')。
+ * 去重只杀一次。杀失败（进程已退出/权限不足/taskkill 拒绝参数）打印 warn，不抛、
+ * 不中止；端口仍被占时由 daemon EADDRINUSE 兜底。
+ * Windows: taskkill /PID <pid> /F；posix: process.kill(pid, 'SIGKILL')。
+ *
+ * 注意：Bun.spawn 不经 shell（Windows 上 CreateProcess 直传参数），MSYS/Git-Bash
+ * 的 // -> / 转义不生效，必须用单斜杠 /PID、/F。早期实现误用 //PID 会被 taskkill
+ * 以 "Invalid argument - '//PID'" 拒绝（退出码 1），杀进程静默失败 -> EADDRINUSE。
  */
 export async function reclaim(holders: PortHolder[], ctx: PortCheckCtx): Promise<void> {
   const seen = new Set<number>()
@@ -129,10 +145,17 @@ export async function reclaim(holders: PortHolder[], ctx: PortCheckCtx): Promise
     if (seen.has(h.pid)) continue
     seen.add(h.pid)
     try {
+      let exitCode: number | null = 0
       if (ctx.platform === 'win32') {
-        await ctx.spawn(['taskkill', '//PID', String(h.pid), '//F'])
+        const r = await ctx.spawn(['taskkill', '/PID', String(h.pid), '/F'])
+        exitCode = r.exitCode
       } else {
         process.kill(h.pid, 'SIGKILL')
+      }
+      // taskkill 非零退出（进程已退出 / 权限不足 / 参数被拒）要告警，避免静默失败
+      // 让端口回收看似成功、实则 daemon 仍 EADDRINUSE。
+      if (exitCode !== 0) {
+        console.warn(`memside: 杀进程 PID ${h.pid} 返回非零退出码 ${exitCode}（可能已退出或权限不足），端口可能仍被占用`)
       }
     } catch (e) {
       console.warn(`memside: 杀进程 PID ${h.pid} 失败（可能已退出）：${(e as Error).message}`)
