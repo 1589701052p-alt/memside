@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { openDb } from '@/db/client'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
+import { memoryDistillEvents } from '@/db/schema'
 import type { RuntimeAdapter } from '@/adapter/types'
 
 // Task 4 回归锁：daemon 接收双 adapter（claude + opencode）。
@@ -61,4 +62,76 @@ test('GET /hooks/opencode/inject 返回 opencode adapter 块', async () => {
   const res = await app.request('/hooks/opencode/inject?cwd=/p', { method: 'GET' })
   const body = await res.json().catch(() => ({}))
   expect(body.block).toContain('--- BEGIN INJECTED MEMORY ---')
+})
+
+test('POST /hooks/opencode/capture -> enqueueDistillJob(runtime:opencode) + events 行 + 202', async () => {
+  // Task 5 回归锁：opencode 侧会话捕获路由。opencode idle hook POST 全量 messages ->
+  // parseOpencodeMessages 转 TranscriptTurn[] -> enqueueDistillJob(runtime:'opencode') +
+  // memory_distill_events 行（kind:'conversation'）-> 202 同步 ack。
+  // 镜像 claude code Stop 路由的 fire-and-forget IIFE + broadcast + 202 模式（server.ts:222-238）。
+  // 错误信号不走单独路由：由 capture 全量 transcript 经 distiller 的 detectErrorSignals 提取
+  // （对齐 claude code PostToolUse 跳过决策，server.ts:154-157）。
+  const BLOCK = '--- BEGIN INJECTED MEMORY ---\nopencode wired\n--- END INJECTED MEMORY ---'
+  const opencodeFake: RuntimeAdapter = {
+    kind: 'opencode',
+    capture: async () => [],
+    inject: async () => BLOCK,
+  }
+  const enqueueCalls: { runtime: string; cwd: string; debounceKey: string; sessionId?: string }[] = []
+  const bc: unknown[] = []
+  const app = createApp({
+    db,
+    adapter: new ClaudeCodeAdapter(db),
+    opencodeAdapter: opencodeFake,
+    enqueueDistillJob: async (_d, input) => { enqueueCalls.push(input); return { jobId: 'j1', nextRunAt: 0 } },
+    broadcast: (m: unknown) => { bc.push(m) },
+  })
+  const res = await app.request('/hooks/opencode/capture', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 's1',
+      cwd: '/p',
+      messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hi' }] }],
+    }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(res.status).toBe(202)
+  // enqueueDistillJob 在 IIFE 内异步调用，但 fake 在调用时同步记录入参（参考 server.test.ts
+  // 的 enqueueCalls 模式），fire-and-forget 不 await 也能确定性断言。
+  expect(enqueueCalls.length).toBe(1)
+  expect(enqueueCalls[0]).toMatchObject({ runtime: 'opencode', cwd: '/p', debounceKey: 's1', sessionId: 's1' })
+  // memory_distill_events 行写入（IIFE 内异步落库，等 50ms 让 DB write 完成）
+  await new Promise((r) => setTimeout(r, 50))
+  const events = await db.select().from(memoryDistillEvents)
+  expect(events.length).toBe(1)
+  expect(events[0]!.kind).toBe('conversation')
+  // payload 是 JSON.stringify(parseOpencodeMessages(messages))，含 user 文本
+  expect(events[0]!.payload).toContain('hi')
+  // capture 路由同步 broadcast memory.capture（与 claude Stop 一致）
+  expect(bc.some((m: any) => m.type === 'memory.capture')).toBe(true)
+})
+
+test('POST /hooks/opencode/capture 缺 sessionId 时 debounceKey 回退 cwd:opencode', async () => {
+  // debounceKey 兜底：无 sessionId 时用 `${cwd}:opencode`，避免多 opencode 会话
+  // 共用同一 cwd 串成一条 debounce 链导致互相覆盖（对齐 brief 的 debounceKey 公式）。
+  const opencodeFake: RuntimeAdapter = {
+    kind: 'opencode',
+    capture: async () => [],
+    inject: async () => '',
+  }
+  const enqueueCalls: { runtime: string; cwd: string; debounceKey: string; sessionId?: string }[] = []
+  const app = createApp({
+    db,
+    adapter: new ClaudeCodeAdapter(db),
+    opencodeAdapter: opencodeFake,
+    enqueueDistillJob: async (_d, input) => { enqueueCalls.push(input); return { jobId: 'j2', nextRunAt: 0 } },
+    broadcast: () => {},
+  })
+  const res = await app.request('/hooks/opencode/capture', {
+    method: 'POST',
+    body: JSON.stringify({ cwd: '/p', messages: [] }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(res.status).toBe(202)
+  expect(enqueueCalls[0]).toMatchObject({ runtime: 'opencode', cwd: '/p', debounceKey: '/p:opencode', sessionId: '' })
 })

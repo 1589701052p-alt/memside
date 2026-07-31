@@ -10,6 +10,8 @@ import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, MemoryNotFoundError } from '@/memory/store'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
+import { parseOpencodeMessages } from '@/opencode/transcript'
+import type { OpencodeMessage } from '@/opencode/transcript'
 import type { EnqueueInput } from '@/scheduler'
 import { loadUiLlmConfig, saveUiLlmConfig, maskToken, type UiLlmConfig } from '@/settings'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
@@ -249,11 +251,44 @@ export function createApp(deps: AppDeps) {
   // 在新会话首条 user 消息前 GET 这个端点，把审批记忆块注入会话上下文（对齐 claude
   // code 的 /inject + SessionStart 闭环，但 opencode 走 query 传 cwd + opencodeAdapter）。
   // 与上面 /inject 的差异仅在用 opencodeAdapter（跨 runtime 共享记忆，spec §5）。
-  // capture 路由（POST /hooks/opencode/capture）是 Task 5 的范围，本任务不注册。
+  // capture 路由（POST /hooks/opencode/capture，Task 5）注册在下方。
   app.get('/hooks/opencode/inject', async (c) => {
     const cwd = c.req.query('cwd') ?? ''
     const block = await deps.opencodeAdapter.inject({ cwd })
     return c.json({ block })
+  })
+
+  // opencode capture（Task 5 接线）：opencode idle hook 在会话空闲时 POST 全量 messages。
+  // 与 claude code Stop 路由（server.ts:222-238）同构：fire-and-forget IIFE 转 turns ->
+  // enqueueDistillJob + memory_distill_events 行 -> 202 同步 ack（<50ms 契约）。
+  // 差异：opencode transcript 是 inline messages（非 JSONL 文件），由 parseOpencodeMessages
+  // 转换；debounceKey 优先用 sessionId（多 opencode 会话隔离），缺省回退 `${cwd}:opencode`。
+  // 错误信号不走单独路由：全量 transcript 内的 isError turn 由 distiller 的 detectErrorSignals
+  // 提取（对齐 claude code PostToolUse 跳过决策，server.ts:154-157）。
+  app.post('/hooks/opencode/capture', async (c) => {
+    const body = await c.req.json().catch(() => ({}) as {
+      sessionId?: string; cwd?: string; messages?: OpencodeMessage[]; sourceEventId?: string
+    })
+    const cwd = body.cwd ?? ''
+    const sessionId = body.sessionId ?? ''
+    const sourceEventId = body.sourceEventId ?? `opencode-idle-${Date.now()}`
+    const debounceKey = sessionId || `${cwd}:opencode`
+    const turns = parseOpencodeMessages(body.messages ?? [])
+    void (async () => {
+      try {
+        const { jobId } = await deps.enqueueDistillJob(deps.db, {
+          sourceEventId, runtime: 'opencode', cwd, debounceKey, sessionId,
+        })
+        await deps.db.insert(memoryDistillEvents).values({
+          distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
+          kind: 'conversation', payload: JSON.stringify(turns),
+        })
+      } catch (e) {
+        deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) })
+      }
+    })()
+    deps.broadcast({ type: 'memory.capture', sourceEventId })
+    return c.json({ ok: true }, 202)
   })
 
   // --- Memory API ---------------------------------------------------------
