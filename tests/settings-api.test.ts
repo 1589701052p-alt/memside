@@ -10,6 +10,7 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
+import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
 import type { UiLlmConfig } from '@/settings'
 import type { ClaudeCreds } from '@/creds'
@@ -69,6 +70,7 @@ function makeApp(overrides: {
   return createApp({
     db,
     adapter: new ClaudeCodeAdapter(db),
+    opencodeAdapter: new OpencodeAdapter(db),
     enqueueDistillJob: async () => ({ jobId: 'j', nextRunAt: 0 }),
     broadcast: () => {},
     ...overrides,
