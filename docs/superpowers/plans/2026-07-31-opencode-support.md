@@ -4,7 +4,7 @@
 
 **Goal:** 把 opencode 接入 memside 的完整 capture -> distill -> approve -> inject 闭环，对齐 claude code 体验。
 
-**Architecture:** 仓库自带一个 opencode in-process plugin（`opencode-plugin/`），挂 `event`/`messages.transform`/`tool.execute.after` 三钩子，通过 fetch 与 daemon 通信。daemon 侧新增 `/hooks/opencode/{capture,error,inject}` 路由：capture/error 走既有 `enqueueDistillJob` + `memory_distill_events` DB 路径（**不经 adapter 内存队列**，与 claude code Stop 一致），inject 走 `OpencodeAdapter.inject`。project 记忆跨 runtime 共享（`listApprovedByScope` 去 runtime 过滤）。distill/store/scheduler/valueFilter/dedup/Web UI 全复用。
+**Architecture:** 仓库自带一个 opencode in-process plugin（`opencode-plugin/`），挂 `event`/`messages.transform` 两钩子，通过 fetch 与 daemon 通信。daemon 侧新增 `/hooks/opencode/{capture,inject}` 路由：capture 走既有 `enqueueDistillJob` + `memory_distill_events` DB 路径（**不经 adapter 内存队列**，与 claude code Stop 一致），inject 走 `OpencodeAdapter.inject`。error 信号不设单独路由--capture 全量 transcript 已含 tool error（`isError` turn），由 `detectErrorSignals` 提取，对齐 claude code 第四轮（server.ts:148-154）。project 记忆跨 runtime 共享（`listApprovedByScope` 去 runtime 过滤）。distill/store/scheduler/valueFilter/dedup/Web UI 全复用。
 
 **Tech Stack:** Bun + Hono + Drizzle + bun:sqlite + zod（后端）；opencode plugin SDK `@opencode-ai/plugin`（in-process JS）；Vite + React 19（前端，仅 sourceLabel 一行改动）。
 
@@ -22,7 +22,7 @@
 ## File Structure
 
 - **Create** `src/opencode/transcript.ts` — `OpencodeMessage`/`OpencodePart` 类型 + 纯函数 `parseOpencodeMessages`。单文件单职责（opencode 消息 -> TranscriptTurn 转换）。
-- **Create** `opencode-plugin/package.json` + `opencode-plugin/memside.js` — opencode in-process plugin（三钩子，fetch daemon）。
+- **Create** `opencode-plugin/package.json` + `opencode-plugin/memside.js` — opencode in-process plugin（两钩子，fetch daemon）。
 - **Modify** `src/adapter/opencode.ts` — 替换 stub，落地 `inject`（`pushCapture`/`capture` 留单测对齐 ClaudeCodeAdapter）。
 - **Modify** `src/memory/store.ts` — `listApprovedByScope` 去 runtime 过滤 + 参数。
 - **Modify** `src/adapter/claudeCode.ts` — inject 调用去掉 `runtime` 实参。
@@ -370,15 +370,15 @@ git commit -m "feat(opencode): daemon 实例化 OpencodeAdapter + server 接收�
 
 ---
 
-### Task 5: daemon opencode 路由（capture / error / inject）
+### Task 5: daemon opencode 路由（capture / inject）
 
 **Files:**
-- Modify: `src/server.ts`（注册 3 路由，静态托管前）
-- Test: `tests/server-opencode.test.ts`（补全 capture/error）
+- Modify: `src/server.ts`（注册 2 路由，静态托管前）
+- Test: `tests/server-opencode.test.ts`（补全 capture）
 
 **Interfaces:**
 - Consumes: `parseOpencodeMessages`（Task 1）、`enqueueDistillJob` + `memoryDistillEvents`（既有）、`opencodeAdapter.inject`（Task 4）。
-- Produces: `POST /hooks/opencode/capture`、`POST /hooks/opencode/error`、`GET /hooks/opencode/inject`。
+- Produces: `POST /hooks/opencode/capture`、`GET /hooks/opencode/inject`。
 
 - [ ] **Step 1: Write failing tests**
 
@@ -393,8 +393,6 @@ test('POST /hooks/opencode/capture -> enqueueDistillJob + events 行 + 202', asy
   expect(enqCalled).toBe(true)
   // memory_distill_events 行写入（用 tmp db 查验）
 })
-
-test('POST /hooks/opencode/error -> enqueueDistillJob sourceKind error + 202', async () => { /* 类似，断言 sourceKind='error' */ })
 
 test('GET /hooks/opencode/inject?cwd= -> {block}', async () => { /* Task 4 已覆盖，补无记忆返回 null block */ })
 ```
@@ -430,23 +428,6 @@ app.post('/hooks/opencode/capture', async (c) => {
   return c.json({ ok: true }, 202)
 })
 
-app.post('/hooks/opencode/error', async (c) => {
-  const body = await c.req.json().catch(() => ({}) as { sessionId?: string; cwd?: string; tool?: string; output?: string; sourceEventId?: string })
-  const cwd = body.cwd ?? ''
-  const sessionId = body.sessionId ?? ''
-  const sourceEventId = body.sourceEventId ?? `opencode-error-${Date.now()}`
-  const debounceKey = sessionId || `${cwd}:opencode-error`
-  const turns = [{ role: 'tool' as const, content: body.output ?? '', isError: true, toolName: body.tool }]
-  void (async () => {
-    try {
-      const { jobId } = await deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'opencode', cwd, debounceKey, sessionId })
-      await deps.db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'error', payload: JSON.stringify(turns) })
-    } catch (e) { deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) }) }
-  })()
-  deps.broadcast({ type: 'memory.capture', sourceEventId })
-  return c.json({ ok: true }, 202)
-})
-
 app.get('/hooks/opencode/inject', async (c) => {
   const cwd = c.req.query('cwd') ?? ''
   const block = await deps.opencodeAdapter.inject({ cwd })
@@ -454,7 +435,7 @@ app.get('/hooks/opencode/inject', async (c) => {
 })
 ```
 
-注意：`enqueueDistillJob` 的 `EnqueueInput` 若不支持 `sourceKind`，error 路由用 `kind:'error'` 写 events 行即可（`memory_distill_events.kind` 自由文本；distiller 按 `isError` turn 识别 error 信号，与 claude code 一致）。对照 `enqueueDistillJob` 实际签名调整。
+注意：对照 `enqueueDistillJob` 实际签名调整（`EnqueueInput` 是否含 `sessionId`——claude code Stop 路由已传，见 `server.ts:219`；error 信号不走单独路由，由 capture 全量 transcript 的 `isError` turn 经 `detectErrorSignals` 提取，对齐 claude code 第四轮 server.ts:148-154）。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -465,7 +446,7 @@ Expected: PASS。
 
 ```bash
 git add src/server.ts tests/server-opencode.test.ts
-git commit -m "feat(opencode): daemon /hooks/opencode/{capture,error,inject} 路由"
+git commit -m "feat(opencode): daemon /hooks/opencode/{capture,inject} 路由"
 ```
 
 ---
@@ -478,7 +459,7 @@ git commit -m "feat(opencode): daemon /hooks/opencode/{capture,error,inject} 路
 - Test: `tests/plugin-opencode.test.ts`（源码层文本断言）
 
 **Interfaces:**
-- Consumes: daemon 路由契约（Task 5）：`POST /hooks/opencode/capture` body `{sessionId, cwd, messages}`、`POST /hooks/opencode/error` body `{sessionId, cwd, tool, output}`、`GET /hooks/opencode/inject?cwd=` 返回 `{block}`。
+- Consumes: daemon 路由契约（Task 5）：`POST /hooks/opencode/capture` body `{sessionId, cwd, messages}`、`GET /hooks/opencode/inject?cwd=` 返回 `{block}`。
 - Produces: opencode plugin（默认导出 `async ({client, directory}) => Hooks`），install 时端口占位 `__MEMSIDE_PORT__` 烘焙。
 
 - [ ] **Step 1: Write failing test**
@@ -490,9 +471,8 @@ import { readFileSync } from 'node:fs'
 
 const js = readFileSync(new URL('../opencode-plugin/memside.js', import.meta.url), 'utf-8')
 
-test('plugin 注册三钩子', () => {
+test('plugin 注册两钩子', () => {
   expect(js).toContain("'experimental.chat.messages.transform'")
-  expect(js).toContain("'tool.execute.after'")
   expect(js).toContain('session.idle')
 })
 
@@ -558,21 +538,11 @@ export default async function memsidePlugin({ client, directory }) {
         firstUser.parts.unshift({ ...ref, type: 'text', text: block });
       } catch (e) { /* best-effort */ }
     },
-    'tool.execute.after': async (input, output) => {
-      try {
-        const looksError = output?.metadata?.error || output?.output?.toLowerCase?.().includes('error') || output?.title?.toLowerCase?.().includes('error');
-        if (!looksError) return;
-        await fetch(`${BASE()}/hooks/opencode/error`, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: input?.sessionID, cwd, tool: input?.tool, output: output?.output }),
-        });
-      } catch (e) { /* best-effort */ }
-    },
   };
 }
 ```
 
-> 验证缺口（实现时对照真实 opencode 1.15.5 跑 `opencode run --print-logs` 确认）：(1) `client.session.messages` 返回结构（`res.data` 形状）；(2) `session.idle` 的 `event.properties` 是否带 `sessionID`；(3) `tool.execute.after` error 判定字段；(4) `messages.transform` 每 step 触发的幂等。
+> 验证缺口（实现时对照真实 opencode 1.15.5 跑 `opencode run --print-logs` 确认）：(1) `client.session.messages` 返回结构（`res.data` 形状）；(2) `session.idle` 的 `event.properties` 是否带 `sessionID`；(3) `messages.transform` 每 step 触发的幂等。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -583,7 +553,7 @@ Expected: PASS。
 
 ```bash
 git add opencode-plugin/ tests/plugin-opencode.test.ts
-git commit -m "feat(opencode): in-process plugin（event/messages.transform/tool.execute.after）"
+git commit -m "feat(opencode): in-process plugin（event/messages.transform）"
 ```
 
 ---
@@ -731,7 +701,7 @@ git commit -m "docs(opencode): UI sourceLabel + README/STATE 收尾"
 
 ## Self-Review
 
-**1. Spec coverage:** spec 各节均有点名任务——plugin 三钩子（Task 6）、daemon 三路由（Task 5）、OpencodeAdapter（Task 3）、transcript 转换（Task 1）、inject 跨 runtime（Task 2）、install（Task 7）、Web UI sourceLabel（Task 8）。daemon 双 adapter 接线（Task 4）。验证缺口在 Task 6 标注，live smoke 留实现后手动跑（spec 测试策略 live-only）。
+**1. Spec coverage:** spec 各节均有点名任务——plugin 两钩子（Task 6）、daemon 两路由（Task 5）、OpencodeAdapter（Task 3）、transcript 转换（Task 1）、inject 跨 runtime（Task 2）、install（Task 7）、Web UI sourceLabel（Task 8）。daemon 双 adapter 接线（Task 4）。验证缺口在 Task 6 标注，live smoke 留实现后手动跑（spec 测试策略 live-only）。
 
 **2. Placeholder scan:** 代码块均为可执行骨架；`enqueueDistillJob` 签名细节标注「对照实际签名调整」（Task 5），非占位而是诚实声明（实现时验证 `sourceKind` 是否在 `EnqueueInput`）。
 

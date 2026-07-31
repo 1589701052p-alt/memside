@@ -25,7 +25,6 @@ opencode 的扩展机制与 claude code 不同：**plugin 是 in-process JS 模�
   - `event?: ({event: Event}) => Promise<void>` —— 通用事件订阅（含 `session.idle` 等）。
   - `"experimental.chat.messages.transform"?: (input, output: {messages: {info: Message, parts: Part[]}[]}) => Promise<void>` —— 修改发给 LLM 的消息数组。**注入用这个**。
   - `chat.message` —— 新消息收到时触发（带 message+parts）。
-  - `tool.execute.after?: (input: {tool, sessionID, callID, args}, output: {title, output, metadata})` —— 工具执行后。**错误信号用这个**。
 - **加载方式**：`opencode.json` 的 `plugin?: Array<string>`（`types.gen.d.ts:1067`）声明，
   支持 git URL 与**本地路径**。superpowers 实证本地路径可行
   （`docs/README.opencode.md:144`：`"plugin": ["~/.config/opencode/node_modules/superpowers"]`）。
@@ -61,8 +60,7 @@ opencode 的扩展机制与 claude code 不同：**plugin 是 in-process JS 模�
 
 - opencode 会话被捕获（`session.idle` 拉全量 transcript）、提炼成候选记忆、Web UI 审批后
   注入回 opencode 新会话（`messages.transform` prepend 首条 user message）。
-- opencode 工具失败（`tool.execute.after`）产出 `sourceKind:'error'` 候选，对齐 claude code
-  PostToolUse `is_error`。
+- opencode 工具失败（capture 全量 transcript 的 `isError` turn）经 `detectErrorSignals` 提取，产出 `[category:anti-pattern]` 候选--对齐 claude code 第四轮（server.ts:148-154，PostToolUse 不蒸馏，error 从 Stop 全量 transcript 提取）。无单独 error 路由。
 - project 记忆跨 runtime 共享：`listApprovedByScope` 去掉 runtime 过滤，claude code 与
   opencode 在同 cwd 互相注入 project 记忆；global 记忆本就全共享。
 - 一条命令装好 opencode plugin：`memside install` / `start-and-install` 额外复制 plugin
@@ -97,7 +95,6 @@ opencode-plugin/
 |---|---|
 | `event` | 过滤 `event.type === 'session.idle'`；从 `event.properties` 取 `sessionID`；cwd 用 plugin 闭包的 `directory`（PluginInput 字段）；调 `client.session.messages({sessionID})` 拉全部消息 → `fetch POST http://127.0.0.1:<port>/hooks/opencode/capture` body `{sessionId, cwd, messages, sourceEventId}`（原始 opencode 消息，daemon 侧 `parseOpencodeMessages` 转换--plugin 独立 JS 不能 import `src/`）。best-effort：catch 一切错误静默，不抛回 opencode。 |
 | `experimental.chat.messages.transform` | 取 `directory` 作 cwd → `fetch GET http://127.0.0.1:<port>/hooks/opencode/inject?cwd=<cwd>` 拿 `{block}`；`block` 非空时 prepend 到 `output.messages` 首条 `role==='user'` 消息的 `parts` 前（`{type:'text', text:block}`）。**幂等守卫**：首条 user message 已含 `--- BEGIN INJECTED MEMORY ---` 标记则跳过（对齐 superpowers + 复用 `formatMemoryBlock` 既有标记）。 |
-| `tool.execute.after` | 检测 `output.output`/`metadata` 含错误信号 → `fetch POST /hooks/opencode/error` body `{sessionId, cwd, tool, output}`。错误判定见「验证缺口」。 |
 
 网络约定：plugin 跑在 opencode 进程，fetch `127.0.0.1`。Bun `fetch` **不默认尊重
 `HTTP_PROXY`/`HTTPS_PROXY`** env（与 curl 不同），故 loopback 调用不受系统代理拦截，无需
@@ -121,10 +118,6 @@ install 期烘焙，但 opencode 多一层 env 覆盖更稳健）。
   对齐 claude Stop 路由 `server.ts:216-230`）-> 返回 `202 {ok:true}`。fire-and-forget。
   **不调 `adapter.pushCapture`**--in-memory 队列无 consumer（`server.ts:199-203`），真实数据走
   DB events 表，scheduler `loadTranscript` 读取。
-- `POST /hooks/opencode/error`：body `{sessionId, cwd, tool, output}`。错误 output 包成 error
-  `TranscriptTurn`（`isError:true`）-> `enqueueDistillJob({runtime:'opencode', cwd,
-  debounceKey:sessionId, sourceKind:'error'})` + 写 events 行 -> `202`（对齐 capture 路径，
-  不走 adapter 队列）。
 - `GET /hooks/opencode/inject?cwd=`：调 `adapter.inject({cwd})` -> 返回 `{block}`（block 可 null）。
   也接受 `POST`（与 `/inject` 一致语义），plugin 用 GET。
 
@@ -214,9 +207,6 @@ opencode plugin ✓）。`start`（仅 daemon）不变——daemon 自动服务�
 → `OpencodeAdapter.inject` → `listApprovedByScope`(跨 runtime) → `formatMemoryBlock` →
 `{block}` → plugin prepend 到首条 user message（幂等）→ opencode 把 block 喂给 LLM。
 
-**error**：opencode 工具执行 → `tool.execute.after` 钩子 → 检测错误 → `POST /hooks/opencode/error`
-→ `enqueueDistillJob(sourceKind:'error')` + 写 events → 蒸馏成 `[category:anti-pattern]` 候选（复用现有 error 路径）。
-
 ## 与现有模块耦合点
 
 - `src/adapter/types.ts`：`RuntimeKind` 已含 `'opencode'`；`CaptureEvent.runtime` 复用。`InjectInput`
@@ -259,12 +249,10 @@ opencode plugin ✓）。`start`（仅 daemon）不变——daemon 自动服务�
 2. **`session.idle` 事件 payload**：`event.properties` 是否带 `sessionID` + 可推 cwd 的字段；
    若不带 cwd，退回用 `directory`（PluginInput）或 `project.path`。
 3. **`client.session.messages` 返回结构**：确认是 `{info, parts}[]` 且 role 在 `info.role`。
-4. **`tool.execute.after` 错误判定字段**：`output.output` / `metadata.error` / tool 退出码——
-   对照真实失败 tool result 确定判定启发式（精度优先，对齐 `detectTaming` 思路）。
-5. **Bun fetch 与系统代理**：确认 `127.0.0.1` 调用不被 `HTTP_PROXY` 拦截（若被拦，plugin
+4. **Bun fetch 与系统代理**：确认 `127.0.0.1` 调用不被 `HTTP_PROXY` 拦截（若被拦，plugin
    需显式 `undici` dispatcher 绕过，对齐 claude code `--noproxy`）。
-6. **`messages.transform` 触发频率与幂等**：实测每步触发，标记守卫生效。
-7. **opencode.json `~` 路径展开**：opencode 是否自动展开 `~`；若否，install 写绝对路径。
+5. **`messages.transform` 触发频率与幂等**：实测每步触发，标记守卫生效。
+6. **opencode.json `~` 路径展开**：opencode 是否自动展开 `~`；若否，install 写绝对路径。
 
 ## 测试策略
 
@@ -290,7 +278,6 @@ opencode plugin ✓）。`start`（仅 daemon）不变——daemon 自动服务�
 
 - `POST /hooks/opencode/capture` → `enqueueDistillJob` 被调 + `memory_distill_events` 行写入 + 202。
 - `GET /hooks/opencode/inject?cwd=` → 返回 `{block}`；无记忆返回 null block。
-- `POST /hooks/opencode/error` → `enqueueDistillJob(sourceKind:'error')` + events 行 + 202。
 
 **集成（`tests/adapter-opencode.test.ts`，tmp DB）**
 
