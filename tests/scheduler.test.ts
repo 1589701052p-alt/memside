@@ -1102,3 +1102,29 @@ test('produced: scheduler does NOT write job.last_error', async () => {
   expect(job[0]!.lastError).toBeNull()
   expect(job[0]!.status).toBe('done')
 })
+
+test('tick 对 subagent job 的候选强制降级 origin 为 agent-observed', async () => {
+  // spec §3.3：job.sourceAgentId 非空 -> distillTranscript 收到 sourceKind='subagent'
+  // -> 候选 origin 被降级。用既有 tick harness：enqueue subagent job + fake loadTranscript
+  // + callCount 分派 mock。distill 返回 origin='user-stated'；dedup 无 existing 短路；
+  // judgeValue 返回 keep。断言 createCandidate 收到的 input.origin === 'agent-observed'。
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1',
+    debounceMs: 0, sourceAgentId: 'agent-1',
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  let captured: any = null
+  let callCount = 0
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'You are implementing Task 1' }], fullLength: 1 }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:convention] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: 'Do not change anything outside this task scope' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+  })
+  expect(captured).not.toBeNull()
+  expect(captured.origin).toBe('agent-observed')
+  expect(captured.sourceKind).toBe('subagent')
+})
