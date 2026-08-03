@@ -621,6 +621,27 @@ export 行。opencode plugin 从此不得加 named export（守卫红即意图�
 执行：subagent-driven（4 计划 task + 1 现场 fix task，各 implementer + reviewer；
 Task 3 plan 内部矛盾与 Task 5 加载器事故均经用户拍板；全部 review Approved，
 deferred minor 见 sdd ledger）。`bun run typecheck && bun test` 全绿（568 通过）。
+终审 whole-branch review verdict=Ready to merge=Yes（0 Critical / 0 Important，
+8 条 deferred minor 全判可 defer，其中 plan-mandated 5 条）。PR #35。
+
+### 终审 deferred minor（建议打包一个 follow-up issue）
+
+1. `log()` 最内层 `console.error('[memside] log fallback also failed')` 未设防：
+   console.error 自身抛错时 rejection 可沿 probe catch -> 事件钩子 catch 链抵达
+   opencode，违 best-effort 契约（需运行时根本性损坏才可达）；修法
+   `try { console.error(...) } catch {}`（bare catch 无括号，不被 catch 守卫正则
+   误伤，两不变量共存）。含同根的「probe await log 理论 reject 路径」。
+2. 文本断言可收紧：export 守卫只匹配 `'export '` 前缀（漏 `export{x}` / 缩进 /
+   多行形态），`/^\s*export\b/` 更严；catch 守卫的非贪婪切片止于首个 `}`
+   （当前 5 处切片均实证含日志 token，危险方向窄）。
+3. spec 文案两处漂移（仅文档）：双形态失败处 spec 写「抛最后一个错误」，实现随
+   plan 是**首个**错误；spec §1e named-export 测试接缝已被 1.18.11 事故推翻
+   （STATE.md 已载加载器偏差，未载 firstError 语义）。
+4. `tests/plugin-opencode.test.ts:4` 顶层设 `MEMSIDE_PORT` 在 bun 单进程跨文件
+   残留（今日实证无害：7777 处处默认）；`freshPlugin()` 每次重载模块顶层致
+   NO_PROXY 追加重复累积（功能惰性）。
+5. ambient d.ts 通配声明在改动态 import 后不再匹配任何 import（`?fresh=N` 模板
+   说明符解析为 any），仅余形状文档作用，头部注释过期。
 
 ### live 冒烟结果（2026-08-03，本机 opencode 1.18.11，受控超时重跑）
 
