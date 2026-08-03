@@ -1,5 +1,8 @@
-import { test, expect } from 'bun:test'
+import { test, expect, afterEach } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import memsidePlugin, { fetchSessionMessages, compat, resetCompatState } from '../opencode-plugin/memside.js'
+
+process.env.MEMSIDE_PORT = '7777'
 
 const js = readFileSync(new URL('../opencode-plugin/memside.js', import.meta.url), 'utf-8')
 
@@ -47,4 +50,80 @@ test('messages 响应归一化兜底 Array.isArray(res.data)', () => {
   // SDK 返回形态可能是数组或 {messages:[]}；用 Array.isArray 判别取真值，避免
   // 形态变更导致 capture 存空 transcript -> distill skipped_no_new_turns。
   expect(js).toContain('Array.isArray(res.data)')
+})
+
+// --- SDK 签名探测功能测试（2026-08-03 事故：opencode 1.15.5 -> 1.18.10 自动升级后
+// client.session.messages 签名从 { path: { id } } 翻转回扁平 { sessionID }，plugin
+// 旧签名调用失败被 catch 吞掉，capture 静默清零。spec §1a：双签名探测 + 成功记忆。）---
+
+type ShapeImpl = (sessionID: string) => unknown
+
+function makeFakeClient(beh: { flat?: ShapeImpl; path?: ShapeImpl } = {}) {
+  const order: string[] = []
+  const logs: { service: string; level: string; message: string; extra?: unknown }[] = []
+  const client = {
+    session: {
+      messages: async (arg: { sessionID?: string; path?: { id: string } }) => {
+        if (arg && arg.path) {
+          order.push('path')
+          if (!beh.path) throw new Error('unexpected path shape call')
+          return beh.path(arg.path.id)
+        }
+        order.push('flat')
+        if (!beh.flat) throw new Error('unexpected flat shape call')
+        return beh.flat(arg?.sessionID ?? '')
+      },
+    },
+    app: {
+      log: async (req: { body: { service: string; level: string; message: string; extra?: unknown } }) => {
+        logs.push(req.body)
+      },
+    },
+  }
+  return { client, order, logs }
+}
+
+afterEach(() => { resetCompatState() })
+
+test('probe: flat 成功（1.18+ 形态）-> 返回 res 并记忆 flat', async () => {
+  const { client, order } = makeFakeClient({ flat: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }) })
+  const out = await fetchSessionMessages(client, 'ses_a')
+  expect((out.res.data as unknown[]).length).toBe(1)
+  expect(out.shape).toBe('flat')
+  expect(out.fellBack).toBe(false)
+  expect(compat.rememberedShape).toBe('flat')
+  await fetchSessionMessages(client, 'ses_a')
+  expect(order).toEqual(['flat', 'flat']) // 记忆命中，不再试探其它形态
+})
+
+test('probe: flat 抛错 -> 回退 path（1.15.x 形态）并记忆 path', async () => {
+  const { client, order } = makeFakeClient({
+    flat: () => { throw new Error('Expected a string starting with ses') },
+    path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
+  })
+  const out = await fetchSessionMessages(client, 'ses_b')
+  expect(out.shape).toBe('path')
+  expect(out.fellBack).toBe(true)
+  expect(String(out.firstError)).toContain('Expected a string starting with ses')
+  expect(compat.rememberedShape).toBe('path')
+  await fetchSessionMessages(client, 'ses_b')
+  expect(order).toEqual(['flat', 'path', 'path']) // 记忆后直走 path
+})
+
+test('probe: flat 返回无 data 的错误对象 -> 仍回退（成功判据是 res.data 而非「没抛错」）', async () => {
+  const { client, order } = makeFakeClient({
+    flat: () => ({ error: { message: 'Invalid request' } }),
+    path: () => ({ data: [] }),
+  })
+  const out = await fetchSessionMessages(client, 'ses_c')
+  expect(order).toEqual(['flat', 'path'])
+  expect(out.shape).toBe('path')
+})
+
+test('probe: 两形态都失败 -> 抛首个错误', async () => {
+  const { client } = makeFakeClient({
+    flat: () => { throw new Error('flat boom') },
+    path: () => { throw new Error('path boom') },
+  })
+  await expect(fetchSessionMessages(client, 'ses_d')).rejects.toThrow('flat boom')
 })
