@@ -18,17 +18,18 @@ process.env.NO_PROXY = _noProxy;
 // 生成的 SDK 可能返回错误响应对象而非 throw（二进制内部对 session.get 显式传
 // {throwOnError:true} 是反证）。limit:1000 仅 flat 携带（防默认分页截断；distill 侧
 // 自有 12000 token 预算裁剪），path 形态保持 1.15.5 已验证原样。
-export const compat = { rememberedShape: null };
-
-export function resetCompatState() {
-  compat.rememberedShape = null;
-}
+// 注意：compat / shapeName / fetchSessionMessages 刻意保持模块私有，不得加任何具名导出——
+// opencode 1.18.11 plugin 加载器遍历模块全部顶层具名符号，非函数直接 throw TypeError
+// 中断插件加载，每个函数符号还会被当作 plugin 逐个调用（loader 报错原文见
+// tests/plugin-opencode.test.ts「default-only 导出」守卫）。default-only 是唯一跨
+// 1.15.x/1.18.x 安全的形态。
+const compat = { rememberedShape: null };
 
 function shapeName(shape) {
   return shape.path ? 'path' : 'flat';
 }
 
-export async function fetchSessionMessages(client, sessionID) {
+async function fetchSessionMessages(client, sessionID) {
   const flat = { sessionID, limit: 1000 };
   const path = { path: { id: sessionID } };
   const shapes = compat.rememberedShape === 'path' ? [path, flat] : [flat, path];

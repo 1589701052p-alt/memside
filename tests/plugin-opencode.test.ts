@@ -1,6 +1,5 @@
 import { test, expect, afterEach } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import memsidePlugin, { fetchSessionMessages, compat, resetCompatState } from '../opencode-plugin/memside.js'
 
 process.env.MEMSIDE_PORT = '7777'
 
@@ -62,9 +61,39 @@ test('messages 响应归一化兜底 Array.isArray(res.data)', () => {
   expect(js).toContain('Array.isArray(res.data)')
 })
 
-// --- SDK 签名探测功能测试（2026-08-03 事故：opencode 1.15.5 -> 1.18.10 自动升级后
+test('default-only 导出（opencode 1.18.11 加载器拒绝非函数 export）', () => {
+  // 2026-08-03 二轮事故：opencode 1.18.11 plugin 加载器遍历模块全部 export——
+  // 非函数 export 直接 throw TypeError("Plugin export is not a function") 中断插件加载，
+  // 每个函数 export 还会被当作 plugin 调用；1.15.5/1.18.10 只取 default。
+  // default-only 是唯一跨版本安全形态——任何新增 named export 都是回归。
+  const exportLines = js.split('\n').filter((l) => l.startsWith('export '))
+  expect(exportLines.length).toBe(1)
+  expect(exportLines[0]).toMatch(/^export default /)
+})
+
+// --- SDK 签名探测回归守卫（2026-08-03 事故：opencode 1.15.5 -> 1.18.10 自动升级后
 // client.session.messages 签名从 { path: { id } } 翻转回扁平 { sessionID }，plugin
-// 旧签名调用失败被 catch 吞掉，capture 静默清零。spec §1a：双签名探测 + 成功记忆。）---
+// 旧签名调用失败被 catch 吞掉，capture 静默清零。spec §1a：双签名探测 + 成功记忆。）
+// default-only 导出回归后（1.18.11 加载器事故）compat / fetchSessionMessages 不再可
+// import，探测逻辑全部改为 hook 驱动验证：idle 事件进、断言 probe 顺序 / POST / 日志。---
+
+type PluginHooks = {
+  event: (args: { event: { type: string; properties?: Record<string, unknown> } }) => Promise<void>
+  'experimental.chat.messages.transform': (
+    input: unknown,
+    output: { messages: Array<{ info?: { role?: string }; parts: Array<Record<string, unknown>> }> },
+  ) => Promise<void>
+}
+
+// compat.rememberedShape 现为模块私有且外部无法重置；Bun query-string cache busting
+// 给每个测试一个全新模块实例，隔离探测记忆态（等价于旧 resetCompatState afterEach）。
+let bust = 0
+async function freshPlugin(): Promise<{ plugin: (input: { client: unknown; directory: string }) => Promise<PluginHooks> }> {
+  const mod = (await import(`../opencode-plugin/memside.js?fresh=${++bust}`)) as {
+    default: (input: { client: unknown; directory: string }) => Promise<PluginHooks>
+  }
+  return { plugin: mod.default }
+}
 
 type ShapeImpl = (sessionID: string) => unknown
 
@@ -93,51 +122,6 @@ function makeFakeClient(beh: { flat?: ShapeImpl; path?: ShapeImpl } = {}) {
   return { client, order, logs }
 }
 
-afterEach(() => { resetCompatState() })
-
-test('probe: flat 成功（1.18+ 形态）-> 返回 res 并记忆 flat', async () => {
-  const { client, order } = makeFakeClient({ flat: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }) })
-  const out = await fetchSessionMessages(client, 'ses_a')
-  expect((out.res.data as unknown[]).length).toBe(1)
-  expect(out.shape).toBe('flat')
-  expect(out.fellBack).toBe(false)
-  expect(compat.rememberedShape).toBe('flat')
-  await fetchSessionMessages(client, 'ses_a')
-  expect(order).toEqual(['flat', 'flat']) // 记忆命中，不再试探其它形态
-})
-
-test('probe: flat 抛错 -> 回退 path（1.15.x 形态）并记忆 path', async () => {
-  const { client, order } = makeFakeClient({
-    flat: () => { throw new Error('Expected a string starting with ses') },
-    path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
-  })
-  const out = await fetchSessionMessages(client, 'ses_b')
-  expect(out.shape).toBe('path')
-  expect(out.fellBack).toBe(true)
-  expect(String(out.firstError)).toContain('Expected a string starting with ses')
-  expect(compat.rememberedShape).toBe('path')
-  await fetchSessionMessages(client, 'ses_b')
-  expect(order).toEqual(['flat', 'path', 'path']) // 记忆后直走 path
-})
-
-test('probe: flat 返回无 data 的错误对象 -> 仍回退（成功判据是 res.data 而非「没抛错」）', async () => {
-  const { client, order } = makeFakeClient({
-    flat: () => ({ error: { message: 'Invalid request' } }),
-    path: () => ({ data: [] }),
-  })
-  const out = await fetchSessionMessages(client, 'ses_c')
-  expect(order).toEqual(['flat', 'path'])
-  expect(out.shape).toBe('path')
-})
-
-test('probe: 两形态都失败 -> 抛首个错误', async () => {
-  const { client } = makeFakeClient({
-    flat: () => { throw new Error('flat boom') },
-    path: () => { throw new Error('path boom') },
-  })
-  await expect(fetchSessionMessages(client, 'ses_d')).rejects.toThrow('flat boom')
-})
-
 // --- hook 级功能测试（假 client + 拦截 globalThis.fetch；锁定 spec §1b 数据流）---
 
 const realFetch = globalThis.fetch
@@ -153,12 +137,13 @@ function captureFetch(): { url: string; body: Record<string, unknown> | null }[]
   return posts
 }
 
-test('capture: 1.18+ 形态 end-to-end（idle -> POST + info 日志 + 记忆）', async () => {
+test('capture: flat 成功（1.18+ 形态）-> POST + info 日志 + 记忆 flat', async () => {
   const posts = captureFetch()
   const { client, order, logs } = makeFakeClient({
     flat: () => ({ data: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hi' }] }] }),
   })
-  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t2' } } })
   expect(posts.length).toBe(1)
   expect(posts[0].url).toBe('http://127.0.0.1:7777/hooks/opencode/capture')
@@ -170,20 +155,23 @@ test('capture: 1.18+ 形态 end-to-end（idle -> POST + info 日志 + 记忆）'
   expect(info?.message).toContain('capture ok session=ses_t2')
   expect(info?.message).toContain('shape=flat')
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t2' } } })
-  expect(order).toEqual(['flat', 'flat'])
+  expect(order).toEqual(['flat', 'flat']) // 记忆命中，不再试探其它形态
 })
 
-test('capture: 1.15.x 形态 end-to-end（flat 抛错 -> path 兜底 + warn 回退日志）', async () => {
+test('capture: flat 抛错 -> 回退 path（1.15.x 形态）+ warn 日志 + 记忆 path', async () => {
   const posts = captureFetch()
   const { client, order, logs } = makeFakeClient({
     flat: () => { throw new Error('Expected a string starting with ses') },
     path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
   })
-  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t3' } } })
   expect(posts.length).toBe(1)
   expect(order).toEqual(['flat', 'path'])
   expect(logs.some((l) => l.level === 'warn' && l.message.includes('fell back to path'))).toBe(true)
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t3' } } })
+  expect(order).toEqual(['flat', 'path', 'path']) // 记忆后直走 path（此前仅 probe 级覆盖的断言）
 })
 
 test('capture: flat 返回无 data 错误对象 -> 回退 path 仍成功（成功判据是 res.data，1.18+ 可能不 throw）', async () => {
@@ -192,7 +180,8 @@ test('capture: flat 返回无 data 错误对象 -> 回退 path 仍成功（成�
     flat: () => ({ error: { message: 'Invalid request' } }),
     path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
   })
-  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t5' } } })
   expect(posts.length).toBe(1)
   expect(order).toEqual(['flat', 'path'])
@@ -204,8 +193,10 @@ test('capture: 两形态都失败 -> 不 POST、error 日志、不抛回 opencod
     flat: () => { throw new Error('flat boom') },
     path: () => { throw new Error('path boom') },
   })
-  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
-  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t4' } } })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
+  // hook 必须不 reject（await 解决）——best-effort 契约
+  await expect(hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t4' } } })).resolves.toBeUndefined()
   expect(posts.length).toBe(0)
   expect(logs.some((l) => l.level === 'error' && l.message.includes('capture failed session=ses_t4'))).toBe(true)
 })
@@ -213,7 +204,8 @@ test('capture: 两形态都失败 -> 不 POST、error 日志、不抛回 opencod
 test('capture: sessionID 缺失 -> 不 POST、error 日志、不抛', async () => {
   const posts = captureFetch()
   const { client, logs } = makeFakeClient({})
-  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: {} } })
   expect(posts.length).toBe(0)
   expect(logs.some((l) => l.level === 'error' && l.message.includes('without sessionID'))).toBe(true)
@@ -222,7 +214,8 @@ test('capture: sessionID 缺失 -> 不 POST、error 日志、不抛', async () =
 test('capture: 非 idle 事件直接跳过', async () => {
   const posts = captureFetch()
   const { client, order } = makeFakeClient({ flat: () => ({ data: [] }) })
-  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.updated', properties: { sessionID: 'ses_x' } } })
   expect(posts.length).toBe(0)
   expect(order).toEqual([])
@@ -231,7 +224,8 @@ test('capture: 非 idle 事件直接跳过', async () => {
 test('inject: GET 失败 -> error 日志、不抛回 opencode', async () => {
   globalThis.fetch = (async () => { throw new Error('ECONNREFUSED 127.0.0.1:7777') }) as unknown as typeof fetch
   const { client, logs } = makeFakeClient({})
-  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks['experimental.chat.messages.transform']({}, {
     messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }],
   })
@@ -248,7 +242,8 @@ test('日志: app.log 失败降级 console.error，capture 主流程不受影响
   const captured: string[] = []
   console.error = (...args: unknown[]) => { captured.push(args.map(String).join(' ')) }
   try {
-    const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
     await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_logdown' } } })
   } finally {
     console.error = origConsoleError
