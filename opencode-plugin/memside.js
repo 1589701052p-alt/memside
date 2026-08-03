@@ -43,6 +43,7 @@ export async function fetchSessionMessages(client, sessionID) {
       firstError = firstError ?? new Error(`session.messages returned no data (shape ${shapeName(shapes[i])})`);
     } catch (e) {
       firstError = firstError ?? e;
+      await log(client, 'warn', `session.messages ${shapeName(shapes[i])} shape probe failed: ${String(e)}`, { sessionID, shape: shapeName(shapes[i]), error: String(e) });
     }
   }
   throw firstError ?? new Error('session.messages failed on all known shapes');
@@ -100,7 +101,9 @@ export default async function memsidePlugin({ client, directory }) {
         // 仅注入纯 text part：不 spread 原 first part（ref），否则非 text part 的 tool/callID 等
         // 外来字段会泄漏进注入的 text part（final-review Minor #7）。
         firstUser.parts.unshift({ type: 'text', text: block });
-      } catch (e) { /* best-effort */ }
+      } catch (e) {
+        await log(client, 'error', `inject transform failed: ${String(e)}`, { error: String(e) });
+      }
     },
   };
 }

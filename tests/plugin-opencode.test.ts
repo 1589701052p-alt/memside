@@ -227,3 +227,40 @@ test('capture: 非 idle 事件直接跳过', async () => {
   expect(posts.length).toBe(0)
   expect(order).toEqual([])
 })
+
+test('inject: GET 失败 -> error 日志、不抛回 opencode', async () => {
+  globalThis.fetch = (async () => { throw new Error('ECONNREFUSED 127.0.0.1:7777') }) as unknown as typeof fetch
+  const { client, logs } = makeFakeClient({})
+  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  await hooks['experimental.chat.messages.transform']({}, {
+    messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }],
+  })
+  expect(logs.some((l) => l.level === 'error' && l.message.includes('inject transform failed'))).toBe(true)
+})
+
+test('日志: app.log 失败降级 console.error，capture 主流程不受影响', async () => {
+  const posts = captureFetch()
+  const client = {
+    session: { messages: async () => ({ data: [{ info: { role: 'user' }, parts: [] }] }) },
+    app: { log: async () => { throw new Error('app.log endpoint down') } },
+  }
+  const origConsoleError = console.error
+  const captured: string[] = []
+  console.error = (...args: unknown[]) => { captured.push(args.map(String).join(' ')) }
+  try {
+    const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_logdown' } } })
+  } finally {
+    console.error = origConsoleError
+  }
+  expect(posts.length).toBe(1) // capture 本体不因日志通道故障而丢
+  expect(captured.some((m) => m.includes('[memside]') && m.includes('capture ok'))).toBe(true)
+})
+
+test('catch 必记日志（防回退空 catch——2026-08-03 事故结构性缺口）', () => {
+  const catches = js.match(/catch\s*\([^)]*\)\s*\{[\s\S]*?\}/g) ?? []
+  expect(catches.length).toBeGreaterThanOrEqual(3)
+  for (const c of catches) {
+    expect(c).toMatch(/log\(|console\.error/)
+  }
+})
