@@ -39,11 +39,21 @@ test('NO_PROXY 旁路 loopback（bun fetch 会代理 127.0.0.1 导致 502）', (
   expect(js).toMatch(/process\.env\.NO_PROXY.*\+/)
 })
 
-test('session.messages 用 path:{id} 签名（非旧 {sessionID}）', () => {
-  // opencode SDK 期望 { path: { id: sessionID } }；旧 { sessionID } 会把字面量对象
-  // 拼进 URL -> "%7Bid%7D" -> SDK 报 "Expected a string starting with ses"。
-  expect(js).toContain('client.session.messages({ path: { id: sessionID } })')
-  expect(js).not.toContain('client.session.messages({ sessionID })')
+test('session.messages 双签名兼容（flat 优先 + path 兜底 + 记忆）', () => {
+  // 2026-08-03 事故：opencode 自动升级 1.15.5 -> 1.18.10 把签名翻转回扁平形态，
+  // 单一签名静默清零 capture。成功判据是 res.data 真值（SDK 可能不 throw 而返回错误对象）。
+  expect(js).toContain('sessionID, limit: 1000')
+  expect(js).toContain('path: { id: sessionID }')
+  expect(js).toContain('res.data')
+  expect(js).toContain('rememberedShape')
+})
+
+test('capture 全终态有日志（成功 info / 回退 warn / 失败与 sessionID 缺失 error）', () => {
+  expect(js).toContain('capture ok session=')
+  expect(js).toContain('without sessionID')
+  expect(js).toContain('capture failed session=')
+  expect(js).toContain("'warn'")
+  expect(js).toContain("service: 'memside'")
 })
 
 test('messages 响应归一化兜底 Array.isArray(res.data)', () => {
@@ -126,4 +136,94 @@ test('probe: 两形态都失败 -> 抛首个错误', async () => {
     path: () => { throw new Error('path boom') },
   })
   await expect(fetchSessionMessages(client, 'ses_d')).rejects.toThrow('flat boom')
+})
+
+// --- hook 级功能测试（假 client + 拦截 globalThis.fetch；锁定 spec §1b 数据流）---
+
+const realFetch = globalThis.fetch
+
+afterEach(() => { globalThis.fetch = realFetch })
+
+function captureFetch(): { url: string; body: Record<string, unknown> | null }[] {
+  const posts: { url: string; body: Record<string, unknown> | null }[] = []
+  globalThis.fetch = (async (url: string, init?: { body?: string }) => {
+    posts.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null })
+    return new Response(JSON.stringify({ ok: true }), { status: 202 })
+  }) as unknown as typeof fetch
+  return posts
+}
+
+test('capture: 1.18+ 形态 end-to-end（idle -> POST + info 日志 + 记忆）', async () => {
+  const posts = captureFetch()
+  const { client, order, logs } = makeFakeClient({
+    flat: () => ({ data: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hi' }] }] }),
+  })
+  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t2' } } })
+  expect(posts.length).toBe(1)
+  expect(posts[0].url).toBe('http://127.0.0.1:7777/hooks/opencode/capture')
+  expect(posts[0].body?.sessionId).toBe('ses_t2')
+  expect(posts[0].body?.cwd).toBe('/tmp/proj')
+  expect((posts[0].body?.messages as unknown[]).length).toBe(1)
+  expect(order).toEqual(['flat'])
+  const info = logs.find((l) => l.level === 'info')
+  expect(info?.message).toContain('capture ok session=ses_t2')
+  expect(info?.message).toContain('shape=flat')
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t2' } } })
+  expect(order).toEqual(['flat', 'flat'])
+})
+
+test('capture: 1.15.x 形态 end-to-end（flat 抛错 -> path 兜底 + warn 回退日志）', async () => {
+  const posts = captureFetch()
+  const { client, order, logs } = makeFakeClient({
+    flat: () => { throw new Error('Expected a string starting with ses') },
+    path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
+  })
+  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t3' } } })
+  expect(posts.length).toBe(1)
+  expect(order).toEqual(['flat', 'path'])
+  expect(logs.some((l) => l.level === 'warn' && l.message.includes('fell back to path'))).toBe(true)
+})
+
+test('capture: flat 返回无 data 错误对象 -> 回退 path 仍成功（成功判据是 res.data，1.18+ 可能不 throw）', async () => {
+  const posts = captureFetch()
+  const { client, order } = makeFakeClient({
+    flat: () => ({ error: { message: 'Invalid request' } }),
+    path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
+  })
+  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t5' } } })
+  expect(posts.length).toBe(1)
+  expect(order).toEqual(['flat', 'path'])
+})
+
+test('capture: 两形态都失败 -> 不 POST、error 日志、不抛回 opencode', async () => {
+  const posts = captureFetch()
+  const { client, logs } = makeFakeClient({
+    flat: () => { throw new Error('flat boom') },
+    path: () => { throw new Error('path boom') },
+  })
+  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t4' } } })
+  expect(posts.length).toBe(0)
+  expect(logs.some((l) => l.level === 'error' && l.message.includes('capture failed session=ses_t4'))).toBe(true)
+})
+
+test('capture: sessionID 缺失 -> 不 POST、error 日志、不抛', async () => {
+  const posts = captureFetch()
+  const { client, logs } = makeFakeClient({})
+  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  await hooks.event({ event: { type: 'session.idle', properties: {} } })
+  expect(posts.length).toBe(0)
+  expect(logs.some((l) => l.level === 'error' && l.message.includes('without sessionID'))).toBe(true)
+})
+
+test('capture: 非 idle 事件直接跳过', async () => {
+  const posts = captureFetch()
+  const { client, order } = makeFakeClient({ flat: () => ({ data: [] }) })
+  const hooks = await memsidePlugin({ client, directory: '/tmp/proj' })
+  await hooks.event({ event: { type: 'session.updated', properties: { sessionID: 'ses_x' } } })
+  expect(posts.length).toBe(0)
+  expect(order).toEqual([])
 })

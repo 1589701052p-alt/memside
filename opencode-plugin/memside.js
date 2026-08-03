@@ -48,21 +48,45 @@ export async function fetchSessionMessages(client, sessionID) {
   throw firstError ?? new Error('session.messages failed on all known shapes');
 }
 
+// 日志通道：opencode 官方文档 Logging 章节推荐 client.app.log（写入 opencode 日志文件；
+// TUI 模式下 stderr 不可见，纯 console.error 用户看不到）。app.log 自身失败降级
+// console.error。永不 throw——plugin 契约是 best-effort（不抛回 opencode）。
+async function log(client, level, message, extra) {
+  try {
+    await client.app.log({ body: { service: 'memside', level, message, extra } });
+  } catch (e1) {
+    try {
+      console.error(`[memside] (${level}) ${message}`, extra ?? '');
+    } catch (e2) {
+      console.error('[memside] log fallback also failed');
+    }
+  }
+}
+
 export default async function memsidePlugin({ client, directory }) {
   const cwd = directory;
   return {
     event: async ({ event }) => {
       if (event.type !== 'session.idle') return;
+      const sessionID = event.properties?.sessionID ?? event.properties?.info?.id;
+      if (!sessionID) {
+        await log(client, 'error', 'session.idle without sessionID; capture skipped', { properties: event.properties ?? null });
+        return;
+      }
       try {
-        const sessionID = event.properties?.sessionID ?? event.properties?.info?.id;
-        if (!sessionID) return;
-        const res = await client.session.messages({ path: { id: sessionID } });
+        const { res, shape, fellBack, firstError } = await fetchSessionMessages(client, sessionID);
+        if (fellBack) {
+          await log(client, 'warn', `session.messages flat shape failed, fell back to ${shape}`, { sessionID, firstError: String(firstError) });
+        }
         const messages = Array.isArray(res.data) ? res.data : (res.data?.messages ?? []);
         await fetch(`${BASE()}/hooks/opencode/capture`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: sessionID, cwd, messages }),
           signal: AbortSignal.timeout(2000),
         });
-      } catch (e) { /* best-effort: do not throw back to opencode */ }
+        await log(client, 'info', `capture ok session=${sessionID} messages=${messages.length} shape=${shape}`, { sessionID, messages: messages.length, shape });
+      } catch (e) {
+        await log(client, 'error', `capture failed session=${sessionID}: ${String(e)}`, { sessionID, error: String(e) });
+      }
     },
     'experimental.chat.messages.transform': async (_input, output) => {
       try {
