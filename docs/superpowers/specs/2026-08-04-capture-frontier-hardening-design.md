@@ -113,8 +113,13 @@
   | 超 15min 无 capture 且 `lastActivityAt` 在 30min 内且晚于 lastCaptureAt | `silent` | 红灯「capture 中断：opencode 活跃但 N 分钟无捕获」 |
   | 其余（含从未连接） | `idle` | 灰灯「opencode 未连接/不活跃」 |
 
+  null 语义显式化：`lastCaptureAt === null` 视为无限旧（第一行不命中、第二行
+  「晚于」恒成立）——即「opencode 一直活跃但从未 capture 成功」正是本次事故
+  形态，判 `silent` 不判 `idle`。`lastActivityAt === null` 时第二行必不命中。
+
   常量 `CAPTURE_SILENCE_MS = 15*60*1000`、`ACTIVITY_WINDOW_MS = 30*60*1000`
-  单处定义。
+  单处定义，但可被 daemon 启动时的 env 覆盖（`MEMSIDE_HEALTH_SILENCE_MS` /
+  `MEMSIDE_HEALTH_ACTIVITY_MS`）——仅为真机冒烟加速，默认值即生产值。
 - `/api/status` 增加 `opencodeHealth: { state, lastCaptureAt, lastActivityAt }`。
 
 ### 5.3 刻意不做
@@ -216,8 +221,13 @@ opencode 进程                     daemon (7777)                  Web UI
 1. **P1**：合并 + `bun run src/cli.ts install` 重装插件 → 用户重启 opencode，
    自然走一轮交互 → opencode.log 出现 `capture ok session=...` **且** memside
    DB 新增对应 `runtime='opencode'` 的 memory_distill_jobs 行。
-2. **P2**：手动杀掉 daemon → 用户走一轮交互 → Web UI 出现红横幅/错误信箱原话
-   （capture failed）；重启 daemon → 一轮交互后转绿。
+2. **P2**（注：daemon 宕机时错误信箱与静默状态本身都无法上报/计算——该场景由
+   既有「/api/status fetch 失败错误横幅」覆盖，非本 PR 新能力）：
+   - 错误信箱：daemon 在跑，curl 直接投递一条合成 plugin error → UI 顶部
+     显示该原话 + 时间（路由级冒烟；真实故障走同一入口）。
+   - 静默告警：daemon 带 `MEMSIDE_HEALTH_SILENCE_MS=20000` 等短阈值启动 →
+     curl 一次 inject GET（制造 activity）→ 等过短阈值 → UI 红灯 silent；
+     再 curl 一次 capture POST → 转绿 ok。
 3. **P3**：UI 启用 → 任务计划程序可见 `memside-daemon`；`taskkill` daemon →
    1 分钟内自动拉起；禁用 → 任务删除。
 
