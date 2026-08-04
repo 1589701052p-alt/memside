@@ -582,4 +582,81 @@ opencode 1.15.5 真实环境手动验证（非本机，需 opencode 可执行环
 3 条 deferred minor 见 sdd ledger；终审 pending）。`bun run typecheck && bun test`
 555/555 全绿。
 
+## opencode plugin 新旧 SDK 签名兼容 + capture 可观测性（2026-08-03）
+
+诊断「opencode 会话结束了但蒸馏记录里没有」（本会话亲测）。根因链：opencode
+在会话运行期间**自动升级 1.15.5 -> 1.18.10**（日志 `installation method=npm
+target=1.18.10 upgraded` 实证），SDK `client.session.messages` 签名从
+`{ path: { id: sessionID } }` **翻转回扁平 `{ sessionID }`**（1.18.10 二进制
+内部调用形态取证），plugin 旧签名调用失败被 `catch (e) { /* best-effort */ }`
+**静默吞掉**——capture 从不发出，且零可观测性。排查证据链（DB 对照 / 版本对照 /
+binary 取证 / 假设排除）完整记录于 spec。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-08-03-opencode-sdk-compat*`。
+
+1. `fetchSessionMessages`（opencode-plugin/memside.js）双签名探测 + 成功记忆：
+   flat `{ sessionID, limit: 1000 }` 优先、`{ path: { id: sessionID } }` 兜底；
+   成功判据 = `res.data` 真值（生成的 SDK 可能返回错误响应对象而非 throw，
+   二进制内 `session.get` 显式 `{throwOnError:true}` 是反证）。探测 catch
+   记 warn（Task 3 plan 矛盾经用户裁决选「probe 加 warn」方案，守卫不变量普适）。
+2. 可观测性：`log(client, level, message, extra)` 走 `client.app.log`（opencode
+   日志文件；TUI 下 stderr 不可见），自身失败降级 console.error。四类打点：
+   成功 capture info（sessionID + 条数 + 命中形态）/ 签名回退 warn /
+   失败与 sessionID 缺失 error / inject 失败 error。
+3. 测试双层：假 client 驱动真实 hooks 的功能测试（`freshPlugin()` Bun
+   `?fresh=N` 缓存击穿隔离模块级 compat 状态，锁定形态调用**顺序** + 回退 +
+   记忆 + 终态）+ 源码层文本断言（双签名 / `res.data` 判据 / catch 必记日志 /
+   default-only 导出守卫）。
+
+**Task 5 live 冒烟暴露的第二次破坏性变更（修复）**：冒烟期间 opencode 再次
+自动升级 **1.18.10 -> 1.18.11**（这也是一开始执行 subagent 挂数小时的元凶：
+npm 升级耗时 + TUI 进程占用 opencode.exe 的 EPERM 纠缠）。1.18.11 plugin
+加载器改为**遍历模块所有 export**：非函数且非 `{server: fn}` 的 export 直接
+`throw TypeError("Plugin export is not a function")` 拒绝加载整个 plugin，
+函数形 export 还会被当 plugin 调用——本分支 Task 1 加的 `export const compat`
+（对象）正中枪口（live 日志 `failed to load plugin` 实证）。修复：**回归
+default-only 导出**（compat/fetchSessionMessages 转模块内私有，删
+resetCompatState），探测层测试全部改走钩子层驱动；新增文本守卫锁定源码恰一个
+export 行。opencode plugin 从此不得加 named export（守卫红即意图）。
+
+执行：subagent-driven（4 计划 task + 1 现场 fix task，各 implementer + reviewer；
+Task 3 plan 内部矛盾与 Task 5 加载器事故均经用户拍板；全部 review Approved，
+deferred minor 见 sdd ledger）。`bun run typecheck && bun test` 全绿（568 通过）。
+终审 whole-branch review verdict=Ready to merge=Yes（0 Critical / 0 Important，
+8 条 deferred minor 全判可 defer，其中 plan-mandated 5 条）。PR #35。
+
+### 终审 deferred minor（建议打包一个 follow-up issue）
+
+1. `log()` 最内层 `console.error('[memside] log fallback also failed')` 未设防：
+   console.error 自身抛错时 rejection 可沿 probe catch -> 事件钩子 catch 链抵达
+   opencode，违 best-effort 契约（需运行时根本性损坏才可达）；修法
+   `try { console.error(...) } catch {}`（bare catch 无括号，不被 catch 守卫正则
+   误伤，两不变量共存）。含同根的「probe await log 理论 reject 路径」。
+2. 文本断言可收紧：export 守卫只匹配 `'export '` 前缀（漏 `export{x}` / 缩进 /
+   多行形态），`/^\s*export\b/` 更严；catch 守卫的非贪婪切片止于首个 `}`
+   （当前 5 处切片均实证含日志 token，危险方向窄）。
+3. spec 文案两处漂移（仅文档）：双形态失败处 spec 写「抛最后一个错误」，实现随
+   plan 是**首个**错误；spec §1e named-export 测试接缝已被 1.18.11 事故推翻
+   （STATE.md 已载加载器偏差，未载 firstError 语义）。
+4. `tests/plugin-opencode.test.ts:4` 顶层设 `MEMSIDE_PORT` 在 bun 单进程跨文件
+   残留（今日实证无害：7777 处处默认）；`freshPlugin()` 每次重载模块顶层致
+   NO_PROXY 追加重复累积（功能惰性）。
+5. ambient d.ts 通配声明在改动态 import 后不再匹配任何 import（`?fresh=N` 模板
+   说明符解析为 any），仅余形状文档作用，头部注释过期。
+
+### live 冒烟结果（2026-08-03，本机 opencode 1.18.11，受控超时重跑）
+
+- `opencode run`（scratch 目录，`autoupdate` 经 `OPENCODE_CONFIG_CONTENT`
+  内联关闭）-> capture 闭环恢复：memside DB 出新 `runtime='opencode'` job
+  （status=done）+ event payload 为真实冒烟对话两轮。
+- plugin 加载干净（对照证据：修复前同路径报 `failed to load plugin`，修复后无）。
+- **验证缺口 1（1.15.5 回归）**：本机已升级无法真机降级，旧形态行为由假 client
+  功能测试覆盖（flat 抛错 -> path 兜底用例）。
+- **验证缺口 2（app.log 落盘）**：`opencode run` 快退模式下进程退出早于日志
+  落盘，capture-ok 行未见于日志文件（plugin 侧调用未报错——无 console.error
+  兜底输出可证）；常驻 TUI / serve 进程日志持续写盘（该文件增长过程实观察），
+  真实使用场景不受影响。
+- **附带发现（待用户处置）**：7/25 挂死的 `bun test tests/openai.test.ts`
+  进程（PID 25208）九天烧约 77.7 万 CPU 秒；opencode 自动升级在 TUI 占用
+  exe 时可能挂死非交互调用——冒烟类脚本应内联关 `autoupdate` + 进程级超时。
+
 
