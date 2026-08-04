@@ -660,3 +660,31 @@ deferred minor è§ sdd ledgerï¼‰ã€‚`bun run typecheck && bun test` å…¨ç»¿ï¼ˆ568 
   exe æ—¶å¯èƒ½æŒ‚æ­»éäº¤äº’è°ƒç”¨â€”â€”å†’çƒŸç±»è„šæœ¬åº”å†…è”å…³ `autoupdate` + è¿›ç¨‹çº§è¶…æ—¶ã€‚
 
 
+
+## opencode TUI capture ¼Ù³É¹¦ĞŞ¸´£¨res.ok ¼ì²é + »·¾³¼¶ NO_PROXY£¬2026-08-04£©
+
+PR #35 ºÏ²¢ºóÓÃ»§ÖØÆô TUI »Ø¹é£ºplugin ÈÕÖ¾ `capture ok messages=124 shape=path`
+µ« daemon ÁãĞÂ job¡£Ö¤¾İÁ´¶¨Î»Èı²ãµş¼Ó¸ùÒò£º
+
+1. **bun ÔÚ½ø³ÌÊ×¸ö fetch Ê±¹Ì»¯´úÀí½âÎö**£¨¶ÔÕÕÊµÑéÊµÖ¤£ºNO_PROXY Æô¶¯Ç°¾ÍÎ»
+   -> 202 Ö±´ïÈë¿â£»Ê×¸ö fetch ºó²ÅÉè -> 502 ×ß´úÀí¶ªÊ§£©¡£TUI ÄÚ opencode ×ÔÉí
+   ÏÈĞĞÍøÂç»î¶¯ÔçÓÚ plugin Ä£¿é¼ÓÔØ£¬plugin ÄÚµÄ NO_PROXY ¸ÄĞ´ÓÀÔ¶Ì«Íí¡£
+   7/31 µÄ 4 ´Î³É¹¦ capture È«ÊÇ `opencode run` ½ø³Ì£¨Ê±ĞòÔËÆø£©£¬**TUI capture
+   ´ÓµÚÒ»ÌìÆğ´ÓÎ´³É¹¦**¡£opencode ¹Ù·½ Network ÎÄµµÃ÷Ëµ NO_PROXY ±ØĞëÔÚ½ø³Ì
+   Æô¶¯Ç°µÄ»·¾³±äÁ¿Àï£¨required£©¡£
+2. **ÏµÍ³´úÀí¶Ô loopback POST ·µ»Ø 502**£¨GET ¾¹ÄÜÍ¨£¬curl Êµ²â¶ÔÕÕ£©¡£
+3. **plugin ²»²é `res.ok`**£ºbun fetch ¶Ô 502 ÕÕ³£ resolve£¬¾É´úÂë°Ñ¡¸daemon ¸ù±¾
+   Ã»ÊÕµ½¡¹¼Ç³É capture ok¡ª¡ª¹Û²âĞÔÈ±¿ÚÕıÖĞ×îÍ´´¦¡£
+
+ĞŞ¸´£¨·ÖÖ§ fix/opencode-capture-res-ok£¬Ğ¡ bug fix ¹ìµÀ£©£º
+
+1. capture / inject Á½´¦ fetch ¼Ó `res.ok` ¼ì²é£¬·Ç 2xx Å×Èë¼ÈÓĞ catch ¼Ç error
+   ÈÕÖ¾£¨´ø HTTP ×´Ì¬Âë£©£»NO_PROXY ¶¥²ã×¢ÊÍÔö²¹ÊÂ¹Ê½ÌÑµ£¨in-process ¸ÄĞ´Ö»ÊÇ
+   belt-and-suspenders£¬Õı½âÊÇ»·¾³¼¶£©¡£
+2. ÔËÎ¬¶¯×÷£ºWindows ÓÃ»§¼¶»·¾³±äÁ¿ `NO_PROXY=127.0.0.1,localhost`£¨Ô­ÏÈÎª¿Õ£©¡ª¡ª
+   opencode ¹Ù·½ÍÆ¼ö×ËÊÆ£¬½ø³ÌÆô¶¯¼´ÉúĞ§¡£
+3. ²âÊÔ£º502 ¼Ù³É¹¦¹¦ÄÜ²âÊÔ£¨capture + inject£©+ ÎÄ±¾ÊØÎÀËø¶¨Á½´¦ res.ok ¼ì²é
+   £¨¾ÉÔ´Âë RED ÊµÖ¤£©¡£Âã socket ÃâÒß´úÀí·½°¸£¨Bun.connect£©¾­ÓÃ»§ÅÄ°å YAGNI ²»×ö¡£
+
+`bun run typecheck && bun test` 571/571 È«ÂÌ¡£ÑéÖ¤£ºÉúĞ§ĞèÓÃ»§ÔÙÖØÆôÒ»´Î opencode
+£¨³ÔĞÂ plugin + ĞÂ»·¾³±äÁ¿£©£¬ÏÂÒ»ÂÖ idle Ó¦¼û capture ok ÇÒ daemon ³öĞÂ opencode job¡£
