@@ -1,19 +1,29 @@
+import { request as httpRequestImpl } from 'node:http'
+
 const PORT = () => process.env.MEMSIDE_PORT || __MEMSIDE_PORT__;
 const BASE = () => `http://127.0.0.1:${PORT()}`;
 const INJECT_MARK = '--- BEGIN INJECTED MEMORY ---';
 
-// Bun fetch honors HTTP_PROXY/HTTPS_PROXY env (verified against opencode 1.15.5 +
-// Bun 1.3.14 on a machine with a system proxy on :7897): without this, the loopback
-// fetch to the daemon is routed through the system proxy which returns 502, silently
-// breaking capture AND inject. opencode inherits the user's proxy env, so we force
-// loopback to bypass it. Append (not overwrite) so a user-set NO_PROXY is preserved.
-// 2026-08-04 事故增补：bun 在进程首个 fetch 时固化代理解析，plugin 模块加载期的
-// 改写可能晚于 opencode 自身的先行网络活动（TUI 必中）——本守卫只是 belt-and-
-// suspenders，正解是 opencode 官方 Network 文档要求的进程启动前环境级
-// NO_PROXY=localhost,127.0.0.1。另：被代理劫持时 fetch 照样 resolve（502 不 throw），
-// 所有 fetch 响应必须查 res.ok，否则假成功（capture/inject 均已加检查）。
-const _noProxy = process.env.NO_PROXY ? process.env.NO_PROXY + ',127.0.0.1,localhost' : '127.0.0.1,localhost';
-process.env.NO_PROXY = _noProxy;
+// loopback 传输层：node:http 从不读取任何代理 env（HTTP_PROXY/HTTPS_PROXY/
+// NO_PROXY 全不看），直连 127.0.0.1 是确定性行为。2026-08-04 事故链：bun fetch
+// 在 opencode 运行时里代理解析于首个 fetch 固化、NO_PROXY 实证无效，loopback
+// POST 被系统代理劫持返 502，TUI capture 静默全灭。详见
+// docs/superpowers/specs/2026-08-04-capture-frontier-hardening-design.md §1.3/§4。
+// 契约：连接错误 reject；HTTP 非 2xx 照常 resolve（调用方查 status 抛错）。
+function httpRequest(url, opts = {}) {
+  const { method = 'GET', body, headers, timeoutMs = 2000 } = opts;
+  return new Promise((resolve, reject) => {
+    const req = httpRequestImpl(url, { method, headers, timeout: timeoutMs }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error(`request timed out after ${timeoutMs}ms`)));
+    if (body) req.write(body);
+    req.end();
+  });
+}
 
 // --- SDK 签名兼容（2026-08-03 事故；spec 2026-08-03-opencode-sdk-compat-design.md）---
 // client.session.messages 签名在 opencode 版本间翻转：
@@ -86,14 +96,14 @@ export default async function memsidePlugin({ client, directory }) {
           await log(client, 'warn', `session.messages flat shape failed, fell back to ${shape}`, { sessionID, firstError: String(firstError) });
         }
         const messages = Array.isArray(res.data) ? res.data : (res.data?.messages ?? []);
-        const capRes = await fetch(`${BASE()}/hooks/opencode/capture`, {
-          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: sessionID, cwd, messages }),
-          signal: AbortSignal.timeout(2000),
+        const cap = await httpRequest(`${BASE()}/hooks/opencode/capture`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId: sessionID, cwd, messages }),
         });
-        // 被代理劫持时 fetch 对 502 照常 resolve 不 throw；不查 res.ok 会把「daemon
-        // 根本没收到」记成 capture ok（2026-08-04 TUI 事故）。非 2xx 抛出，走下方
-        // catch 记 error 日志。
-        if (!capRes.ok) throw new Error(`capture endpoint returned HTTP ${capRes.status}`);
+        // 非 2xx = daemon 没收到（代理劫持/服务异常）：抛带状态码的错误走下方
+        // catch 记 error 日志，绝不记 capture ok（2026-08-04 TUI 事故教训）。
+        if (cap.status < 200 || cap.status >= 300) throw new Error(`capture endpoint returned HTTP ${cap.status}`);
         await log(client, 'info', `capture ok session=${sessionID} messages=${messages.length} shape=${shape}`, { sessionID, messages: messages.length, shape });
       } catch (e) {
         await log(client, 'error', `capture failed session=${sessionID}: ${String(e)}`, { sessionID, error: String(e) });
@@ -105,11 +115,9 @@ export default async function memsidePlugin({ client, directory }) {
         const firstUser = output.messages.find(m => m.info?.role === 'user');
         if (!firstUser?.parts?.length) return;
         if (firstUser.parts.some(p => p.type === 'text' && p.text?.includes(INJECT_MARK))) return; // idempotency guard
-        const res = await fetch(`${BASE()}/hooks/opencode/inject?cwd=${encodeURIComponent(cwd)}`, { method: 'GET', signal: AbortSignal.timeout(2000) });
-        // 同 capture：代理 502 不 throw，必须查 res.ok（否则 res.json() 解析代理错误页，
-        // 错误信息模糊；显式抛带状态码的错误进 catch 日志）。
-        if (!res.ok) throw new Error(`inject endpoint returned HTTP ${res.status}`);
-        const { block } = await res.json();
+        const res = await httpRequest(`${BASE()}/hooks/opencode/inject?cwd=${encodeURIComponent(cwd)}`);
+        if (res.status < 200 || res.status >= 300) throw new Error(`inject endpoint returned HTTP ${res.status}`);
+        const { block } = JSON.parse(res.body);
         if (!block) return;
         // 仅注入纯 text part：不 spread 原 first part（ref），否则非 text part 的 tool/callID 等
         // 外来字段会泄漏进注入的 text part（final-review Minor #7）。
