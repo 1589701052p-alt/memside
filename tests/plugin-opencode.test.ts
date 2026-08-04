@@ -29,21 +29,14 @@ test('best-effort catch 不抛回 opencode', () => {
 // live 验证，故用源码层文本断言兜底（CLAUDE.md「最低限度保留一条源代码层文本断言」）。
 // 任一修复被回退 -> 测试红 -> 立刻看出意图。
 
-test('NO_PROXY 旁路 loopback（bun fetch 会代理 127.0.0.1 导致 502）', () => {
-  // bun fetch 原生尊重 HTTP_PROXY 且不豁免 loopback；不追加 NO_PROXY 则 capture+inject
-  // 双双被系统代理拦截静默 502。必须追加（非覆盖）127.0.0.1,localhost。
-  expect(js).toContain('NO_PROXY')
-  expect(js).toMatch(/127\.0\.0\.1.*localhost|localhost.*127\.0\.0\.1/)
-  // 追加而非覆盖：保留用户既有 NO_PROXY
-  expect(js).toMatch(/process\.env\.NO_PROXY.*\+/)
-})
-
-test('fetch 响应必查 res.ok（代理劫持时 502 不 throw，防假成功——2026-08-04 TUI 事故）', () => {
-  // bun fetch 对 HTTP 错误码照常 resolve 不 throw：被代理拦截时 capture POST 收到
-  // 502，旧代码照样记 capture ok，daemon 从未收到请求且零日志可查（TUI capture
-  // 因此从第一天起静默全灭）。capture（capRes）+ inject（res）两处 fetch 都必查。
-  expect(js).toContain('!capRes.ok')
-  expect(js).toContain('!res.ok')
+test('loopback 传输走 node:http（确定性不走代理）+ 非 2xx 必抛（防假成功——2026-08-04 TUI 事故）', () => {
+  // 事故链：bun fetch 在 opencode 运行时被系统代理劫持 502 且照常 resolve；
+  // NO_PROXY env 在该运行时实证无效。node:http 从不读取任何代理 env，是唯一
+  // 确定性直连回环的传输层。非 2xx 抛带状态码的错误进 catch 记日志。
+  expect(js).toContain("from 'node:http'")
+  expect(js).not.toMatch(/process\.env\.NO_PROXY/)
+  expect(js).toContain('capture endpoint returned HTTP')
+  expect(js).toContain('inject endpoint returned HTTP')
   expect(js.match(/HTTP \$\{/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
 })
 
@@ -131,34 +124,53 @@ function makeFakeClient(beh: { flat?: ShapeImpl; path?: ShapeImpl } = {}) {
   return { client, order, logs }
 }
 
-// --- hook 级功能测试（假 client + 拦截 globalThis.fetch；锁定 spec §1b 数据流）---
+// --- hook 级功能测试（假 client + 真实本地 daemon serveDaemon；锁定 spec §1b 数据流）---
 
-const realFetch = globalThis.fetch
+type Received = { method: string; path: string; body: unknown | null }
 
-afterEach(() => { globalThis.fetch = realFetch })
-
-function captureFetch(): { url: string; body: Record<string, unknown> | null }[] {
-  const posts: { url: string; body: Record<string, unknown> | null }[] = []
-  globalThis.fetch = (async (url: string, init?: { body?: string }) => {
-    posts.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null })
-    return new Response(JSON.stringify({ ok: true }), { status: 202 })
-  }) as unknown as typeof fetch
-  return posts
+// 活体 harness：起真实本地 HTTP server（临时端口），plugin 的 node:http
+// 传输直连它。serveDaemon 同时把 process.env.MEMSIDE_PORT 指向该端口
+// （plugin 的 PORT() 每次调用时读 env，无需重新 import 模块）。
+function serveDaemon(impl: {
+  capture?: () => Response
+  inject?: () => Response
+} = {}): { received: Received[]; stop: () => void } {
+  const received: Received[] = []
+  const server = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: async (req) => {
+      const url = new URL(req.url)
+      let body: unknown | null = null
+      if (req.method === 'POST') { try { body = await req.json() } catch { body = null } }
+      received.push({ method: req.method, path: url.pathname, body })
+      if (url.pathname === '/hooks/opencode/capture') return impl.capture?.() ?? new Response(JSON.stringify({ ok: true }), { status: 202 })
+      if (url.pathname === '/hooks/opencode/inject') return impl.inject?.() ?? new Response(JSON.stringify({ block: null }), { status: 200 })
+      if (url.pathname === '/hooks/opencode/error-report') return new Response(JSON.stringify({ ok: true }), { status: 202 })
+      return new Response('not found', { status: 404 })
+    },
+  })
+  process.env.MEMSIDE_PORT = String(server.port)
+  return { received, stop: () => { server.stop(true); process.env.MEMSIDE_PORT = '7777' } }
 }
 
+let active: { stop: () => void } | null = null
+afterEach(() => { active?.stop(); active = null })
+
 test('capture: flat 成功（1.18+ 形态）-> POST + info 日志 + 记忆 flat', async () => {
-  const posts = captureFetch()
+  active = serveDaemon()
   const { client, order, logs } = makeFakeClient({
     flat: () => ({ data: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hi' }] }] }),
   })
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t2' } } })
+  const posts = (active as unknown as { received: Received[] }).received
   expect(posts.length).toBe(1)
-  expect(posts[0].url).toBe('http://127.0.0.1:7777/hooks/opencode/capture')
-  expect(posts[0].body?.sessionId).toBe('ses_t2')
-  expect(posts[0].body?.cwd).toBe('/tmp/proj')
-  expect((posts[0].body?.messages as unknown[]).length).toBe(1)
+  expect(posts[0].path).toBe('/hooks/opencode/capture')
+  expect((posts[0].body as Record<string, unknown>).sessionId).toBe('ses_t2')
+  expect((posts[0].body as Record<string, unknown>).cwd).toBe('/tmp/proj')
+  expect(((posts[0].body as Record<string, unknown>).messages as unknown[]).length).toBe(1)
   expect(order).toEqual(['flat'])
   const info = logs.find((l) => l.level === 'info')
   expect(info?.message).toContain('capture ok session=ses_t2')
@@ -168,7 +180,7 @@ test('capture: flat 成功（1.18+ 形态）-> POST + info 日志 + 记忆 flat'
 })
 
 test('capture: flat 抛错 -> 回退 path（1.15.x 形态）+ warn 日志 + 记忆 path', async () => {
-  const posts = captureFetch()
+  active = serveDaemon()
   const { client, order, logs } = makeFakeClient({
     flat: () => { throw new Error('Expected a string starting with ses') },
     path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
@@ -176,15 +188,15 @@ test('capture: flat 抛错 -> 回退 path（1.15.x 形态）+ warn 日志 + 记�
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t3' } } })
-  expect(posts.length).toBe(1)
+  expect((active as unknown as { received: Received[] }).received.length).toBe(1)
   expect(order).toEqual(['flat', 'path'])
   expect(logs.some((l) => l.level === 'warn' && l.message.includes('fell back to path'))).toBe(true)
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t3' } } })
-  expect(order).toEqual(['flat', 'path', 'path']) // 记忆后直走 path（此前仅 probe 级覆盖的断言）
+  expect(order).toEqual(['flat', 'path', 'path'])
 })
 
 test('capture: flat 返回无 data 错误对象 -> 回退 path 仍成功（成功判据是 res.data，1.18+ 可能不 throw）', async () => {
-  const posts = captureFetch()
+  active = serveDaemon()
   const { client, order } = makeFakeClient({
     flat: () => ({ error: { message: 'Invalid request' } }),
     path: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
@@ -192,46 +204,48 @@ test('capture: flat 返回无 data 错误对象 -> 回退 path 仍成功（成�
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t5' } } })
-  expect(posts.length).toBe(1)
+  expect((active as unknown as { received: Received[] }).received.length).toBe(1)
   expect(order).toEqual(['flat', 'path'])
 })
 
 test('capture: 两形态都失败 -> 不 POST、error 日志、不抛回 opencode', async () => {
-  const posts = captureFetch()
+  active = serveDaemon()
   const { client, logs } = makeFakeClient({
     flat: () => { throw new Error('flat boom') },
     path: () => { throw new Error('path boom') },
   })
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
-  // hook 必须不 reject（await 解决）——best-effort 契约
   await expect(hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_t4' } } })).resolves.toBeUndefined()
-  expect(posts.length).toBe(0)
+  expect((active as unknown as { received: Received[] }).received.length).toBe(0)
   expect(logs.some((l) => l.level === 'error' && l.message.includes('capture failed session=ses_t4'))).toBe(true)
 })
 
 test('capture: sessionID 缺失 -> 不 POST、error 日志、不抛', async () => {
-  const posts = captureFetch()
+  active = serveDaemon()
   const { client, logs } = makeFakeClient({})
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.idle', properties: {} } })
-  expect(posts.length).toBe(0)
+  expect((active as unknown as { received: Received[] }).received.length).toBe(0)
   expect(logs.some((l) => l.level === 'error' && l.message.includes('without sessionID'))).toBe(true)
 })
 
 test('capture: 非 idle 事件直接跳过', async () => {
-  const posts = captureFetch()
+  active = serveDaemon()
   const { client, order } = makeFakeClient({ flat: () => ({ data: [] }) })
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
   await hooks.event({ event: { type: 'session.updated', properties: { sessionID: 'ses_x' } } })
-  expect(posts.length).toBe(0)
+  expect((active as unknown as { received: Received[] }).received.length).toBe(0)
   expect(order).toEqual([])
 })
 
-test('inject: GET 失败 -> error 日志、不抛回 opencode', async () => {
-  globalThis.fetch = (async () => { throw new Error('ECONNREFUSED 127.0.0.1:7777') }) as unknown as typeof fetch
+test('inject: daemon 不可达 -> error 日志、不抛回 opencode', async () => {
+  // 指向一个已关闭的端口：node:http 连接拒绝 -> reject -> catch 记 error
+  active = serveDaemon()
+  active.stop(); active = null
+  process.env.MEMSIDE_PORT = '59999'
   const { client, logs } = makeFakeClient({})
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
@@ -242,9 +256,7 @@ test('inject: GET 失败 -> error 日志、不抛回 opencode', async () => {
 })
 
 test('capture: 端点非 2xx（代理 502 假 resolve）-> error 日志含状态码，绝不记 capture ok', async () => {
-  // 2026-08-04 TUI 事故复现：POST 经系统代理被 502，fetch 照常 resolve——
-  // 若 plugin 不查 res.ok 会记 capture ok 假成功。修复后必须 error 且带状态码。
-  globalThis.fetch = (async () => new Response('Bad Gateway', { status: 502 })) as unknown as typeof fetch
+  active = serveDaemon({ capture: () => new Response('Bad Gateway', { status: 502 }) })
   const { client, logs } = makeFakeClient({ flat: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }) })
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
@@ -254,7 +266,7 @@ test('capture: 端点非 2xx（代理 502 假 resolve）-> error 日志含状态
 })
 
 test('inject: 端点非 2xx（代理 502 假 resolve）-> error 日志含状态码', async () => {
-  globalThis.fetch = (async () => new Response('Bad Gateway', { status: 502 })) as unknown as typeof fetch
+  active = serveDaemon({ inject: () => new Response('Bad Gateway', { status: 502 }) })
   const { client, logs } = makeFakeClient({})
   const { plugin } = await freshPlugin()
   const hooks = await plugin({ client, directory: '/tmp/proj' })
@@ -264,8 +276,22 @@ test('inject: 端点非 2xx（代理 502 假 resolve）-> error 日志含状态�
   expect(logs.some((l) => l.level === 'error' && l.message.includes('inject transform failed') && l.message.includes('502'))).toBe(true)
 })
 
+test('inject: 成功注入 block part（幂等守卫不重复）', async () => {
+  const block = '--- BEGIN INJECTED MEMORY ---\n- test\n--- END INJECTED MEMORY ---'
+  active = serveDaemon({ inject: () => new Response(JSON.stringify({ block }), { status: 200 }) })
+  const { client } = makeFakeClient({})
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
+  const output = { messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }] }
+  await hooks['experimental.chat.messages.transform']({}, output)
+  expect(output.messages[0].parts.length).toBe(2)
+  expect((output.messages[0].parts[0] as { text?: string }).text).toBe(block)
+  await hooks['experimental.chat.messages.transform']({}, output)
+  expect(output.messages[0].parts.length).toBe(2) // 幂等：不重复注入
+})
+
 test('日志: app.log 失败降级 console.error，capture 主流程不受影响', async () => {
-  const posts = captureFetch()
+  active = serveDaemon()
   const client = {
     session: { messages: async () => ({ data: [{ info: { role: 'user' }, parts: [] }] }) },
     app: { log: async () => { throw new Error('app.log endpoint down') } },
@@ -280,7 +306,7 @@ test('日志: app.log 失败降级 console.error，capture 主流程不受影响
   } finally {
     console.error = origConsoleError
   }
-  expect(posts.length).toBe(1) // capture 本体不因日志通道故障而丢
+  expect((active as unknown as { received: Received[] }).received.length).toBe(1)
   expect(captured.some((m) => m.includes('[memside]') && m.includes('capture ok'))).toBe(true)
 })
 
