@@ -38,6 +38,15 @@ test('NO_PROXY 旁路 loopback（bun fetch 会代理 127.0.0.1 导致 502）', (
   expect(js).toMatch(/process\.env\.NO_PROXY.*\+/)
 })
 
+test('fetch 响应必查 res.ok（代理劫持时 502 不 throw，防假成功——2026-08-04 TUI 事故）', () => {
+  // bun fetch 对 HTTP 错误码照常 resolve 不 throw：被代理拦截时 capture POST 收到
+  // 502，旧代码照样记 capture ok，daemon 从未收到请求且零日志可查（TUI capture
+  // 因此从第一天起静默全灭）。capture（capRes）+ inject（res）两处 fetch 都必查。
+  expect(js).toContain('!capRes.ok')
+  expect(js).toContain('!res.ok')
+  expect(js.match(/HTTP \$\{/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+})
+
 test('session.messages 双签名兼容（flat 优先 + path 兜底 + 记忆）', () => {
   // 2026-08-03 事故：opencode 自动升级 1.15.5 -> 1.18.10 把签名翻转回扁平形态，
   // 单一签名静默清零 capture。成功判据是 res.data 真值（SDK 可能不 throw 而返回错误对象）。
@@ -230,6 +239,29 @@ test('inject: GET 失败 -> error 日志、不抛回 opencode', async () => {
     messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }],
   })
   expect(logs.some((l) => l.level === 'error' && l.message.includes('inject transform failed'))).toBe(true)
+})
+
+test('capture: 端点非 2xx（代理 502 假 resolve）-> error 日志含状态码，绝不记 capture ok', async () => {
+  // 2026-08-04 TUI 事故复现：POST 经系统代理被 502，fetch 照常 resolve——
+  // 若 plugin 不查 res.ok 会记 capture ok 假成功。修复后必须 error 且带状态码。
+  globalThis.fetch = (async () => new Response('Bad Gateway', { status: 502 })) as unknown as typeof fetch
+  const { client, logs } = makeFakeClient({ flat: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }) })
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
+  await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_proxy502' } } })
+  expect(logs.some((l) => l.level === 'error' && l.message.includes('capture failed session=ses_proxy502') && l.message.includes('502'))).toBe(true)
+  expect(logs.some((l) => l.level === 'info' && l.message.includes('capture ok'))).toBe(false)
+})
+
+test('inject: 端点非 2xx（代理 502 假 resolve）-> error 日志含状态码', async () => {
+  globalThis.fetch = (async () => new Response('Bad Gateway', { status: 502 })) as unknown as typeof fetch
+  const { client, logs } = makeFakeClient({})
+  const { plugin } = await freshPlugin()
+  const hooks = await plugin({ client, directory: '/tmp/proj' })
+  await hooks['experimental.chat.messages.transform']({}, {
+    messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }],
+  })
+  expect(logs.some((l) => l.level === 'error' && l.message.includes('inject transform failed') && l.message.includes('502'))).toBe(true)
 })
 
 test('日志: app.log 失败降级 console.error，capture 主流程不受影响', async () => {

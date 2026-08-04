@@ -7,6 +7,11 @@ const INJECT_MARK = '--- BEGIN INJECTED MEMORY ---';
 // fetch to the daemon is routed through the system proxy which returns 502, silently
 // breaking capture AND inject. opencode inherits the user's proxy env, so we force
 // loopback to bypass it. Append (not overwrite) so a user-set NO_PROXY is preserved.
+// 2026-08-04 事故增补：bun 在进程首个 fetch 时固化代理解析，plugin 模块加载期的
+// 改写可能晚于 opencode 自身的先行网络活动（TUI 必中）——本守卫只是 belt-and-
+// suspenders，正解是 opencode 官方 Network 文档要求的进程启动前环境级
+// NO_PROXY=localhost,127.0.0.1。另：被代理劫持时 fetch 照样 resolve（502 不 throw），
+// 所有 fetch 响应必须查 res.ok，否则假成功（capture/inject 均已加检查）。
 const _noProxy = process.env.NO_PROXY ? process.env.NO_PROXY + ',127.0.0.1,localhost' : '127.0.0.1,localhost';
 process.env.NO_PROXY = _noProxy;
 
@@ -81,10 +86,14 @@ export default async function memsidePlugin({ client, directory }) {
           await log(client, 'warn', `session.messages flat shape failed, fell back to ${shape}`, { sessionID, firstError: String(firstError) });
         }
         const messages = Array.isArray(res.data) ? res.data : (res.data?.messages ?? []);
-        await fetch(`${BASE()}/hooks/opencode/capture`, {
+        const capRes = await fetch(`${BASE()}/hooks/opencode/capture`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: sessionID, cwd, messages }),
           signal: AbortSignal.timeout(2000),
         });
+        // 被代理劫持时 fetch 对 502 照常 resolve 不 throw；不查 res.ok 会把「daemon
+        // 根本没收到」记成 capture ok（2026-08-04 TUI 事故）。非 2xx 抛出，走下方
+        // catch 记 error 日志。
+        if (!capRes.ok) throw new Error(`capture endpoint returned HTTP ${capRes.status}`);
         await log(client, 'info', `capture ok session=${sessionID} messages=${messages.length} shape=${shape}`, { sessionID, messages: messages.length, shape });
       } catch (e) {
         await log(client, 'error', `capture failed session=${sessionID}: ${String(e)}`, { sessionID, error: String(e) });
@@ -97,6 +106,9 @@ export default async function memsidePlugin({ client, directory }) {
         if (!firstUser?.parts?.length) return;
         if (firstUser.parts.some(p => p.type === 'text' && p.text?.includes(INJECT_MARK))) return; // idempotency guard
         const res = await fetch(`${BASE()}/hooks/opencode/inject?cwd=${encodeURIComponent(cwd)}`, { method: 'GET', signal: AbortSignal.timeout(2000) });
+        // 同 capture：代理 502 不 throw，必须查 res.ok（否则 res.json() 解析代理错误页，
+        // 错误信息模糊；显式抛带状态码的错误进 catch 日志）。
+        if (!res.ok) throw new Error(`inject endpoint returned HTTP ${res.status}`);
         const { block } = await res.json();
         if (!block) return;
         // 仅注入纯 text part：不 spread 原 first part（ref），否则非 text part 的 tool/callID 等
