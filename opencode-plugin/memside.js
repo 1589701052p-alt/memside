@@ -4,11 +4,22 @@ const PORT = () => process.env.MEMSIDE_PORT || __MEMSIDE_PORT__;
 const BASE = () => `http://127.0.0.1:${PORT()}`;
 const INJECT_MARK = '--- BEGIN INJECTED MEMORY ---';
 
-// loopback 传输层：node:http 从不读取任何代理 env（HTTP_PROXY/HTTPS_PROXY/
-// NO_PROXY 全不看），直连 127.0.0.1 是确定性行为。2026-08-04 事故链：bun fetch
-// 在 opencode 运行时里代理解析于首个 fetch 固化、NO_PROXY 实证无效，loopback
-// POST 被系统代理劫持返 502，TUI capture 静默全灭。详见
-// docs/superpowers/specs/2026-08-04-capture-frontier-hardening-design.md §1.3/§4。
+// loopback 代理豁免（必须在首个 node:http 请求前执行）：Bun 的 node:http polyfill
+// 读 HTTP_PROXY/HTTPS_PROXY（与 Node 原生 node:http 不同！），loopback 请求会被
+// 系统代理劫持返 502，capture+inject 双灭。Bun node:http 同时尊重 NO_PROXY，故
+// 追加 127.0.0.1,localhost 豁免（追加非覆盖，保留用户出站代理）。PR #38 改 node:http
+// 时误以为「node:http 不读代理」删了此追加，致 502 回归（2026-08-04 live 复现）。
+{
+  const cur = (process.env.NO_PROXY ?? '').split(',').map(s => s.trim()).filter(Boolean);
+  for (const h of ['127.0.0.1', 'localhost']) if (!cur.includes(h)) cur.push(h);
+  process.env.NO_PROXY = cur.join(',');
+}
+
+// loopback 传输层：node:http 在 Bun 运行时下仍读 HTTP_PROXY（与 Node 原生不同），
+// 故上方 NO_PROXY 追加是 loopback 直连的必要前提（非可选）。2026-08-04 事故链：
+// bun fetch 在 opencode 运行时里代理解析于首个 fetch 固化；PR #38 改 node:http
+// 误删 NO_PROXY 追加 -> Bun 下 loopback 仍被系统代理劫持返 502 -> TUI capture
+// 静默全灭。详见 docs/superpowers/specs/2026-08-04-capture-frontier-hardening-design.md §1.3/§4。
 // 契约：连接错误 reject；HTTP 非 2xx 照常 resolve（调用方查 status 抛错）。
 function httpRequest(url, opts = {}) {
   const { method = 'GET', body, headers, timeoutMs = 2000 } = opts;

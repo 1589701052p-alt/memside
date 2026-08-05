@@ -29,15 +29,33 @@ test('best-effort catch 不抛回 opencode', () => {
 // live 验证，故用源码层文本断言兜底（CLAUDE.md「最低限度保留一条源代码层文本断言」）。
 // 任一修复被回退 -> 测试红 -> 立刻看出意图。
 
-test('loopback 传输走 node:http（确定性不走代理）+ 非 2xx 必抛（防假成功——2026-08-04 TUI 事故）', () => {
-  // 事故链：bun fetch 在 opencode 运行时被系统代理劫持 502 且照常 resolve；
-  // NO_PROXY env 在该运行时实证无效。node:http 从不读取任何代理 env，是唯一
-  // 确定性直连回环的传输层。非 2xx 抛带状态码的错误进 catch 记日志。
+test('loopback 传输走 node:http + NO_PROXY 追加豁免（Bun node:http 读 HTTP_PROXY——2026-08-04 回归）+ 非 2xx 必抛', () => {
+  // 事故链：PR #38 假设「node:http 不读代理」删了 NO_PROXY 追加；但 Bun 的
+  // node:http polyfill 读 HTTP_PROXY（与 Node 原生不同），loopback 被系统代理
+  // 劫持返 502，capture+inject 静默全灭。Bun node:http 尊重 NO_PROXY，故 plugin
+  // 顶层追加 127.0.0.1,localhost 豁免。非 2xx 抛带状态码的错误进 catch 记日志。
   expect(js).toContain("from 'node:http'")
-  expect(js).not.toMatch(/process\.env\.NO_PROXY/)
+  expect(js).toMatch(/process\.env\.NO_PROXY/)
+  expect(js).toContain("['127.0.0.1', 'localhost']")
   expect(js).toContain('capture endpoint returned HTTP')
   expect(js).toContain('inject endpoint returned HTTP')
   expect(js.match(/HTTP \$\{/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+})
+
+test('plugin 加载即追加 NO_PROXY 豁免 loopback（追加非覆盖，保留既有出站代理）', async () => {
+  // 2026-08-04 回归防护：PR #38 删 NO_PROXY 追加 -> Bun node:http 读 HTTP_PROXY ->
+  // loopback 502。锁定 plugin 模块加载（顶层执行）即把 127.0.0.1,localhost 追加进
+  // NO_PROXY，且不覆盖用户既有值。freshPlugin 用 ?fresh=N 重载模块触发顶层执行。
+  const orig = process.env.NO_PROXY
+  process.env.NO_PROXY = 'example.com'
+  try {
+    await freshPlugin()
+    expect(process.env.NO_PROXY).toContain('127.0.0.1')
+    expect(process.env.NO_PROXY).toContain('localhost')
+    expect(process.env.NO_PROXY).toContain('example.com')
+  } finally {
+    process.env.NO_PROXY = orig
+  }
 })
 
 test('session.messages 双签名兼容（flat 优先 + path 兜底 + 记忆）', () => {
