@@ -324,6 +324,31 @@ test('POST /api/memories/:id/promote approves', async () => {
   expect(r.body.memory.status).toBe('approved')
 })
 
+test('POST /api/memories/:id/promote empty body -> 400 (not 500)', async () => {
+  // 回归防护：曾裸 c.req.json() 在 try 外，空 body 抛 "Unexpected end of JSON
+  // input" 逃逸成 500。web-api 客户端把 5xx 当异常抛、4xx 当业务错误，promote
+  // 空 body 是客户端 bug 不应是 500。同时锁定候选未被误 approve。
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const r = await req(`/api/memories/${c.id}/promote`, { method: 'POST' })
+  expect(r.status).toBe(400)
+  const got = await req(`/api/memories/${c.id}`)
+  expect(got.body.memory.status).toBe('candidate')
+})
+
+test('POST /api/memories/:id/promote invalid action -> 400 (not silently approved)', async () => {
+  // 空/非法 action 曾走 else 分支被当 approve（body.action undefined !== 'reject'）。
+  // action 校验挡住：非法 action 不应静默 approve 候选记忆。
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const r = await req(`/api/memories/${c.id}/promote`, {
+    method: 'POST',
+    body: JSON.stringify({ action: 'bogus' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(400)
+  const got = await req(`/api/memories/${c.id}`)
+  expect(got.body.memory.status).toBe('candidate')
+})
+
 test('GET /api/memories/:id returns memory or 404', async () => {
   const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
   const ok = await req(`/api/memories/${c.id}`)
@@ -355,6 +380,21 @@ test('PATCH /api/memories/:id updates title and broadcasts', async () => {
   expect(r.body.memory.title).toBe('t2')
   expect(r.body.changedFields).toContain('title')
   expect(broadcastCalls.some((m) => (m as any).type === 'memory.updated')).toBe(true)
+})
+
+test('PATCH /api/memories/:id empty body -> 400 (not 500)', async () => {
+  // 回归防护：曾裸 c.req.json() 在 try 外，空 body 抛错逃逸 500。空对象 {} 是合法
+  // no-op（200 changedFields=[]），但完全无 body 应 400。
+  const c = await createCandidate(db, { scopeType: 'global', scopeId: null, title: 't', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
+  const miss = await req(`/api/memories/${c.id}`, { method: 'PATCH' })
+  expect(miss.status).toBe(400)
+  const noop = await req(`/api/memories/${c.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({}),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(noop.status).toBe(200)
+  expect(noop.body.changedFields).toEqual([])
 })
 
 test('GET /api/status reports events, job stats, memory counts, and lastError', async () => {
