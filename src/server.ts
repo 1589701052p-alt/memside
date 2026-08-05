@@ -365,7 +365,14 @@ export function createApp(deps: AppDeps) {
   })
 
   app.post('/api/memories/:id/promote', async (c) => {
-    const body = await c.req.json()
+    // 空/非法 body 优雅 400：曾裸 c.req.json() 在 try 外，空 body 抛
+    // "Unexpected end of JSON input" 逃逸成 500。action 校验同时挡住空对象 {}
+    // 被当 approve 的意外（body.action undefined !== 'reject' -> 走 else approve 分支）。
+    const body = await c.req.json().catch(() => null)
+    const validActions = ['approve', 'reject', 'approve_and_supersede']
+    if (!body || typeof body !== 'object' || !validActions.includes(body.action)) {
+      return c.json({ error: `body.action must be one of: ${validActions.join(', ')}` }, 400)
+    }
     try {
       const m = await promoteCandidate(deps.db, c.req.param('id'), body)
       deps.broadcast({ type: 'memory.promoted', memoryId: m.id, newStatus: m.status })
@@ -376,7 +383,12 @@ export function createApp(deps: AppDeps) {
   })
 
   app.patch('/api/memories/:id', async (c) => {
-    const body = await c.req.json()
+    // 空/非对象 body 优雅 400：曾裸 c.req.json() 在 try 外，空 body 抛错逃逸 500。
+    // 空对象 {} 是合法 no-op（patchMemory 所有 !== undefined 守卫均跳过，changed=[]）。
+    const body = await c.req.json().catch(() => null)
+    if (!body || typeof body !== 'object') {
+      return c.json({ error: 'request body required' }, 400)
+    }
     try {
       const r = await patchMemory(deps.db, c.req.param('id'), body)
       deps.broadcast({ type: 'memory.updated', memoryId: r.memory.id, changedFields: r.changedFields })
