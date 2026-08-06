@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from 'bun:test'
-import { makeLLMCall, loadOpenAiCreds } from '@/openai'
+import { makeLLMCall, loadOpenAiCreds, loadOpenAiUiCreds, testConnection } from '@/openai'
 import { DEFAULT_LLM_MAX_TOKENS } from '@/llm'
 
 // 这些测试锁 OpenAI 格式 LLMCall 实现（src/openai.ts，spec §5.2 / §9）：
@@ -144,4 +144,57 @@ test('makeLLMCall aborts after timeoutMs when fetch never resolves', async () =>
   expect(fetchCalls).toHaveLength(1)
   // signal 必须随请求下发
   expect(fetchCalls[0]!.init.signal).toBeInstanceOf(AbortSignal)
+})
+
+// ---- loadOpenAiUiCreds：UI 级凭证合并（spec §接口契约）----
+
+test('loadOpenAiUiCreds: UI token 存在用 UI creds（去尾斜杠）', () => {
+  const c = loadOpenAiUiCreds({ token: 'sk-ui', baseURL: 'https://ui.example.com/v1/', model: 'ui-model' }, {})
+  expect(c).toEqual({ apiKey: 'sk-ui', baseURL: 'https://ui.example.com/v1', model: 'ui-model' })
+})
+
+test('loadOpenAiUiCreds: UI model/baseURL 缺省回退 env', () => {
+  const c = loadOpenAiUiCreds({ token: 'sk-ui' }, { OPENAI_MODEL: 'env-model', OPENAI_BASE_URL: 'https://env.example.com/v1/' })
+  expect(c).toEqual({ apiKey: 'sk-ui', baseURL: 'https://env.example.com/v1', model: 'env-model' })
+})
+
+test('loadOpenAiUiCreds: UI model 与 env 都缺 -> 抛错', () => {
+  expect(() => loadOpenAiUiCreds({ token: 'sk-ui' }, {})).toThrow(/OpenAI model missing/)
+})
+
+test('loadOpenAiUiCreds: UI 为 null -> 回退 env', () => {
+  process.env.OPENAI_API_KEY = 'k'
+  process.env.OPENAI_MODEL = 'm'
+  expect(loadOpenAiUiCreds(null, {})).toEqual({ apiKey: 'k', baseURL: 'https://api.openai.com/v1', model: 'm' })
+})
+
+test('makeLLMCall 注入 loadUiConfig 时用 UI creds', async () => {
+  fetchImpl = async () => okResp({ choices: [{ message: { content: 'hi' } }] })
+  const call = makeLLMCall({
+    loadUiConfig: () => ({ token: 'sk-ui', baseURL: 'https://ui.example.com/v1', model: 'ui-model' }),
+  })
+  await call('s', 'u')
+  expect(fetchCalls[0]!.url).toBe('https://ui.example.com/v1/chat/completions')
+  const headers = new Headers(fetchCalls[0]!.init.headers as HeadersInit)
+  expect(headers.get('authorization')).toBe('Bearer sk-ui')
+})
+
+// ---- testConnection：OpenAI 最小请求（spec §测试连接）----
+
+test('testConnection posts {baseURL}/chat/completions 最小请求', async () => {
+  fetchImpl = async () => okResp({ choices: [{ message: { content: 'hi' } }] })
+  const r = await testConnection({ baseURL: 'https://ui.example.com/v1/', token: 'sk', model: 'm' })
+  expect(r.ok).toBe(true)
+  expect(fetchCalls[0]!.url).toBe('https://ui.example.com/v1/chat/completions')
+  const body = JSON.parse(fetchCalls[0]!.init.body as string)
+  expect(body.max_tokens).toBe(1)
+  expect(body.messages).toEqual([{ role: 'user', content: 'hi' }])
+  expect(body.model).toBe('m')
+})
+
+test('testConnection 非 2xx -> {ok:false, error 含状态码}', async () => {
+  fetchImpl = async () => new Response('{"error":"bad key"}', { status: 401 })
+  const r = await testConnection({ token: 'sk', model: 'm' })
+  expect(r.ok).toBe(false)
+  expect(r.error).toMatch(/OpenAI HTTP 401/)
 })
