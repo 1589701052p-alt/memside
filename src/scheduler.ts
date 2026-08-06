@@ -193,21 +193,26 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       // quality = agent 终审(judgeValueAgentic,第 10 类 duplicate + 仓库工具查验)。
       // 两路径都吞自身 LLM 错误(stated->decision / observed->null),never bubbles。
       const judgeCfg = deps.loadJudgeConfig?.() ?? DEFAULT_JUDGE_CONFIG
+      // spec 失败矩阵:项目目录已删除 -> 该批降级经济模式(蒸馏记录注明降级)。
+      // 绝不让 agent 在 rootDir=null 下跑(makeRepoTools('/') 会把沙箱放宽到盘根)。
+      const agentRootDir = job.cwd && existsSync(job.cwd) ? job.cwd : null
       let verdicts: ValueVerdict[]
       let agentTrace: AgentStep[] | null = null
+      let judgeFallback: string | null = null
       if (judgeCfg.mode === 'economy' || deduped.length === 0) {
         verdicts = await judgeValue(deduped, deps.callLLM)
+      } else if (agentRootDir === null) {
+        judgeFallback = 'economy:no-root-dir'
+        verdicts = await judgeValue(deduped, deps.callLLM)
       } else {
-        // 质量模式(spec §4.5):agent 终审。已审批标题清单查询失败 -> 空清单降级;
-        // job.cwd 目录不存在 -> rootDir=null(工具全部返错文本,agent 凭材料判)。
+        // 质量模式(spec §4.5):agent 终审。已审批标题清单查询失败 -> 空清单降级。
         let approvedTitles: string[] = []
         try {
           const set = await listApprovedByScope(db, { projectId: job.cwd ?? 'unknown' })
           approvedTitles = [...set.byScope.project, ...set.byScope.global].map((m) => m.title).slice(0, 100)
         } catch (e) { console.warn('memside: listApprovedByScope failed', e) }
-        const rootDir = job.cwd && existsSync(job.cwd) ? job.cwd : null
         const r = await judgeValueAgentic(deduped, {
-          callLLM: deps.callLLM, rootDir, approvedTitles,
+          callLLM: deps.callLLM, rootDir: agentRootDir, approvedTitles,
           sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
           maxRounds: judgeCfg.maxRounds, timeBudgetMs: judgeCfg.timeBudgetS * 1000,
         })
@@ -265,10 +270,14 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           // success (callThrew=true from attempt 0 but candidates produced on
           // attempt 1) is classified 'produced', not 'llm_error'.
           outcome,
-          // agent 运行(质量模式)把 trace 并入 rawOutput;形状向后兼容:既有
-          // `.candidates` 键不动,仅加可选 `agentTrace` 键(spec §4.5 落盘)。
-          rawOutput: agentTrace
-            ? { ...(rawOutput && typeof rawOutput === 'object' ? rawOutput as Record<string, unknown> : { raw: rawOutput ?? null }), agentTrace }
+          // agent 运行(质量模式)把 trace 并入 rawOutput;rootDir 缺失降级经济模式时
+          // 注明 judgeFallback。形状向后兼容:既有 `.candidates` 键不动,只加可选键。
+          rawOutput: agentTrace || judgeFallback
+            ? {
+                ...(rawOutput && typeof rawOutput === 'object' ? rawOutput as Record<string, unknown> : { raw: rawOutput ?? null }),
+                ...(agentTrace ? { agentTrace } : {}),
+                ...(judgeFallback ? { judgeFallback } : {}),
+              }
             : rawOutput,
           rawCount, acceptedCount: candidates.length, dedupedCount: deduped.length,
           filteredCount: keepWithClass.length, storedCount: keepWithClass.length,

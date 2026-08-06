@@ -48,6 +48,15 @@ export interface AgentJudgeResult {
 
 const AGENT_DISCARD_CATEGORIES: ReadonlySet<string> = new Set(['public-knowledge', 'derivable', 'fleeting', 'duplicate'])
 
+/**
+ * rootDir=null 时的 stub 工具:execute 永远返回错误文本。纵深防御——绝不构造
+ * makeRepoTools('/')(盘根沙箱 = 任意文件可读)。scheduler 侧已在 rootDir 缺失时
+ * 降级经济模式;此处再兜一道,保证 judgeValueAgentic 单独被调用时也安全。
+ */
+const NO_REPO_TOOLS: RepoTools = {
+  execute: async (tool) => `工具不可用:无可读项目仓库(rootDir 未提供),请凭材料判定(请求的工具:${tool})`,
+}
+
 function renderAgentUserPrompt(candidates: DistillCandidate[], opts: AgentJudgeOpts): string {
   const cs = candidates.map((c, i) =>
     `[${i}] (origin: ${c.origin}, source: ${opts.sourceKind}) ${c.title}\n${c.bodyMd}${c.evidence ? `\n出处: ${c.evidence}` : ''}`,
@@ -72,7 +81,7 @@ export async function judgeValueAgentic(
       valueClass: c.origin === 'agent-observed' ? null : 'decision',
     }))
   try {
-    const tools: RepoTools = makeRepoTools(opts.rootDir ?? '/')
+    const tools: RepoTools = opts.rootDir ? makeRepoTools(opts.rootDir) : NO_REPO_TOOLS
     const loop = await runAgentLoop({
       callLLM: opts.callLLM,
       system: AGENT_JUDGE_SYSTEM_PROMPT,
