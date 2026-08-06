@@ -1,5 +1,6 @@
 import { test, expect, afterEach } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { createServer, type Socket, type AddressInfo } from 'node:net'
 
 process.env.MEMSIDE_PORT = '7777'
 
@@ -321,6 +322,8 @@ test('日志: app.log 失败降级 console.error，capture 主流程不受影响
     const { plugin } = await freshPlugin()
     const hooks = await plugin({ client, directory: '/tmp/proj' })
     await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_logdown' } } })
+      // log() 改 fire-and-forget（spec §5.1）：console.error 降级在 microtask 后发生
+      await new Promise((r) => setTimeout(r, 20))
   } finally {
     console.error = origConsoleError
   }
@@ -334,4 +337,75 @@ test('catch 必记日志（防回退空 catch——2026-08-03 事故结构性缺
   for (const c of catches) {
     expect(c).toMatch(/log\(|console\.error/)
   }
+})
+
+// --- 挂死回归守卫（2026-08-05 事故锁）---
+// 为什么存在这组测试：2026-08-05 实测 opencode 1.18.13 装上 memside plugin 即整体
+// 冻住。根因链：bun node:http 的 destroy 吞没 bug（timeout 后 destroy 不结算
+// Promise）× 系统代理吞掉 loopback 请求不回应 × opencode Plugin.trigger 在消息
+// 管线关键路径串行 await transform 钩子 = 永久挂死。黑洞服务器模拟「代理吞请求」，
+// 断言钩子在入口硬预算内结算——任何把兜底拆回去的改动都会让这里变红。
+// 红测历史：现代码（node:http + 无结算兜底）下 T1 在 10s test timeout 处失败、
+// T2 在 37s test timeout 处失败（Promise 永不结算）——这是预期的红。
+
+function blackhole(): Promise<{ port: number; stop: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const sockets = new Set<Socket>()
+    const srv = createServer((s) => { sockets.add(s); s.on('close', () => sockets.delete(s)) })
+    srv.listen(0, '127.0.0.1', () => {
+      resolve({
+        port: (srv.address() as AddressInfo).port,
+        stop: () => new Promise<void>((r) => { for (const s of sockets) s.destroy(); srv.close(() => r()) }),
+      })
+    })
+  })
+}
+
+test('挂死回归: transform 钩子在传输永不回应时仍必须于预算内结算（2026-08-05 事故锁）', async () => {
+  const hole = await blackhole()
+  const origPort = process.env.MEMSIDE_PORT
+  process.env.MEMSIDE_PORT = String(hole.port)
+  try {
+    const { client } = makeFakeClient({})
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    const t0 = Date.now()
+    await hooks['experimental.chat.messages.transform']({}, {
+      messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }],
+    })
+    // 预算 2000ms + 宽裕余量；现代码挂死 -> 撞 test timeout 红
+    expect(Date.now() - t0).toBeLessThan(6000)
+  } finally {
+    process.env.MEMSIDE_PORT = origPort
+    await hole.stop()
+  }
+}, 10000)
+
+test('挂死回归: event 钩子在 capture 传输永不回应时仍必须于预算内结算（2026-08-05 事故锁）', async () => {
+  const hole = await blackhole()
+  const origPort = process.env.MEMSIDE_PORT
+  process.env.MEMSIDE_PORT = String(hole.port)
+  try {
+    const { client } = makeFakeClient({
+      flat: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
+    })
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    const t0 = Date.now()
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_hang' } } })
+    // 预算 30000ms + 余量；本条故意慢（锁的是 30s 卫生预算本身）
+    expect(Date.now() - t0).toBeLessThan(33000)
+  } finally {
+    process.env.MEMSIDE_PORT = origPort
+    await hole.stop()
+  }
+}, 37000)
+
+test('钩子入口 settleWithin 硬预算（结算不变量文本守卫）', () => {
+  // settleWithin 是唯一安全依赖（纯 Promise.race + 定时器，不依赖运行时行为）。
+  // 两个钩子入口都必须被包裹；预算常量取值锁定（用户拍板 transform 2s）。
+  expect(js).toContain('function settleWithin(')
+  expect(js).toContain('TRANSFORM_BUDGET_MS = 2000')
+  expect(js).toContain('EVENT_BUDGET_MS = 30000')
+  expect(js.match(/settleWithin\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
 })
