@@ -63,3 +63,32 @@ test('重跑幂等:已 rejected 的不再处理', async () => {
   expect(second.processed).toBe(0)
   expect(await db.select().from(memoryDiscards)).toHaveLength(1)  // 没有第二条审计
 })
+
+// 回归防护(2026-08-06 final fix wave):rescan 曾把每个批次硬编码
+// sourceKind: 'conversation' 喂 judgeValueAgentic,subagent 候选的
+// 「重点核对是否一次性任务约束」提示(agentJudge 协议段)在回扫里永远落空——
+// ③ backlog 正是为此设。修复后同 rootDir 内按 sourceKind 分组分批,
+// judge 收到的 user prompt 必须带真实来源标记。
+test('回扫质量模式:subagent 候选的 judge prompt 带 source: subagent(不与 conversation 混批)', async () => {
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: dir, title: '[category:trap] 主会话坑', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: dir, title: '[category:trap] subagent 任务工单约束', bodyMd: 'b',
+    tags: [], sourceKind: 'subagent', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  const judgeUsers: string[] = []
+  await rescanCandidates(db, {
+    callLLM: async (_system, user) => { judgeUsers.push(user); return '{"final": {"verdicts": [{"index": 0, "category": "decision"}]}}' },
+    loadJudgeConfig: () => ({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 }),
+  })
+  // 两种来源各一批:两批 prompt 分别标 conversation / subagent,绝不混批
+  expect(judgeUsers).toHaveLength(2)
+  const conv = judgeUsers.find((u) => u.includes('主会话坑'))
+  const sub = judgeUsers.find((u) => u.includes('任务工单约束'))
+  expect(conv).toContain('source: conversation')
+  expect(conv).not.toContain('source: subagent')
+  expect(sub).toContain('source: subagent')
+  expect(sub).not.toContain('source: conversation')
+})

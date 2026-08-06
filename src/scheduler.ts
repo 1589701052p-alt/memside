@@ -1,6 +1,7 @@
 import { and, asc, eq, lte } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import { existsSync } from 'node:fs'
+import { parse as parsePath } from 'node:path'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
@@ -195,7 +196,8 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       const judgeCfg = deps.loadJudgeConfig?.() ?? DEFAULT_JUDGE_CONFIG
       // spec 失败矩阵:项目目录已删除 -> 该批降级经济模式(蒸馏记录注明降级)。
       // 绝不让 agent 在 rootDir=null 下跑(makeRepoTools('/') 会把沙箱放宽到盘根)。
-      const agentRootDir = job.cwd && existsSync(job.cwd) ? job.cwd : null
+      // 文件系统根('/' / 'C:\')同理:existsSync 为真但等于盘根沙箱,一并降级。
+      const agentRootDir = job.cwd && existsSync(job.cwd) && parsePath(job.cwd).root !== job.cwd ? job.cwd : null
       let verdicts: ValueVerdict[]
       let agentTrace: AgentStep[] | null = null
       let judgeFallback: string | null = null

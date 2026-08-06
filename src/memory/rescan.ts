@@ -77,8 +77,18 @@ export async function rescanCandidates(
       const set = await listApprovedByScope(db, { projectId: rootDir })
       approvedTitles = [...set.byScope.project, ...set.byScope.global].map((m) => m.title).slice(0, 100)
     } catch { approvedTitles = [] }
-    for (let i = 0; i < group.length; i += RESCAN_BATCH) {
-      const batch = group.slice(i, i + RESCAN_BATCH)
+    // 同 rootDir 内再按 sourceKind 分组:judge 批次必须同质——judgeValueAgentic 只收
+    // 单个 sourceKind,混批硬编码 'conversation' 会让 subagent 候选永远触发不了
+    // 系统提示里的 subagent 核对段(agentJudge 协议段),③ backlog 正是为此设。
+    const byKind = new Map<'conversation' | 'subagent', Memory[]>()
+    for (const m of group) {
+      const k = m.sourceKind === 'subagent' ? 'subagent' : 'conversation'
+      if (!byKind.has(k)) byKind.set(k, [])
+      byKind.get(k)!.push(m)
+    }
+    for (const [sourceKind, kindGroup] of byKind) {
+    for (let i = 0; i < kindGroup.length; i += RESCAN_BATCH) {
+      const batch = kindGroup.slice(i, i + RESCAN_BATCH)
       const cands = batch.map(toCandidate)
       // 故障倒向保留:单批判定抛错不中断整个回扫,该批全部保留并计数。
       let verdicts
@@ -87,7 +97,7 @@ export async function rescanCandidates(
           ? await judgeValue(cands, deps.callLLM)
           : (await judgeValueAgentic(cands, {
               callLLM: deps.callLLM, rootDir, approvedTitles,
-              sourceKind: 'conversation', maxRounds: cfg.maxRounds, timeBudgetMs: cfg.timeBudgetS * 1000,
+              sourceKind, maxRounds: cfg.maxRounds, timeBudgetMs: cfg.timeBudgetS * 1000,
             })).verdicts
       } catch (e) {
         console.warn('memside: rescan batch judge failed, keeping batch', e)
@@ -122,6 +132,7 @@ export async function rescanCandidates(
       }
       report.processed += batch.length
       onProgress?.(report.processed, all.length)
+    }
     }
   }
   return report

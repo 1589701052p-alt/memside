@@ -892,7 +892,15 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
     }
   }
 
-  const cands = (detail?.rawOutput as { candidates?: unknown[] } | null | undefined)?.candidates
+  const raw = detail?.rawOutput as { candidates?: unknown[]; agentTrace?: unknown; judgeFallback?: unknown } | null | undefined
+  const cands = raw?.candidates
+  // spec §4.5 透明化:agent 终审的探查轨迹 + 降级标记必须可回看。
+  // 防御式渲染:旧 run 没有这两个键,agentTrace 元素形状也不假设。
+  const agentTrace: { kind?: unknown; text?: unknown; toolName?: unknown; toolResult?: unknown }[] | null =
+    Array.isArray(raw?.agentTrace) ? (raw.agentTrace as unknown[]).filter(
+      (s): s is { kind?: unknown; text?: unknown; toolName?: unknown; toolResult?: unknown } => !!s && typeof s === 'object',
+    ) : null
+  const judgeFallback = typeof raw?.judgeFallback === 'string' ? raw.judgeFallback : null
   const oc = detail ? formatOutcome(detail.outcome) : null
   return (
     <div
@@ -929,6 +937,11 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                 <span style={{ marginLeft: 8, color: '#999' }}>模型返回 {detail.rawCount} 条，{detail.rawCount - detail.acceptedCount} 条格式不合格被丢弃</span>
               )}
             </div>
+            {judgeFallback ? (
+              <div style={{ background: '#fff8e6', borderLeft: '3px solid #d90', color: '#775500', padding: 8, marginBottom: 12, fontSize: 13 }}>
+                价值判定降级: {judgeFallback}(该批走了经济模式单发判定,未跑 agent 终审)
+              </div>
+            ) : null}
             <div style={{ marginBottom: 12 }}>
               <strong>产出：</strong>
               {detail.outcome === 'empty_output' ? <span>LLM 返回 0 候选</span>
@@ -945,6 +958,27 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                     <pre key={i} style={{ background: '#f7f7f7', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap' }}>{JSON.stringify(c, null, 2)}</pre>
                   )) : <span>（无产出解析）</span>}
             </div>
+            {agentTrace && agentTrace.length > 0 ? (
+              <div style={{ marginBottom: 12 }}>
+                <strong>agent 探查轨迹（{agentTrace.length} 步）：</strong>
+                {agentTrace.map((s, i) => (
+                  <div key={i} style={{ marginBottom: 8, border: '1px solid #eee', borderRadius: 4, padding: 8 }}>
+                    <span style={{
+                      color: s.kind === 'tool' ? '#06c' : s.kind === 'final' ? '#080' : '#c60',
+                      fontWeight: 600, fontSize: 12,
+                    }}>
+                      [{typeof s.kind === 'string' ? s.kind : '?'}]{typeof s.toolName === 'string' ? ` ${s.toolName}` : ''}
+                    </span>
+                    {typeof s.text === 'string' && s.text ? (
+                      <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{s.text}</pre>
+                    ) : null}
+                    {typeof s.toolResult === 'string' && s.toolResult ? (
+                      <pre style={{ background: '#f7f7f7', margin: '4px 0 0', padding: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{s.toolResult}</pre>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div>
               <button onClick={loadSource} disabled={sourceLoading}>{sourceLoading ? '加载中…' : '查看原始输入'}</button>
               {sourceError ? (

@@ -6,7 +6,7 @@
 // 不按调用顺序——judgeDuplicates 是否消耗调用取决于库里有没有 existing,按序脚本太脆。
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, parse as parsePath } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick } from '@/scheduler'
@@ -150,6 +150,37 @@ test('质量模式 + job.cwd 目录不存在 -> 降级经济模式单发判定(�
   const raw = JSON.parse(runs[0]!.rawOutputJson!) as Record<string, unknown>
   expect(raw.judgeFallback).toBe('economy:no-root-dir')
   expect(Array.isArray(raw.candidates)).toBe(true)  // 既有键不动
+  const jobs = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(jobs[0]!.status).toBe('done')
+})
+
+test('质量模式 + job.cwd 是文件系统根 -> 同样降级经济模式(盘根沙箱拒绝)', async () => {
+  // 2026-08-06 final fix wave 回归锁:会话真在 '/' / 'C:\' 启动时,旧检查
+  // existsSync('C:\\') 为真,agent 会拿 makeRepoTools(盘根) 跑,沙箱放宽到整个盘。
+  // 断言:与「目录不存在」同款降级——单发 judge、judgeFallback 注明、候选照常入库。
+  const fsRoot = parsePath(process.cwd()).root  // Windows: 'C:\';POSIX: '/'
+  const jobId = await seedDueJob(fsRoot)
+  let captured: any = null
+  const judgeSystems: string[] = []
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    callLLM: async (system) => {
+      if (system.includes('memside-distiller')) return DISTILL_ONE
+      if (system.includes('memside-dedup')) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+      judgeSystems.push(system)
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
+    createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 }),
+  })
+  expect(captured).not.toBeNull()
+  expect(captured.valueClass).toBe('decision')
+  expect(judgeSystems.length).toBeGreaterThan(0)
+  expect(judgeSystems[0]).toContain(SINGLE_SHOT_OUTPUT_LINE)
+  expect(judgeSystems[0]).not.toContain(AGENT_PROTOCOL_LINE)
+  const runs = await db.select().from(memoryDistillRuns).where(eq(memoryDistillRuns.distillJobId, jobId))
+  const raw = JSON.parse(runs[0]!.rawOutputJson!) as Record<string, unknown>
+  expect(raw.judgeFallback).toBe('economy:no-root-dir')
   const jobs = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(jobs[0]!.status).toBe('done')
 })
