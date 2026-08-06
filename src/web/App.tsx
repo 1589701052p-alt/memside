@@ -55,7 +55,9 @@ export default function App() {
   const [discards, setDiscards] = useState<DiscardItem[]>([])
   const [runs, setRuns] = useState<DistillRunListItem[]>([])
   const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
-  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
+  // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
+  // (对齐重构前的初始 loading=true 行为)。
+  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false })
   const [status, setStatus] = useState<MemsideStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
