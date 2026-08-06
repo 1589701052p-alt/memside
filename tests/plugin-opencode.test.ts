@@ -1,5 +1,6 @@
 import { test, expect, afterEach } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { createServer, type Socket, type AddressInfo } from 'node:net'
 
 process.env.MEMSIDE_PORT = '7777'
 
@@ -29,12 +30,13 @@ test('best-effort catch 不抛回 opencode', () => {
 // live 验证，故用源码层文本断言兜底（CLAUDE.md「最低限度保留一条源代码层文本断言」）。
 // 任一修复被回退 -> 测试红 -> 立刻看出意图。
 
-test('loopback 传输走 node:http + NO_PROXY 追加豁免（Bun node:http 读 HTTP_PROXY——2026-08-04 回归）+ 非 2xx 必抛', () => {
-  // 事故链：PR #38 假设「node:http 不读代理」删了 NO_PROXY 追加；但 Bun 的
-  // node:http polyfill 读 HTTP_PROXY（与 Node 原生不同），loopback 被系统代理
-  // 劫持返 502，capture+inject 静默全灭。Bun node:http 尊重 NO_PROXY，故 plugin
-  // 顶层追加 127.0.0.1,localhost 豁免。非 2xx 抛带状态码的错误进 catch 记日志。
-  expect(js).toContain("from 'node:http'")
+test('loopback 传输走 node:net 裸 socket（结构免疫代理 env）+ NO_PROXY 追加保留 + 非 2xx 必抛', () => {
+  // 2026-08-05 事故链：bun node:http 读 HTTP_PROXY 劫持 loopback、createConnection
+  // 被忽略、timeout 后 destroy 不结算 Promise。node:net 裸 socket 结构上不读任何
+  // 代理 env（live 实验：带 HTTP_PROXY=:7897 直连 127.0.0.1:7777 成功），是确定性
+  // 直连通道。NO_PROXY 追加保留（对 SDK 的 bun fetch 偶发生效，无害冗余）。
+  expect(js).toContain("from 'node:net'")
+  expect(js).not.toContain('node:http')
   expect(js).toMatch(/process\.env\.NO_PROXY/)
   expect(js).toContain("['127.0.0.1', 'localhost']")
   expect(js).toContain('capture endpoint returned HTTP')
@@ -146,7 +148,7 @@ function makeFakeClient(beh: { flat?: ShapeImpl; path?: ShapeImpl } = {}) {
 
 type Received = { method: string; path: string; body: unknown | null }
 
-// 活体 harness：起真实本地 HTTP server（临时端口），plugin 的 node:http
+// 活体 harness：起真实本地 HTTP server（临时端口），plugin 的 node:net 裸 socket
 // 传输直连它。serveDaemon 同时把 process.env.MEMSIDE_PORT 指向该端口
 // （plugin 的 PORT() 每次调用时读 env，无需重新 import 模块）。
 function serveDaemon(impl: {
@@ -260,7 +262,7 @@ test('capture: 非 idle 事件直接跳过', async () => {
 })
 
 test('inject: daemon 不可达 -> error 日志、不抛回 opencode', async () => {
-  // 指向一个已关闭的端口：node:http 连接拒绝 -> reject -> catch 记 error
+  // 指向一个已关闭的端口：裸 socket 连接拒绝 -> reject -> catch 记 error
   active = serveDaemon()
   active.stop(); active = null
   process.env.MEMSIDE_PORT = '59999'
@@ -321,6 +323,8 @@ test('日志: app.log 失败降级 console.error，capture 主流程不受影响
     const { plugin } = await freshPlugin()
     const hooks = await plugin({ client, directory: '/tmp/proj' })
     await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_logdown' } } })
+    // log() 改 fire-and-forget（spec §5.1）：console.error 降级在 microtask 后发生
+    await new Promise((r) => setTimeout(r, 20))
   } finally {
     console.error = origConsoleError
   }
@@ -333,5 +337,192 @@ test('catch 必记日志（防回退空 catch——2026-08-03 事故结构性缺
   expect(catches.length).toBeGreaterThanOrEqual(3)
   for (const c of catches) {
     expect(c).toMatch(/log\(|console\.error/)
+  }
+})
+
+// --- 挂死回归守卫（2026-08-05 事故锁）---
+// 为什么存在这组测试：2026-08-05 实测 opencode 1.18.13 装上 memside plugin 即整体
+// 冻住。根因链：bun node:http 的 destroy 吞没 bug（timeout 后 destroy 不结算
+// Promise）× 系统代理吞掉 loopback 请求不回应 × opencode Plugin.trigger 在消息
+// 管线关键路径串行 await transform 钩子 = 永久挂死。黑洞服务器模拟「代理吞请求」，
+// 断言钩子在入口硬预算内结算——任何把兜底拆回去的改动都会让这里变红。
+// 红测历史：现代码（node:http + 无结算兜底）下 T1 在 10s test timeout 处失败、
+// T2 在 37s test timeout 处失败（Promise 永不结算）——这是预期的红。
+
+function blackhole(): Promise<{ port: number; stop: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const sockets = new Set<Socket>()
+    const srv = createServer((s) => { sockets.add(s); s.on('close', () => sockets.delete(s)) })
+    srv.listen(0, '127.0.0.1', () => {
+      resolve({
+        port: (srv.address() as AddressInfo).port,
+        stop: () => new Promise<void>((r) => { for (const s of sockets) s.destroy(); srv.close(() => r()) }),
+      })
+    })
+  })
+}
+
+test('挂死回归: transform 钩子在传输永不回应时仍必须于预算内结算（2026-08-05 事故锁）', async () => {
+  const hole = await blackhole()
+  const origPort = process.env.MEMSIDE_PORT
+  process.env.MEMSIDE_PORT = String(hole.port)
+  try {
+    const { client } = makeFakeClient({})
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    const t0 = Date.now()
+    await hooks['experimental.chat.messages.transform']({}, {
+      messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }],
+    })
+    // 预算 2000ms + 宽裕余量；现代码挂死 -> 撞 test timeout 红
+    expect(Date.now() - t0).toBeLessThan(6000)
+  } finally {
+    process.env.MEMSIDE_PORT = origPort
+    await hole.stop()
+  }
+}, 10000)
+
+test('挂死回归: event 钩子在 capture 传输永不回应时仍必须于预算内结算（2026-08-05 事故锁）', async () => {
+  const hole = await blackhole()
+  const origPort = process.env.MEMSIDE_PORT
+  process.env.MEMSIDE_PORT = String(hole.port)
+  try {
+    const { client } = makeFakeClient({
+      flat: () => ({ data: [{ info: { role: 'user' }, parts: [] }] }),
+    })
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    const t0 = Date.now()
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_hang' } } })
+    // 预算 30000ms + 余量；本条故意慢（锁的是 30s 卫生预算本身）
+    expect(Date.now() - t0).toBeLessThan(33000)
+  } finally {
+    process.env.MEMSIDE_PORT = origPort
+    await hole.stop()
+  }
+}, 37000)
+
+test('钩子入口 settleWithin 硬预算（结算不变量文本守卫）', () => {
+  // settleWithin 是唯一安全依赖（纯 Promise.race + 定时器，不依赖运行时行为）。
+  // 两个钩子入口都必须被包裹；预算常量取值锁定（用户拍板 transform 2s）。
+  expect(js).toContain('function settleWithin(')
+  expect(js).toContain('TRANSFORM_BUDGET_MS = 2000')
+  expect(js).toContain('EVENT_BUDGET_MS = 30000')
+  expect(js.match(/settleWithin\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
+})
+
+// --- wire 级传输契约（Task 2：node 的 http 模块 -> node:net 裸 socket 传输层替换）---
+
+// wire 级假服务器：手写 HTTP 响应字节，精确控制 framing（Content-Length / chunked /
+// 状态码）——Bun.serve 不保证暴露所需传输形态。用于锁定 rawHttp 解析契约。
+function wireServer(responder: () => string): Promise<{ port: number; stop: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const sockets = new Set<Socket>()
+    const srv = createServer((s) => {
+      sockets.add(s); s.on('close', () => sockets.delete(s))
+      s.once('data', () => { s.write(responder()); s.end() })
+    })
+    srv.listen(0, '127.0.0.1', () => {
+      resolve({
+        port: (srv.address() as AddressInfo).port,
+        stop: () => new Promise<void>((r) => { for (const s of sockets) s.destroy(); srv.close(() => r()) }),
+      })
+    })
+  })
+}
+
+test('传输契约: Content-Length framing 注入成功', async () => {
+  const block = '--- BEGIN INJECTED MEMORY ---\n- wire\n--- END INJECTED MEMORY ---'
+  const body = JSON.stringify({ block })
+  const wire = await wireServer(() =>
+    `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`)
+  const origPort = process.env.MEMSIDE_PORT
+  process.env.MEMSIDE_PORT = String(wire.port)
+  try {
+    const { client } = makeFakeClient({})
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    const output = { messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }] }
+    await hooks['experimental.chat.messages.transform']({}, output)
+    expect((output.messages[0].parts[0] as { text?: string }).text).toBe(block)
+  } finally {
+    process.env.MEMSIDE_PORT = origPort
+    await wire.stop()
+  }
+})
+
+test('传输契约: chunked framing 注入成功（防御性解析）', async () => {
+  const block = '--- BEGIN INJECTED MEMORY ---\n- chunked\n--- END INJECTED MEMORY ---'
+  const body = JSON.stringify({ block })
+  const chunk = `${body.length.toString(16)}\r\n${body}\r\n0\r\n\r\n`
+  const wire = await wireServer(() =>
+    `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n${chunk}`)
+  const origPort = process.env.MEMSIDE_PORT
+  process.env.MEMSIDE_PORT = String(wire.port)
+  try {
+    const { client } = makeFakeClient({})
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    const output = { messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }] }
+    await hooks['experimental.chat.messages.transform']({}, output)
+    expect((output.messages[0].parts[0] as { text?: string }).text).toBe(block)
+  } finally {
+    process.env.MEMSIDE_PORT = origPort
+    await wire.stop()
+  }
+})
+
+test('传输契约: 非 2xx -> error 日志含状态码（代理 502 语义延续）', async () => {
+  const wire = await wireServer(() =>
+    `HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`)
+  const origPort = process.env.MEMSIDE_PORT
+  process.env.MEMSIDE_PORT = String(wire.port)
+  try {
+    const { client, logs } = makeFakeClient({})
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    await hooks['experimental.chat.messages.transform']({}, {
+      messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }],
+    })
+    // 非 2xx 在 handleTransform 内部 catch 处置（文案 'inject transform failed'，
+    // 与既有行为测试一致）；入口 settleWithin 不触发（body 正常结算）。
+    expect(logs.some((l) => l.level === 'error' && l.message.includes('inject transform failed') && l.message.includes('502'))).toBe(true)
+  } finally {
+    process.env.MEMSIDE_PORT = origPort
+    await wire.stop()
+  }
+})
+
+test('传输契约: hostile 代理 env 下注入仍成功（node:net 结构免疫）', async () => {
+  // HTTP_PROXY/HTTPS_PROXY 指向黑洞、NO_PROXY 清空——最恶劣的代理环境。
+  // node:net 结构上不读代理 env（spec §1.2e live 实证），注入必须照常成功。
+  // 注：本测试对旧 node:http 传输无判别力（plugin 顶层 NO_PROXY 追加在纯净
+  // 测试进程里恰好能救 node:http）；判别力来自上方 'node:net' 文本守卫 +
+  // 挂死回归红测试 + live 事故记录。此处锁的是新传输在 hostile env 下的行为。
+  const hole = await blackhole()
+  const body = JSON.stringify({ block: null })
+  const wire = await wireServer(() =>
+    `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`)
+  const orig = { p: process.env.MEMSIDE_PORT, hp: process.env.HTTP_PROXY, hps: process.env.HTTPS_PROXY, np: process.env.NO_PROXY }
+  process.env.MEMSIDE_PORT = String(wire.port)
+  process.env.HTTP_PROXY = `http://127.0.0.1:${hole.port}`
+  process.env.HTTPS_PROXY = `http://127.0.0.1:${hole.port}`
+  process.env.NO_PROXY = ''
+  try {
+    const { client, logs } = makeFakeClient({})
+    const { plugin } = await freshPlugin()
+    const hooks = await plugin({ client, directory: '/tmp/proj' })
+    const output = { messages: [{ info: { role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }] }
+    await hooks['experimental.chat.messages.transform']({}, output)
+    // block:null -> 不注入、也不应有任何 error（传输成功抵达 daemon）
+    expect(output.messages[0].parts.length).toBe(1)
+    expect(logs.some((l) => l.level === 'error')).toBe(false)
+  } finally {
+    process.env.MEMSIDE_PORT = orig.p
+    if (orig.hp === undefined) delete process.env.HTTP_PROXY; else process.env.HTTP_PROXY = orig.hp
+    if (orig.hps === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = orig.hps
+    if (orig.np === undefined) delete process.env.NO_PROXY; else process.env.NO_PROXY = orig.np
+    await hole.stop()
+    await wire.stop()
   }
 })

@@ -661,30 +661,60 @@ deferred minor 见 sdd ledger）。`bun run typecheck && bun test` 全绿（568 
 
 
 
-## opencode TUI capture �ٳɹ��޸���res.ok ��� + ������ NO_PROXY��2026-08-04��
+## opencode TUI capture �ٳɹ��޸���res.ok ��� + ������ NO_PROXY��2026-08-04��
 
-PR #35 �ϲ����û����� TUI �ع飺plugin ��־ `capture ok messages=124 shape=path`
-�� daemon ���� job��֤������λ������Ӹ���
+PR #35 �ϲ����û����� TUI �ع飺plugin ��־ `capture ok messages=124 shape=path`
+�� daemon ���� job��֤������λ������Ӹ���
 
-1. **bun �ڽ����׸� fetch ʱ�̻���������**������ʵ��ʵ֤��NO_PROXY ����ǰ��λ
-   -> 202 ֱ����⣻�׸� fetch ����� -> 502 �ߴ�����ʧ����TUI �� opencode ����
-   ������������ plugin ģ����أ�plugin �ڵ� NO_PROXY ��д��Զ̫����
-   7/31 �� 4 �γɹ� capture ȫ�� `opencode run` ���̣�ʱ����������**TUI capture
-   �ӵ�һ�����δ�ɹ�**��opencode �ٷ� Network �ĵ���˵ NO_PROXY �����ڽ���
-   ����ǰ�Ļ��������required����
-2. **ϵͳ������ loopback POST ���� 502**��GET ����ͨ��curl ʵ����գ���
-3. **plugin ���� `res.ok`**��bun fetch �� 502 �ճ� resolve���ɴ���ѡ�daemon ����
-   û�յ����ǳ� capture ok�����۲���ȱ��������ʹ����
+1. **bun �ڽ����׸� fetch ʱ�̻���������**������ʵ��ʵ֤��NO_PROXY ����ǰ��λ
+   -> 202 ֱ����⣻�׸� fetch ����� -> 502 �ߴ�����ʧ����TUI �� opencode ����
+   ������������ plugin ģ����أ�plugin �ڵ� NO_PROXY ��д��Զ̫����
+   7/31 �� 4 �γɹ� capture ȫ�� `opencode run` ���̣�ʱ����������**TUI capture
+   �ӵ�һ�����δ�ɹ�**��opencode �ٷ� Network �ĵ���˵ NO_PROXY �����ڽ���
+   ����ǰ�Ļ��������required����
+2. **ϵͳ������ loopback POST ���� 502**��GET ����ͨ��curl ʵ����գ���
+3. **plugin ���� `res.ok`**��bun fetch �� 502 �ճ� resolve���ɴ���ѡ�daemon ����
+   û�յ����ǳ� capture ok�����۲���ȱ��������ʹ����
 
-�޸�����֧ fix/opencode-capture-res-ok��С bug fix �������
+�޸�����֧ fix/opencode-capture-res-ok��С bug fix �������
 
-1. capture / inject ���� fetch �� `res.ok` ��飬�� 2xx ������� catch �� error
-   ��־���� HTTP ״̬�룩��NO_PROXY ����ע�������¹ʽ�ѵ��in-process ��дֻ��
-   belt-and-suspenders�������ǻ���������
-2. ��ά������Windows �û����������� `NO_PROXY=127.0.0.1,localhost`��ԭ��Ϊ�գ�����
-   opencode �ٷ��Ƽ����ƣ�������������Ч��
-3. ���ԣ�502 �ٳɹ����ܲ��ԣ�capture + inject��+ �ı������������� res.ok ���
-   ����Դ�� RED ʵ֤������ socket ���ߴ���������Bun.connect�����û��İ� YAGNI ������
+1. capture / inject ���� fetch �� `res.ok` ��飬�� 2xx ������� catch �� error
+   ��־���� HTTP ״̬�룩��NO_PROXY ����ע�������¹ʽ�ѵ��in-process ��дֻ��
+   belt-and-suspenders�������ǻ���������
+2. ��ά������Windows �û����������� `NO_PROXY=127.0.0.1,localhost`��ԭ��Ϊ�գ�����
+   opencode �ٷ��Ƽ����ƣ�������������Ч��
+3. ���ԣ�502 �ٳɹ����ܲ��ԣ�capture + inject��+ �ı������������� res.ok ���
+   ����Դ�� RED ʵ֤������ socket ���ߴ���������Bun.connect�����û��İ� YAGNI ������
 
-`bun run typecheck && bun test` 571/571 ȫ�̡���֤����Ч���û�������һ�� opencode
-������ plugin + �»�������������һ�� idle Ӧ�� capture ok �� daemon ���� opencode job��
+`bun run typecheck && bun test` 571/571 ȫ�̡���֤����Ч���û�������һ�� opencode
+������ plugin + �»�������������һ�� idle Ӧ�� capture ok �� daemon ���� opencode job��
+
+## opencode 插件挂死根治（裸 socket 传输 + 钩子结算不变量，2026-08-06）
+
+用户实测：opencode 装 memside plugin 即整体冻住，卸载恢复。根因链（完整取证
+见 spec）：bun（opencode 内嵌运行时）node:http 的 destroy 吞没 bug（timeout 后
+destroy 不结算 Promise，Node/bun 对照实验证实）× 系统代理吞掉 loopback 请求
+不回应 × opencode 1.18.13 Plugin.trigger 在消息管线关键路径串行 await
+transform 钩子 = 永久挂死。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-08-05-opencode-plugin-hang-settlement*`。
+
+1. `settleWithin`（opencode-plugin/memside.js）：纯 Promise.race 硬预算，
+   transform 钩子 2s / event 钩子 30s 内必然结算——不依赖任何可能被 bun
+   破坏的运行时行为。钩子 body 搬入私有 handleTransform/handleSessionIdle，
+   入口 try/catch 包 settleWithin；全部 log() 改 fire-and-forget（void），
+   堵 catch 通道后门挂点。
+2. 传输层 node:http -> node:net 裸 socket：手写 HTTP/1.1（Content-Length +
+   chunked 解析），结构上不读代理 env（live 实证），从根消除代理论劫。
+   接口形状与错误语义不变（调用点零改动）。NO_PROXY 追加保留为无害冗余。
+3. 测试：黑洞服务器挂死回归红测试（现代码撞 test timeout 失败）+ wire 级
+   framing 契约（Content-Length/chunked/非 2xx）+ hostile 代理 env 行为锁 +
+   文本守卫重写（node:net + 禁 node:http + settleWithin 双包裹 + 预算常量）。
+
+执行：subagent-driven（2 实现 task 各 implementer + reviewer，全部 Approved；
+deferred minor 见 sdd ledger）。`bun run typecheck && bun test` 582/582 全绿。
+
+### 真机冒烟（post-merge，硬门槛）
+1. daemon 在运行装修复版插件 -> `opencode run` 注入成功（无 transform 错误日志）。
+2. 杀 daemon -> `opencode run` 毫秒级跳过（ECONNREFUSED 日志），无挂死。
+3. 用户 TUI 验收：正常使用一轮不卡 + capture ok + daemon 新 opencode job。
+4. 大会话抽查：长会话 idle 捕获不被 30s 预算误杀。
