@@ -16,6 +16,8 @@ import type { EnqueueInput } from '@/scheduler'
 import { loadUiLlmConfig, saveUiLlmConfig, maskToken, type UiLlmConfig } from '@/settings'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { testConnection as defaultTestConnection } from './anthropic'
+import { testConnection as openAiTestConnection } from './openai'
+import { resolveCallLLMProtocol, type LLMProtocol } from '@/llm'
 
 export interface AppDeps {
   db: DbClient
@@ -34,9 +36,9 @@ export interface AppDeps {
   /** LLM 设置端点的注入点（均可选，缺省走真实实现；测试注入假实现，
    * 不碰真实 ~/.claude 与网络）。 */
   loadUiConfig?: () => UiLlmConfig | null
-  saveUiConfig?: (patch: { baseURL?: string; token?: string; model?: string; clear?: boolean }) => void
+  saveUiConfig?: (patch: { baseURL?: string; token?: string; model?: string; protocol?: 'anthropic' | 'openai'; clear?: boolean }) => void
   loadEffectiveCreds?: () => ClaudeCreds
-  testConnection?: (cfg: { baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
+  testConnection?: (cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
 }
 
 /**
@@ -94,9 +96,13 @@ export function createApp(deps: AppDeps) {
   // - loadEff：四级凭证链（Task 2 的 loadClaudeCreds，UI 级整级短路）。
   // - testConn：最小请求探测（Task 3 的 testConnection）。
   const loadUi = deps.loadUiConfig ?? (() => loadUiLlmConfig(deps.db))
-  const saveUi = deps.saveUiConfig ?? ((patch: { baseURL?: string; token?: string; model?: string; clear?: boolean }) => saveUiLlmConfig(deps.db, patch))
+  const saveUi = deps.saveUiConfig ?? ((patch: { baseURL?: string; token?: string; model?: string; protocol?: 'anthropic' | 'openai'; clear?: boolean }) => saveUiLlmConfig(deps.db, patch))
   const loadEff = deps.loadEffectiveCreds ?? (() => loadClaudeCreds(loadUi()))
-  const testConn = deps.testConnection ?? defaultTestConnection
+  const testConn = deps.testConnection ?? ((cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) =>
+    cfg.protocol === 'openai'
+      ? openAiTestConnection({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model })
+      : defaultTestConnection({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model })
+  ) as (cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
 
   /** GET/PUT 共用的响应形状（Task 6/7 依赖）。token 只回 maskToken 打码，
    * 永不回明文（spec 硬约束）。loadUi 读异常降级 saved:null——GET 不得因
@@ -106,13 +112,15 @@ export function createApp(deps: AppDeps) {
     try { saved = loadUi() } catch { /* 存储异常降级 saved:null，不 500（spec） */ }
     let effective: ClaudeCreds | null = null
     try { const c = loadEff(); effective = c.apiKey ? c : null } catch { effective = null }
+    const proto = resolveCallLLMProtocol(saved, process.env)
     return {
       saved: saved?.token
-        ? { baseURL: saved.baseURL ?? null, model: saved.model ?? null, tokenMasked: maskToken(saved.token) }
+        ? { protocol: saved.protocol ?? 'anthropic', baseURL: saved.baseURL ?? null, model: saved.model ?? null, tokenMasked: maskToken(saved.token) }
         : null,
       effective: effective?.apiKey
         ? {
             source: effective.source,
+            protocol: proto,
             baseURL: effective.baseURL ?? null,
             model: effective.model ?? null,
             tokenMasked: maskToken(effective.apiKey),
@@ -468,6 +476,7 @@ export function createApp(deps: AppDeps) {
     baseURL: z.string().regex(/^https?:\/\//, 'baseURL must be http(s) URL').optional().or(z.literal('')),
     token: z.string().optional(),
     model: z.string().optional(),
+    protocol: z.enum(['anthropic', 'openai']).optional(),
     clear: z.boolean().optional(),
   })
   app.put('/api/settings/llm', async (c) => {
@@ -484,17 +493,19 @@ export function createApp(deps: AppDeps) {
     baseURL: z.string().optional(),
     token: z.string().optional(),
     model: z.string().optional(),
+    protocol: z.enum(['anthropic', 'openai']).optional(),
   })
   app.post('/api/settings/llm/test', async (c) => {
     const body = testSchema.parse(await c.req.json().catch(() => ({})))
     const saved = loadUi()
     const cfg = {
+      protocol: (body.protocol ?? saved?.protocol ?? 'anthropic') as LLMProtocol,
       baseURL: body.baseURL ?? saved?.baseURL,
       token: body.token ?? saved?.token,
       model: body.model ?? saved?.model,
     }
     if (!cfg.token) return c.json({ ok: false, error: 'no credentials' })
-    return c.json(await testConn({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model }))
+    return c.json(await testConn({ protocol: cfg.protocol, baseURL: cfg.baseURL, token: cfg.token, model: cfg.model }))
   })
 
   // --- Archive / unarchive / restore --------------------------------------

@@ -36,7 +36,7 @@ afterEach(() => {
   db.$client.close()
 })
 
-type SavePatch = { baseURL?: string; token?: string; model?: string; clear?: boolean }
+type SavePatch = { baseURL?: string; token?: string; model?: string; protocol?: 'anthropic' | 'openai'; clear?: boolean }
 
 /** 可变 UI 配置存储 + 与 Task 1 saveUiLlmConfig 相同的字段级合并语义（假实现）。 */
 function makeFakeUiStore(initial: UiLlmConfig | null = null) {
@@ -56,6 +56,8 @@ function makeFakeUiStore(initial: UiLlmConfig | null = null) {
       else if (cur.token) next.token = cur.token
       if (patch.model !== undefined) { if (patch.model !== '') next.model = patch.model }
       else if (cur.model) next.model = cur.model
+      if (patch.protocol !== undefined) next.protocol = patch.protocol
+      else if (cur.protocol) next.protocol = cur.protocol
       saved = next.token ? next : null
     },
   }
@@ -65,7 +67,7 @@ function makeApp(overrides: {
   loadUiConfig?: () => UiLlmConfig | null
   saveUiConfig?: (patch: SavePatch) => void
   loadEffectiveCreds?: () => ClaudeCreds
-  testConnection?: (cfg: { baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
+  testConnection?: (cfg: { protocol: 'anthropic' | 'openai'; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
 } = {}) {
   return createApp({
     db,
@@ -198,7 +200,7 @@ test('PUT 非法 baseURL（非 http URL）-> 400', async () => {
 
 test('POST test 空 body 用已保存配置；无凭证 -> {ok:false,error:"no credentials"}', async () => {
   const ui = makeFakeUiStore(null)
-  const calls: { baseURL?: string; token: string; model?: string }[] = []
+  const calls: { protocol: string; baseURL?: string; token: string; model?: string }[] = []
   const app = makeApp({
     ...ui,
     loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
@@ -221,12 +223,12 @@ test('POST test 空 body 用已保存配置；无凭证 -> {ok:false,error:"no c
   const withSaved = await req(app2, '/api/settings/llm/test', postJson({}))
   expect(withSaved.status).toBe(200)
   expect(withSaved.body).toEqual({ ok: true })
-  expect(calls2).toEqual([{ baseURL: 'https://api.kimi.com', token: 'sk-kimiabcdef12345678fh', model: 'kimi-k2' }])
+  expect(calls2).toEqual([{ protocol: 'anthropic', baseURL: 'https://api.kimi.com', token: 'sk-kimiabcdef12345678fh', model: 'kimi-k2' }])
 })
 
 test('POST test body 带 token -> 调注入的 testConnection，成功/失败透传', async () => {
   const ui = makeFakeUiStore(null)
-  const calls: { baseURL?: string; token: string; model?: string }[] = []
+  const calls: { protocol: string; baseURL?: string; token: string; model?: string }[] = []
   let nextResult: { ok: boolean; error?: string } = { ok: true }
   const app = makeApp({
     ...ui,
@@ -238,7 +240,7 @@ test('POST test body 带 token -> 调注入的 testConnection，成功/失败透
   }))
   expect(okRes.status).toBe(200)
   expect(okRes.body).toEqual({ ok: true })
-  expect(calls[0]).toEqual({ baseURL: 'https://api.kimi.com', token: 'sk-body-token-1234567890ab', model: 'kimi-k2' })
+  expect(calls[0]).toEqual({ protocol: 'anthropic', baseURL: 'https://api.kimi.com', token: 'sk-body-token-1234567890ab', model: 'kimi-k2' })
   // body token 只用于本次测试，不得写存储
   expect(ui.patches.length).toBe(0)
 
@@ -260,4 +262,56 @@ test('GET 存储异常 -> saved:null 不 500', async () => {
   expect(r.body.saved).toBeNull()
   // effective 不受 UI 读异常影响
   expect(r.body.effective).toMatchObject({ source: 'env:apiKey' })
+})
+
+// spec §测试连接按协议派发：PUT 存 protocol，空 body test 用已存 protocol 派发到 openai。
+test('PUT protocol=openai 保存；空 body test 派发到注入 testConnection 且带 protocol', async () => {
+  const ui = makeFakeUiStore(null)
+  const calls: { protocol: string; baseURL?: string; token: string; model?: string }[] = []
+  const app = makeApp({
+    ...ui,
+    loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
+    testConnection: async (cfg) => { calls.push(cfg); return { ok: true } },
+  })
+  const put = await req(app, '/api/settings/llm', putJson({
+    baseURL: 'https://ark.cn-beijing.volces.com/api/plan/v3',
+    token: 'sk-abcdefghijklmn',
+    model: 'ark-code-latest',
+    protocol: 'openai',
+  }))
+  expect(put.status).toBe(200)
+  expect(put.body.saved).toMatchObject({ protocol: 'openai', tokenMasked: 'sk-abc…klmn' })
+
+  const t = await req(app, '/api/settings/llm/test', postJson({}))
+  expect(t.status).toBe(200)
+  expect(calls[0]).toEqual({
+    protocol: 'openai',
+    baseURL: 'https://ark.cn-beijing.volces.com/api/plan/v3',
+    token: 'sk-abcdefghijklmn',
+    model: 'ark-code-latest',
+  })
+})
+
+test('PUT protocol 缺省 -> saved.protocol 默认 anthropic', async () => {
+  const ui = makeFakeUiStore(null)
+  const app = makeApp({
+    ...ui,
+    loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
+    testConnection: async () => ({ ok: true }),
+  })
+  const put = await req(app, '/api/settings/llm', putJson({ baseURL: 'https://a.example.com', token: 'sk-abcdefghijklmn' }))
+  expect(put.status).toBe(200)
+  expect(put.body.saved.protocol).toBe('anthropic')
+})
+
+test('PUT 非法 protocol -> 400', async () => {
+  const ui = makeFakeUiStore(null)
+  const app = makeApp({
+    ...ui,
+    loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
+    testConnection: async () => ({ ok: true }),
+  })
+  const r = await req(app, '/api/settings/llm', putJson({ token: 'sk-x', protocol: 'grpc' }))
+  expect(r.status).toBe(400)
+  expect(ui.patches.length).toBe(0)
 })
