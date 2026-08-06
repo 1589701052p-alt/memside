@@ -351,3 +351,45 @@ test('GET anthropic 协议（缺省）-> effective 仍用 loadEffectiveCreds（�
   expect(r.status).toBe(200)
   expect(r.body.effective).toMatchObject({ protocol: 'anthropic', source: 'settings.json:authToken', baseURL: 'https://a.example.com' })
 })
+
+// spec §test-effective：无 body 解析生效 creds，按协议派发 testConn；无 creds -> no credentials。
+test('POST test-effective openai -> 用生效 OpenAI creds 调 testConn', async () => {
+  const ui = makeFakeUiStore({ token: 'sk-openai-abcdefghijkl', protocol: 'openai', baseURL: 'https://ark.example.cn/api/plan/v3', model: 'ark-code-latest' })
+  const calls: { protocol: string; baseURL?: string; token: string; model?: string }[] = []
+  const app = makeApp({
+    ...ui,
+    loadEffectiveOpenAiCreds: () => ({ apiKey: 'sk-openai-abcdefghijkl', baseURL: 'https://ark.example.cn/api/plan/v3', model: 'ark-code-latest', source: 'ui' }),
+    loadEffectiveCreds: () => ({ apiKey: 'sk-wrong-anthropic', source: 'none' }),
+    testConnection: async (cfg) => { calls.push(cfg); return { ok: true } },
+  })
+  const r = await req(app, '/api/settings/llm/test-effective', postJson({}))
+  expect(r.status).toBe(200)
+  expect(r.body).toEqual({ ok: true })
+  expect(calls).toEqual([{ protocol: 'openai', baseURL: 'https://ark.example.cn/api/plan/v3', token: 'sk-openai-abcdefghijkl', model: 'ark-code-latest' }])
+})
+
+test('POST test-effective 无 creds -> {ok:false, error:"no credentials"}', async () => {
+  const ui = makeFakeUiStore(null)
+  const app = makeApp({
+    ...ui,
+    loadEffectiveOpenAiCreds: () => null,
+    loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
+    testConnection: async () => ({ ok: true }),
+  })
+  const r = await req(app, '/api/settings/llm/test-effective', postJson({}))
+  expect(r.status).toBe(200)
+  expect(r.body).toEqual({ ok: false, error: 'no credentials' })
+})
+
+test('POST test-effective 存储读异常 -> no credentials 不 500', async () => {
+  const app = makeApp({
+    loadUiConfig: () => { throw new Error('SQLITE_BUSY') },
+    saveUiConfig: () => {},
+    loadEffectiveOpenAiCreds: () => null,
+    loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
+    testConnection: async () => ({ ok: true }),
+  })
+  const r = await req(app, '/api/settings/llm/test-effective', postJson({}))
+  expect(r.status).toBe(200)
+  expect(r.body).toEqual({ ok: false, error: 'no credentials' })
+})

@@ -529,6 +529,22 @@ export function createApp(deps: AppDeps) {
     return c.json(await testConn({ protocol: cfg.protocol, baseURL: cfg.baseURL, token: cfg.token, model: cfg.model }))
   })
 
+  // 「测试生效」：无 body，后端自解析当前生效的 creds + 协议（与 buildState 同源，
+  // 确保测的是 distill 实际会用的那套）。无 creds / 存储异常 -> {ok:false,error:'no credentials'}
+  // （HTTP 200——业务结果不是请求错误）。复用 testConn 派发器，测试注入零网络。
+  app.post('/api/settings/llm/test-effective', async (c) => {
+    let saved: UiLlmConfig | null = null
+    try { saved = loadUi() } catch { saved = null }
+    let effective: { source: string; apiKey: string; baseURL?: string; model?: string } | null = null
+    try {
+      const proto = resolveCallLLMProtocol(saved, process.env)
+      effective = resolveEffective(proto, loadEff, loadEffOpenAi)
+    } catch { effective = null }
+    if (!effective?.apiKey) return c.json({ ok: false, error: 'no credentials' })
+    const proto = resolveCallLLMProtocol(saved, process.env)
+    return c.json(await testConn({ protocol: proto, baseURL: effective.baseURL, token: effective.apiKey, model: effective.model }))
+  })
+
   // --- Archive / unarchive / restore --------------------------------------
   app.post('/api/memories/:id/archive', async (c) => {
     try {
