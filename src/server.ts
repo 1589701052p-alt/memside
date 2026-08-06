@@ -16,7 +16,7 @@ import type { EnqueueInput } from '@/scheduler'
 import { loadUiLlmConfig, saveUiLlmConfig, maskToken, type UiLlmConfig } from '@/settings'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { testConnection as defaultTestConnection } from './anthropic'
-import { testConnection as openAiTestConnection } from './openai'
+import { testConnection as openAiTestConnection, loadOpenAiUiCreds, type OpenAiCreds } from './openai'
 import { resolveCallLLMProtocol, type LLMProtocol } from '@/llm'
 
 export interface AppDeps {
@@ -38,6 +38,7 @@ export interface AppDeps {
   loadUiConfig?: () => UiLlmConfig | null
   saveUiConfig?: (patch: { baseURL?: string; token?: string; model?: string; protocol?: 'anthropic' | 'openai'; clear?: boolean }) => void
   loadEffectiveCreds?: () => ClaudeCreds
+  loadEffectiveOpenAiCreds?: () => OpenAiCreds | null
   testConnection?: (cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
 }
 
@@ -98,11 +99,28 @@ export function createApp(deps: AppDeps) {
   const loadUi = deps.loadUiConfig ?? (() => loadUiLlmConfig(deps.db))
   const saveUi = deps.saveUiConfig ?? ((patch: { baseURL?: string; token?: string; model?: string; protocol?: 'anthropic' | 'openai'; clear?: boolean }) => saveUiLlmConfig(deps.db, patch))
   const loadEff = deps.loadEffectiveCreds ?? (() => loadClaudeCreds(loadUi()))
+  const loadEffOpenAi = deps.loadEffectiveOpenAiCreds ?? (() => loadOpenAiUiCreds(loadUi(), process.env))
   const testConn = deps.testConnection ?? ((cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) =>
     cfg.protocol === 'openai'
       ? openAiTestConnection({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model })
       : defaultTestConnection({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model })
   ) as (cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
+
+  /** 按协议解析当前生效 creds，统一为 {source, apiKey, baseURL?, model?}；无 creds 返回 null。 */
+  function resolveEffective(
+    proto: LLMProtocol,
+    loadAnthropic: () => ClaudeCreds,
+    loadOpenAi: () => OpenAiCreds | null,
+  ): { source: string; apiKey: string; baseURL?: string; model?: string } | null {
+    if (proto === 'openai') {
+      const c = loadOpenAi()
+      if (!c) return null
+      return { source: c.source, apiKey: c.apiKey, baseURL: c.baseURL, model: c.model }
+    }
+    const c = loadAnthropic()
+    if (!c.apiKey) return null
+    return { source: c.source, apiKey: c.apiKey, ...(c.baseURL ? { baseURL: c.baseURL } : {}), ...(c.model ? { model: c.model } : {}) }
+  }
 
   /** GET/PUT 共用的响应形状（Task 6/7 依赖）。token 只回 maskToken 打码，
    * 永不回明文（spec 硬约束）。loadUi 读异常降级 saved:null——GET 不得因
@@ -110,8 +128,11 @@ export function createApp(deps: AppDeps) {
   const buildState = () => {
     let saved: UiLlmConfig | null = null
     try { saved = loadUi() } catch { /* 存储异常降级 saved:null，不 500（spec） */ }
-    let effective: ClaudeCreds | null = null
-    try { const c = loadEff(); effective = c.apiKey ? c : null } catch { effective = null }
+    let effective: { source: string; apiKey: string; baseURL?: string; model?: string } | null = null
+    try {
+      const proto = resolveCallLLMProtocol(saved, process.env)
+      effective = resolveEffective(proto, loadEff, loadEffOpenAi)
+    } catch { effective = null }
     const proto = resolveCallLLMProtocol(saved, process.env)
     return {
       saved: saved?.token
