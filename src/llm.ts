@@ -37,3 +37,19 @@ export function resolveLLMBackend(env: Record<string, string | undefined>): LLMB
   if (e !== undefined && e !== '') throw new Error(`unknown MEMSIDE_LLM_BACKEND: ${e} (want 'anthropic' | 'openai')`)
   return env.OPENAI_API_KEY ? 'openai' : 'anthropic'
 }
+
+export type LLMProtocol = LLMBackend
+
+/**
+ * 每次调用动态解析协议（spec §决策 3，即时生效）：
+ * - UI 配置有 token 时，UI 存的 protocol 优先（缺省 anthropic），压过 env。
+ * - UI 无 token（UI 级未激活）时回退 resolveLLMBackend(env)（现状）。
+ * 纯函数、SDK-free、不 import settings（结构参数保持解耦）。
+ */
+export function resolveCallLLMProtocol(
+  uiConfig: { token?: string; protocol?: LLMProtocol } | null,
+  env: Record<string, string | undefined>,
+): LLMProtocol {
+  if (uiConfig?.token) return uiConfig.protocol ?? 'anthropic'
+  return resolveLLMBackend(env)
+}
