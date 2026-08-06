@@ -52,3 +52,24 @@ test('clear:true 删除整级', () => {
   saveUiLlmConfig(db, { clear: true })
   expect(loadUiLlmConfig(db)).toBeNull()
 })
+
+// 回归防护：2026-08-06 dual-protocol-llm-settings Task 1 —— protocol 字段随配置读写。
+// 锁「UiLlmConfig.protocol 持久化 + clear 连带删除」语义。
+test('save+load: protocol 随配置读写', () => {
+  const db = tmpDb()
+  saveUiLlmConfig(db, { token: 'sk-abcdefghijklmn', protocol: 'openai' })
+  expect(loadUiLlmConfig(db)).toEqual({ token: 'sk-abcdefghijklmn', protocol: 'openai' })
+})
+
+test('protocol 缺省不写入 -> load 无 protocol 字段', () => {
+  const db = tmpDb()
+  saveUiLlmConfig(db, { token: 'sk-abcdefghijklmn' })
+  expect(loadUiLlmConfig(db)).toEqual({ token: 'sk-abcdefghijklmn' })
+})
+
+test('clear:true 连带删除 protocol', () => {
+  const db = tmpDb()
+  saveUiLlmConfig(db, { token: 'sk-abcdefghijklmn', protocol: 'openai' })
+  saveUiLlmConfig(db, { clear: true })
+  expect(loadUiLlmConfig(db)).toBeNull()
+})
