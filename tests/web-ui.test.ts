@@ -170,3 +170,18 @@ test('App.tsx 生效行有「测试生效」按钮 + api.ts 有 testEffectiveLlm
   expect(app).toContain('testEffectiveLlmConnection')
   expect(api).toContain('testEffectiveLlmConnection')
 })
+
+// tab 切换缓存（2026-08-06）：App.tsx 必须走 shouldShowLoading 语义 + 用 memCache，
+// 且不得再在切 tab 时清空缓存（setItems([])/setDiscards([])/setRuns([])/setLoading(true)
+// 那组复位块是 2s 卡顿根因）。注意：SourceInputModal/DistillRunModal 各自有独立的
+// loading 状态（setLoading(true) 合法存在），故只锁「记忆/列表缓存不复位」。
+// 源码文本断言锁锚点，回归即变红。
+test('App.tsx stale-while-revalidate：用 memCache + shouldShowLoading，不再清空切 tab', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(src).toContain('shouldShowLoading')
+  expect(src).toContain('memCache')
+  expect(src).toContain('memoryTabFilter')
+  expect(src).not.toContain('setItems([])')
+  expect(src).not.toContain('setDiscards([])')
+  expect(src).not.toContain('setRuns([])')
+})

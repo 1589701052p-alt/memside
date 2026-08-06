@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput,
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
@@ -8,6 +8,7 @@ import {
   type DistillRunListItem, type LlmSettingsState,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from './ui-utils'
+import { memoryTabFilter, shouldShowLoading, type MemoryTabKey } from './tab-cache'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -48,111 +49,97 @@ type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs'
  */
 export default function App() {
   const [tab, setTab] = useState<TabKey>('candidate')
-  const [items, setItems] = useState<MemoryItem[]>([])
+  const [memCache, setMemCache] = useState<Record<MemoryTabKey, MemoryItem[]>>({
+    candidate: [], approved: [], rejected: [],
+  })
   const [discards, setDiscards] = useState<DiscardItem[]>([])
+  const [runs, setRuns] = useState<DistillRunListItem[]>([])
+  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
+  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
   const [status, setStatus] = useState<MemsideStatus | null>(null)
-  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
-  const [runs, setRuns] = useState<DistillRunListItem[]>([])
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
 
-  // tabRef 始终指向最新 tab,用于丢弃切 tab 后才返回的过期 fetch 结果,避免旧 tab
-  // 数据短暂覆盖新 tab 列表(stale-write 竞态)。
-  const tabRef = useRef(tab)
-  tabRef.current = tab
-
-  async function refresh() {
-    // 捕获调用时的 tab;若切 tab 后此 fetch 才返回,tabRef.current 已变,丢弃结果。
-    const myTab = tab
+  async function refresh(target: TabKey) {
+    setPending((p) => ({ ...p, [target]: true }))
     try {
-      if (myTab === 'discards') {
+      if (target === 'discards') {
         const [ds, st] = await Promise.all([listDiscards(), getStatus()])
-        if (tabRef.current !== myTab) return
-        setDiscards(ds)
-        setStatus(st)
-      } else if (myTab === 'runs') {
+        setDiscards(ds); setStatus(st)
+      } else if (target === 'runs') {
         const [runItems, st] = await Promise.all([listDistillRuns(fetch), getStatus(fetch)])
-        if (tabRef.current !== myTab) return
-        setRuns(runItems)
-        setStatus(st)
+        setRuns(runItems); setStatus(st)
       } else {
-        const filter = myTab === 'candidate'
-          ? 'candidate'
-          : myTab === 'approved'
-            ? 'approved,archived,superseded'
-            : 'rejected'
-        const [mems, st] = await Promise.all([listMemories(fetch, filter), getStatus()])
-        if (tabRef.current !== myTab) return
-        setItems(mems)
+        const [mems, st] = await Promise.all([listMemories(fetch, memoryTabFilter(target)), getStatus()])
+        setMemCache((c) => ({ ...c, [target]: mems }))
         setStatus(st)
       }
+      setLoaded((l) => ({ ...l, [target]: true }))
       setError(null)
     } catch (e) {
-      if (tabRef.current !== myTab) return
       setError(e instanceof Error ? e.message : String(e))
     } finally {
-      if (tabRef.current === myTab) setLoading(false)
+      setPending((p) => ({ ...p, [target]: false }))
     }
   }
 
-  // 切 tab:重置视图状态(清旧列表 + 加载中 + 清错误)→ 立即 refresh → 建 3s 轮询。
+  // 切 tab:不清空缓存,直接后台刷新(stale-while-revalidate),只轮询激活 tab。
   // cleanup 清旧 interval,无轮询泄漏。依赖 [tab],切 tab 才重建。
   useEffect(() => {
-    setItems([])
-    setDiscards([])
-    setRuns([])
-    setLoading(true)
     setError(null)
-    void refresh()
-    const t = setInterval(() => void refresh(), 3000)
+    void refresh(tab)
+    const t = setInterval(() => void refresh(tab), 3000)
     return () => clearInterval(t)
   }, [tab])
 
   async function approve(id: string) {
     await promoteMemory(id, { action: 'approve' })
-    void refresh()
+    void refresh(tab)
   }
   async function reject(id: string) {
     await promoteMemory(id, { action: 'reject' })
-    void refresh()
+    void refresh(tab)
   }
   async function edit(id: string, title: string, bodyMd: string, scopeType: 'project' | 'global', subjectSlug: string | null) {
     await patchMemory(id, { title, bodyMd, scopeType, subjectSlug })
-    void refresh()
+    void refresh(tab)
   }
   async function archive(id: string) {
     await archiveMemory(id)
-    void refresh()
+    void refresh(tab)
   }
   async function unarchive(id: string) {
     await unarchiveMemory(id)
-    void refresh()
+    void refresh(tab)
   }
   async function restore(id: string) {
     await restoreMemory(id)
-    void refresh()
+    void refresh(tab)
   }
   async function promote(id: string) {
     await promoteDiscard(id)
-    void refresh()
+    void refresh(tab)
   }
 
   async function bulkRejectUnevaluated() {
-    const ids = items
+    const ids = (memCache.candidate)
       .filter((i) => i.status === 'candidate' && priorityRank(i.valueClass) === 2)
       .map((i) => i.id)
     if (ids.length === 0) return
     await bulkPromote(ids, 'reject')
-    void refresh()
+    void refresh(tab)
   }
 
-  // 记忆列表按 createdAt 倒序(newest first)。items 在 candidate/approved/rejected
+  // 记忆列表按 createdAt 倒序(newest first)。memCache 在 candidate/approved/rejected
   // tab 分别是对应 status 的子集(server 已过滤),客户端再排一次保证顺序一致。
-  const memItems = sortCandidatesByTime(items)
+  const memItems = sortCandidatesByTime(memCache[tab as MemoryTabKey] ?? [])
   const jobs = status?.jobs ?? {}
   const running = (jobs.running ?? 0) + (jobs.pending ?? 0)
-  const listEmpty = tab === 'discards' ? discards.length === 0 : tab === 'runs' ? runs.length === 0 : memItems.length === 0
+  const listEmpty = tab === 'discards' ? discards.length === 0
+    : tab === 'runs' ? runs.length === 0
+    : (memCache[tab as MemoryTabKey] ?? []).length === 0
+  const showLoading = shouldShowLoading(loaded, pending, tab)
 
   const tabs: ReadonlyArray<{ key: TabKey; label: string; count: number }> = [
     { key: 'candidate', label: '候选审批', count: status?.memories.candidate ?? 0 },
@@ -260,7 +247,7 @@ export default function App() {
       ) : null}
 
       {/* 列表 - 按 tab 渲染对应数据 + 操作;加载中 / 空 / 错误三态不静默 stall */}
-      {error ? null : loading && listEmpty ? (
+      {error ? null : showLoading && listEmpty ? (
         <p>加载中…</p>
       ) : tab === 'candidate' ? (
         <>
@@ -280,7 +267,7 @@ export default function App() {
               onViewSource={() => setSourceInputFor(m.id)}
             />
           ))}
-          {memItems.length === 0 && !loading && (
+          {memItems.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>
               暂无候选记忆。结束一个 claude code 会话后,后台会异步提炼(distill 约 15-30s),候选记忆会自动出现在这里。上方状态栏可看后台进度。
             </p>
@@ -298,7 +285,7 @@ export default function App() {
               onUnarchive={m.status === 'archived' ? () => unarchive(m.id) : undefined}
             />
           ))}
-          {memItems.length === 0 && !loading && (
+          {memItems.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无已审批记忆</p>
           )}
         </>
@@ -312,7 +299,7 @@ export default function App() {
               onRestore={() => restore(m.id)}
             />
           ))}
-          {memItems.length === 0 && !loading && (
+          {memItems.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无已拒绝记忆</p>
           )}
         </>
@@ -322,7 +309,7 @@ export default function App() {
           {runs.map((r) => (
             <DistillRunRow key={r.distillJobId} r={r} onOpen={() => setRunDetailFor(r.distillJobId)} />
           ))}
-          {runs.length === 0 && !loading && (
+          {runs.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无蒸馏记录</p>
           )}
         </div>
@@ -332,7 +319,7 @@ export default function App() {
           {discards.map((d) => (
             <DiscardCard key={d.id} d={d} onPromote={() => promote(d.id)} />
           ))}
-          {discards.length === 0 && !loading && (
+          {discards.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无 AI 自动拒绝记录</p>
           )}
         </>
