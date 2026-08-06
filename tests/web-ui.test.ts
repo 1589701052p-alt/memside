@@ -149,3 +149,14 @@ test('App.tsx sourceLabel 含 opencode (source text)', () => {
   const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
   expect(src).toMatch(/opencode/)
 })
+
+// 双协议（2026-08-06）：LLM 设置面板必须有协议下拉（Anthropic/OpenAI），
+// 且 save/test 透传 protocol。源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx 含双协议下拉 + protocol 透传（source text）', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(src).toContain('value="anthropic"')
+  expect(src).toContain('value="openai"')
+  expect(src).toContain('Anthropic')
+  expect(src).toContain('OpenAI')
+  expect(src).toContain('protocol')
+})
