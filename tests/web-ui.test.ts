@@ -160,3 +160,13 @@ test('App.tsx 含双协议下拉 + protocol 透传（source text）', () => {
   expect(src).toContain('OpenAI')
   expect(src).toContain('protocol')
 })
+
+// 生效 API 回显与测试（2026-08-06）：生效行内必须有「测试生效」按钮，api.ts 有
+// testEffectiveLlmConnection。源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx 生效行有「测试生效」按钮 + api.ts 有 testEffectiveLlmConnection', () => {
+  const app = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  const api = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
+  expect(app).toContain('测试生效')
+  expect(app).toContain('testEffectiveLlmConnection')
+  expect(api).toContain('testEffectiveLlmConnection')
+})

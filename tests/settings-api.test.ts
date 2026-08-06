@@ -12,8 +12,9 @@ import { openDb } from '@/db/client'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
-import type { UiLlmConfig } from '@/settings'
+import { maskToken, type UiLlmConfig } from '@/settings'
 import type { ClaudeCreds } from '@/creds'
+import type { OpenAiCreds } from '@/openai'
 
 // EBUSY-safe pattern (same as server.test.ts): fresh per-test subdir, close the
 // raw bun:sqlite handle in afterEach.
@@ -67,6 +68,7 @@ function makeApp(overrides: {
   loadUiConfig?: () => UiLlmConfig | null
   saveUiConfig?: (patch: SavePatch) => void
   loadEffectiveCreds?: () => ClaudeCreds
+  loadEffectiveOpenAiCreds?: () => OpenAiCreds | null
   testConnection?: (cfg: { protocol: 'anthropic' | 'openai'; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
 } = {}) {
   return createApp({
@@ -314,4 +316,80 @@ test('PUT 非法 protocol -> 400', async () => {
   const r = await req(app, '/api/settings/llm', putJson({ token: 'sk-x', protocol: 'grpc' }))
   expect(r.status).toBe(400)
   expect(ui.patches.length).toBe(0)
+})
+
+// spec §生效 API 解析：openai 协议下 effective 反映 OpenAI creds（非 Anthropic 链），
+// source=ui/env:openai，token 打码。
+test('GET openai 协议 -> effective 用 loadEffectiveOpenAiCreds（OpenAI creds，source 正确）', async () => {
+  const ui = makeFakeUiStore({ token: 'sk-openai-abcdefghijkl', protocol: 'openai', baseURL: 'https://ark.example.cn/api/plan/v3', model: 'ark-code-latest' })
+  const app = makeApp({
+    ...ui,
+    loadEffectiveOpenAiCreds: () => ({ apiKey: 'sk-openai-abcdefghijkl', baseURL: 'https://ark.example.cn/api/plan/v3', model: 'ark-code-latest', source: 'ui' }),
+    loadEffectiveCreds: () => ({ apiKey: 'sk-wrong-anthropic', source: 'settings.json:authToken' }), // 证明 openai 不走它
+    testConnection: async () => ({ ok: true }),
+  })
+  const r = await req(app, '/api/settings/llm')
+  expect(r.status).toBe(200)
+  expect(r.body.effective).toMatchObject({
+    protocol: 'openai',
+    source: 'ui',
+    baseURL: 'https://ark.example.cn/api/plan/v3',
+    model: 'ark-code-latest',
+  })
+  expect(r.body.effective.tokenMasked).toBe(maskToken('sk-openai-abcdefghijkl'))
+  expect(JSON.stringify(r.body)).not.toContain('sk-openai-abcdefghijkl')
+})
+
+test('GET anthropic 协议（缺省）-> effective 仍用 loadEffectiveCreds（不回归）', async () => {
+  const ui = makeFakeUiStore(null)
+  const app = makeApp({
+    ...ui,
+    loadEffectiveCreds: () => ({ apiKey: 'sk-fallback-xyz', baseURL: 'https://a.example.com', source: 'settings.json:authToken' }),
+    testConnection: async () => ({ ok: true }),
+  })
+  const r = await req(app, '/api/settings/llm')
+  expect(r.status).toBe(200)
+  expect(r.body.effective).toMatchObject({ protocol: 'anthropic', source: 'settings.json:authToken', baseURL: 'https://a.example.com' })
+})
+
+// spec §test-effective：无 body 解析生效 creds，按协议派发 testConn；无 creds -> no credentials。
+test('POST test-effective openai -> 用生效 OpenAI creds 调 testConn', async () => {
+  const ui = makeFakeUiStore({ token: 'sk-openai-abcdefghijkl', protocol: 'openai', baseURL: 'https://ark.example.cn/api/plan/v3', model: 'ark-code-latest' })
+  const calls: { protocol: string; baseURL?: string; token: string; model?: string }[] = []
+  const app = makeApp({
+    ...ui,
+    loadEffectiveOpenAiCreds: () => ({ apiKey: 'sk-openai-abcdefghijkl', baseURL: 'https://ark.example.cn/api/plan/v3', model: 'ark-code-latest', source: 'ui' }),
+    loadEffectiveCreds: () => ({ apiKey: 'sk-wrong-anthropic', source: 'none' }),
+    testConnection: async (cfg) => { calls.push(cfg); return { ok: true } },
+  })
+  const r = await req(app, '/api/settings/llm/test-effective', postJson({}))
+  expect(r.status).toBe(200)
+  expect(r.body).toEqual({ ok: true })
+  expect(calls).toEqual([{ protocol: 'openai', baseURL: 'https://ark.example.cn/api/plan/v3', token: 'sk-openai-abcdefghijkl', model: 'ark-code-latest' }])
+})
+
+test('POST test-effective 无 creds -> {ok:false, error:"no credentials"}', async () => {
+  const ui = makeFakeUiStore(null)
+  const app = makeApp({
+    ...ui,
+    loadEffectiveOpenAiCreds: () => null,
+    loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
+    testConnection: async () => ({ ok: true }),
+  })
+  const r = await req(app, '/api/settings/llm/test-effective', postJson({}))
+  expect(r.status).toBe(200)
+  expect(r.body).toEqual({ ok: false, error: 'no credentials' })
+})
+
+test('POST test-effective 存储读异常 -> no credentials 不 500', async () => {
+  const app = makeApp({
+    loadUiConfig: () => { throw new Error('SQLITE_BUSY') },
+    saveUiConfig: () => {},
+    loadEffectiveOpenAiCreds: () => null,
+    loadEffectiveCreds: () => ({ apiKey: null, source: 'none' }),
+    testConnection: async () => ({ ok: true }),
+  })
+  const r = await req(app, '/api/settings/llm/test-effective', postJson({}))
+  expect(r.status).toBe(200)
+  expect(r.body).toEqual({ ok: false, error: 'no credentials' })
 })

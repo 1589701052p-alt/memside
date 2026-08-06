@@ -5,6 +5,7 @@ export interface OpenAiCreds {
   apiKey: string
   baseURL: string // 不含尾斜杠；chat/completions 拼在后面
   model: string
+  source: string // 来源标识：'ui' | 'env:openai'
 }
 
 export interface OpenAiDeps {
@@ -27,7 +28,7 @@ export function loadOpenAiCreds(): OpenAiCreds | null {
   const baseURL = (process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/$/, '')
   const model = process.env.OPENAI_MODEL
   if (!model) throw new Error('OPENAI_API_KEY set but OPENAI_MODEL missing; set OPENAI_MODEL')
-  return { apiKey, baseURL, model }
+  return { apiKey, baseURL, model, source: 'env:openai' }
 }
 
 /**
@@ -42,7 +43,7 @@ export function loadOpenAiUiCreds(
     const model = ui.model ?? env.OPENAI_MODEL
     if (!model) throw new Error('OpenAI model missing; set model in UI settings or OPENAI_MODEL')
     const baseURL = (ui.baseURL ?? env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/$/, '')
-    return { apiKey: ui.token, baseURL, model }
+    return { apiKey: ui.token, baseURL, model, source: 'ui' }
   }
   return loadOpenAiCreds()
 }

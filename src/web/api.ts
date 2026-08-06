@@ -269,3 +269,15 @@ export async function testLlmConnection(
   })
   return (await res.json()) as { ok: boolean; error?: string }
 }
+
+/** POST /api/settings/llm/test-effective — 无 body，测当前生效的 API（非 UI 配置）。 */
+export async function testEffectiveLlmConnection(
+  fetchFn: FetchLike = fetch,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetchFn('/api/settings/llm/test-effective', {
+    method: 'POST',
+    body: JSON.stringify({}),
+    headers: { 'content-type': 'application/json' },
+  })
+  return (await res.json()) as { ok: boolean; error?: string }
+}

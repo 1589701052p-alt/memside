@@ -3,7 +3,7 @@ import {
   listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput,
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput,
-  getLlmSettings, saveLlmSettings, testLlmConnection,
+  getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState,
 } from './api'
@@ -409,6 +409,17 @@ function LlmSettings() {
     } catch (e) { setMsg(`测试失败: ${e}`) }
     finally { setBusy(false) }
   }
+  const [effBusy, setEffBusy] = useState(false)
+  const [effMsg, setEffMsg] = useState<string | null>(null)
+
+  const onTestEffective = async () => {
+    setEffBusy(true); setEffMsg(null)
+    try {
+      const r = await testEffectiveLlmConnection()
+      setEffMsg(r.ok ? '生效连接成功' : `生效连接失败: ${r.error ?? '未知错误'}`)
+    } catch (e) { setEffMsg(`生效测试失败: ${e}`) }
+    finally { setEffBusy(false) }
+  }
 
   const eff = state?.effective ?? null
   return (
@@ -417,8 +428,10 @@ function LlmSettings() {
       {/* 生效回显行（硬需求）：让用户一眼看到当前实际生效的是哪套 API */}
       <div style={{ marginBottom: 8, fontSize: 13 }}>
         当前生效：{eff
-          ? <><b>{llmSourceLabel(eff.source)}</b>{' · '}{eff?.protocol ?? 'anthropic'}{' · '}{eff.baseURL ?? '官方端点'}{' · '}{eff.model ?? '默认模型'}{' · '}token <code>{eff.tokenMasked}</code></>
+          ? <><b>{llmSourceLabel(eff.source)}</b>{' · '}{eff?.protocol ?? 'anthropic'}{' · '}{eff.baseURL ?? '官方端点'}{' · '}{eff.model ?? '默认模型'}{' · '}token <code>{eff.tokenMasked}</code>
+            {' '}<button disabled={effBusy} onClick={() => void onTestEffective()}>测试生效</button>{effBusy ? ' 测中…' : ''}</>
           : <b>未配置</b>}
+        {effMsg ? <span style={{ color: effMsg.includes('失败') ? '#b00' : '#080' }}>{effMsg}</span> : null}
       </div>
       {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
