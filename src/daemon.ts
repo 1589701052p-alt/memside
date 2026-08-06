@@ -9,8 +9,8 @@ import { createCandidate, getSessionOffset } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
 import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
-import { resolveLLMBackend, type LLMCall } from '@/llm'
-import { loadUiLlmConfig } from './settings'
+import { resolveCallLLMProtocol, type LLMCall, type LLMCallOpts } from '@/llm'
+import { loadUiLlmConfig, type UiLlmConfig } from './settings'
 import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
@@ -63,23 +63,37 @@ interface ResolveCallLLMDeps {
 }
 
 /**
- * 组合根：按 `resolveLLMBackend(process.env)` 选后端，装配对应 `makeLLMCall` 为
- * `callLLM`。可选注入两套 creds 供测试避开网络；不传则各 `makeLLMCall` 用各自默认
- * loader（anthropic 读 `~/.claude` + env；openai 读 env）。后端选择逻辑由
- * `resolveLLMBackend` 单测覆盖（tests/llm.test.ts）；本函数是薄胶水。
+ * 组合根：每次调用现读 UI 配置（`loadUiLlmConfig(db)`），经 `resolveCallLLMProtocol`
+ * 动态解析协议（UI token 存在时 UI 的 protocol 压过 env；否则回退
+ * `resolveLLMBackend(env)`），再派发到 anthropic / openai 后端并注入
+ * `loadUiConfig`。这样 UI 设置页的协议切换即时生效，无需重启 daemon。
+ * 可选注入两套 creds 供测试避开网络；不传则各 `makeLLMCall` 用各自默认
+ * loader（anthropic 读 `~/.claude` + env；openai 读 env）。协议解析逻辑由
+ * `resolveCallLLMProtocol` 单测覆盖（tests/llm.test.ts）；本函数是薄胶水。
  *
- * 传入 `db` 时，anthropic 链额外注入 db-backed `loadUiConfig`（UI 设置页写入的
- * 凭证经 `loadClaudeCreds(uiConfig)` 整级短路生效）。DB 读取异常降级为无 UI 级
- * （返回 null），不沿 LLM 调用路径炸掉 distill——与全项目「存储异常降级」一致。
- * openai 后端路径不接 UI 配置（已知限制，见 plan Global Constraints）。
+ * 传入 `db` 时，被选中的链路注入 db-backed `loadUiConfig`（UI 设置页写入的
+ * 凭证整级短路生效）。DB 读取异常降级为无 UI 级（返回 null），不沿 LLM 调用
+ * 路径炸掉 distill——与全项目「存储异常降级」一致。
  */
 function resolveCallLLM(deps: ResolveCallLLMDeps = {}, db?: DbClient): LLMCall {
-  return resolveLLMBackend(process.env) === 'openai'
-    ? makeOpenAiCall(deps.loadOpenAiCreds ? { loadOpenAiCreds: deps.loadOpenAiCreds } : {})
-    : makeAnthropicCall({
-        ...(deps.loadClaudeCreds ? { loadClaudeCreds: deps.loadClaudeCreds } : {}),
-        ...(db ? { loadUiConfig: () => { try { return loadUiLlmConfig(db) } catch { return null } } } : {}),
+  return async function callLLM(system: string, user: string, opts?: LLMCallOpts): Promise<string> {
+    // 每次调用现读 UI 配置；DB 读异常降级为无 UI 级（不炸 distill）
+    let ui: UiLlmConfig | null = null
+    if (db) { try { ui = loadUiLlmConfig(db) } catch { ui = null } }
+    const proto = resolveCallLLMProtocol(ui, process.env)
+    if (proto === 'openai') {
+      const call = makeOpenAiCall({
+        ...(deps.loadOpenAiCreds ? { loadOpenAiCreds: deps.loadOpenAiCreds } : {}),
+        ...(db ? { loadUiConfig: () => ui } : {}),
       })
+      return await call(system, user, opts)
+    }
+    const call = makeAnthropicCall({
+      ...(deps.loadClaudeCreds ? { loadClaudeCreds: deps.loadClaudeCreds } : {}),
+      ...(db ? { loadUiConfig: () => ui } : {}),
+    })
+    return await call(system, user, opts)
+  }
 }
 
 /**
