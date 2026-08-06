@@ -1,5 +1,6 @@
 // src/memory/rescan.ts
 import { existsSync } from 'node:fs'
+import { parse as parsePath } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
@@ -66,7 +67,10 @@ export async function rescanCandidates(
     byRoot.get(rootDir)!.push(m)
   }
   for (const [rootDir, group] of byRoot) {
-    if (!rootDir || !existsSync(rootDir)) {
+    // 目录缺失或就是文件系统根('/' / 'C:\')整组跳过:根目录 existsSync 为真,
+    // 但 makeRepoTools(根) 等于盘根沙箱,agent 工具可读全盘整盘——与 scheduler
+    // 同款防护,spec 失败矩阵按「无可用仓库根」处理(跳过不动,可恢复)。
+    if (!rootDir || !existsSync(rootDir) || parsePath(rootDir).root === rootDir) {
       report.skipped += group.length
       report.processed += group.length
       onProgress?.(report.processed, all.length)

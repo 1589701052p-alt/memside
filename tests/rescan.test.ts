@@ -4,7 +4,7 @@
 // spec: docs/superpowers/specs/2026-08-06-agentic-value-judge-design.md §4.7
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, parse as parsePath } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { memories, memoryDiscards } from '@/db/schema'
@@ -91,4 +91,26 @@ test('回扫质量模式:subagent 候选的 judge prompt 带 source: subagent(�
   expect(conv).not.toContain('source: subagent')
   expect(sub).toContain('source: subagent')
   expect(sub).not.toContain('source: conversation')
+})
+
+// 回归防护(2026-08-06 final fix wave 复审):rescan 的 rootDir 守卫曾与
+// scheduler 同款漏洞——只查 existsSync,候选 sourceCwd 是文件系统根('C:\' / '/')
+// 时通过守卫,质量模式就会 judgeValueAgentic(rootDir=盘根) -> makeRepoTools(盘根),
+// agent 工具可读整盘。修复后与「目录已删」同款跳过(不判不动,可恢复)。
+// 断言:整组 skipped、judge LLM 零调用、候选状态不变(绝不让 agent 拿到盘根沙箱)。
+test('回扫质量模式:sourceCwd 是文件系统根 -> 整组跳过,agent 拿不到盘根沙箱', async () => {
+  const fsRoot = parsePath(process.cwd()).root  // Windows: 'C:\';POSIX: '/'
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: fsRoot, title: '[category:trap] 根目录会话坑', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', sourceCwd: fsRoot, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  let judgeCalls = 0
+  const report = await rescanCandidates(db, {
+    callLLM: async () => { judgeCalls++; return '{"final": {"verdicts": [{"index": 0, "category": "decision"}]}}' },
+    loadJudgeConfig: () => ({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 }),
+  })
+  expect(report).toEqual({ processed: 1, discarded: 0, skipped: 1, keptUpdated: 0 })
+  expect(judgeCalls).toBe(0)  // 跳过在 judge 之前:agent 循环从未启动
+  const row = (await db.select().from(memories))[0]!
+  expect(row.status).toBe('candidate')  // 跳过不动:仍是候选,不判丢不判留
 })
