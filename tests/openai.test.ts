@@ -11,7 +11,7 @@ import { DEFAULT_LLM_MAX_TOKENS } from '@/llm'
 // 全程 mock globalThis.fetch，不发真实网络请求；loadOpenAiCreds 走注入，不读 env
 // （loadOpenAiCreds 自身的 env 行为单独覆盖）。
 
-const CREDS = { apiKey: 'sk-test', baseURL: 'https://internal.example.com/v1', model: 'internal-model' }
+const CREDS = { apiKey: 'sk-test', baseURL: 'https://internal.example.com/v1', model: 'internal-model', source: 'env:openai' }
 const ENV_KEYS = ['OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_MODEL'] as const
 
 let origFetch: typeof fetch
@@ -150,22 +150,29 @@ test('makeLLMCall aborts after timeoutMs when fetch never resolves', async () =>
 
 test('loadOpenAiUiCreds: UI token 存在用 UI creds（去尾斜杠）', () => {
   const c = loadOpenAiUiCreds({ token: 'sk-ui', baseURL: 'https://ui.example.com/v1/', model: 'ui-model' }, {})
-  expect(c).toEqual({ apiKey: 'sk-ui', baseURL: 'https://ui.example.com/v1', model: 'ui-model' })
+  expect(c).toEqual({ apiKey: 'sk-ui', baseURL: 'https://ui.example.com/v1', model: 'ui-model', source: 'ui' })
 })
 
 test('loadOpenAiUiCreds: UI model/baseURL 缺省回退 env', () => {
   const c = loadOpenAiUiCreds({ token: 'sk-ui' }, { OPENAI_MODEL: 'env-model', OPENAI_BASE_URL: 'https://env.example.com/v1/' })
-  expect(c).toEqual({ apiKey: 'sk-ui', baseURL: 'https://env.example.com/v1', model: 'env-model' })
+  expect(c).toEqual({ apiKey: 'sk-ui', baseURL: 'https://env.example.com/v1', model: 'env-model', source: 'ui' })
 })
 
 test('loadOpenAiUiCreds: UI model 与 env 都缺 -> 抛错', () => {
   expect(() => loadOpenAiUiCreds({ token: 'sk-ui' }, {})).toThrow(/OpenAI model missing/)
 })
 
+test('loadOpenAiUiCreds: UI 分支 source=ui，env 回退 source=env:openai', () => {
+  expect(loadOpenAiUiCreds({ token: 'sk-ui', baseURL: 'https://ui.example.com/v1', model: 'ui-model' }, {})!.source).toBe('ui')
+  process.env.OPENAI_API_KEY = 'k'
+  process.env.OPENAI_MODEL = 'm'
+  expect(loadOpenAiUiCreds(null, {})!.source).toBe('env:openai')
+})
+
 test('loadOpenAiUiCreds: UI 为 null -> 回退 env', () => {
   process.env.OPENAI_API_KEY = 'k'
   process.env.OPENAI_MODEL = 'm'
-  expect(loadOpenAiUiCreds(null, {})).toEqual({ apiKey: 'k', baseURL: 'https://api.openai.com/v1', model: 'm' })
+  expect(loadOpenAiUiCreds(null, {})).toEqual({ apiKey: 'k', baseURL: 'https://api.openai.com/v1', model: 'm', source: 'env:openai' })
 })
 
 test('makeLLMCall 注入 loadUiConfig 时用 UI creds', async () => {
