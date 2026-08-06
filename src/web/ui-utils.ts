@@ -106,6 +106,8 @@ export function discardReasonLabel(reason: string): string {
     derivable: '可从代码推导',
     taming: '驯化指令',
     fleeting: '一次性/琐事',
+    'exact-duplicate': '逐字重复',
+    duplicate: '与已有记忆重复',
   }
   return m[reason] ?? reason
 }

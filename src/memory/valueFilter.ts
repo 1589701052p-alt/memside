@@ -3,7 +3,7 @@ import type { LLMCall } from '@/llm'
 import { callWithRetry } from './retry'
 
 export type ValueClass = 'user-rule' | 'decision' | 'preference' | 'convention' | 'trap' | 'topology'
-export type DiscardReason = 'public-knowledge' | 'derivable' | 'taming' | 'fleeting'
+export type DiscardReason = 'public-knowledge' | 'derivable' | 'taming' | 'fleeting' | 'exact-duplicate' | 'duplicate'
 
 export type ValueVerdict =
   | { index: number; keep: false; reason: DiscardReason }

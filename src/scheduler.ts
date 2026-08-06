@@ -4,6 +4,7 @@ import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
 import { listForDedupByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, type DiscardRecord } from '@/memory/store'
+import { exactDedupCandidates } from '@/memory/exactDedup'
 import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass } from '@/memory/valueFilter'
 import type { MemoryInput, Memory } from '@/memory/store'
@@ -164,9 +165,24 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
       })
       const durationMs = Date.now() - t0
+      // 逐字去重(spec §4.1):规范化逐字相同才合并,零语义判断;合并项走审计表。
+      // 先于 LLM dedup,省调用;drops 不进后续任何 LLM 判定。
+      const exact = await exactDedupCandidates(db, candidates, job.cwd ?? null)
+      if (exact.drops.length > 0) {
+        try {
+          await logDiscards(db, job.id, exact.drops.map((d) => ({
+            title: d.cand.title, bodyMd: d.cand.bodyMd, reason: 'exact-duplicate',
+            scopeType: d.cand.scopeType,
+            scopeId: resolveScopeId(d.cand.scopeType, job.cwd ?? null),
+            sourceCwd: job.cwd ?? null,
+            runtime: d.cand.runtime,
+            sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
+          })))
+        } catch (e) { console.warn('memside: logDiscards failed', e) }
+      }
       // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter
       // only runs on survivors (no wasted calls, no per-dupe mis-classification).
-      const deduped = await dedupCandidates(db, deps.callLLM, candidates, job.cwd ?? null)
+      const deduped = await dedupCandidates(db, deps.callLLM, exact.kept, job.cwd ?? null)
       // Value filter: 九分类（spec §R2）。public-knowledge/derivable/fleeting => discard
       // (audit-logged)；6 价值筐 => keep with valueClass。用户陈述类免疫 derivable
       // （judgeValue 代码兜底）。judgeValue swallows its own LLM errors
@@ -225,7 +241,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           outcome,
           rawOutput, rawCount, acceptedCount: candidates.length, dedupedCount: deduped.length,
           filteredCount: keepWithClass.length, storedCount: keepWithClass.length,
-          discardedCount: discarded.length, durationMs, errorMessage,
+          discardedCount: discarded.length + exact.drops.length, durationMs, errorMessage,
         })
       } catch (e) { console.warn('memside: saveDistillRun failed', e) }
       // /api/status 修复（spec §scheduler）：llm_error 时把错误也写进 job.last_error，
