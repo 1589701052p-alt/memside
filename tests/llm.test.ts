@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { DEFAULT_LLM_MAX_TOKENS, resolveLLMBackend } from '@/llm'
+import { DEFAULT_LLM_MAX_TOKENS, resolveLLMBackend, resolveCallLLMProtocol } from '@/llm'
 
 // 锁定契约层默认 max_tokens。该值由 makeLLMCall（src/anthropic.ts 与 src/openai.ts）
 // 在 opts.maxTokens 缺省时透传；distill/dedup/valueFilter 经 callWithRetry 以 2 参调用
@@ -40,4 +40,21 @@ test('resolveLLMBackend: empty-string MEMSIDE_LLM_BACKEND treated as unset', () 
 
 test('resolveLLMBackend: unknown MEMSIDE_LLM_BACKEND throws (no silent fallback)', () => {
   expect(() => resolveLLMBackend({ MEMSIDE_LLM_BACKEND: 'foo' })).toThrow(/unknown MEMSIDE_LLM_BACKEND/)
+})
+
+// resolveCallLLMProtocol 锁「UI 协议优先、UI 未激活回退 env」选择规则（spec §决策 2）：
+//   - ui.token 存在 -> 返回 ui.protocol ?? 'anthropic'（UI 优先，压过 env）
+//   - ui.token 缺失 -> 回退 resolveLLMBackend(env)（现状）
+test('resolveCallLLMProtocol: UI token + protocol=openai -> openai（压过 env anthropic）', () => {
+  expect(resolveCallLLMProtocol({ token: 'x', protocol: 'openai' }, { MEMSIDE_LLM_BACKEND: 'anthropic' })).toBe('openai')
+})
+
+test('resolveCallLLMProtocol: UI token 有但 protocol 缺省 -> anthropic', () => {
+  expect(resolveCallLLMProtocol({ token: 'x' }, { MEMSIDE_LLM_BACKEND: 'openai' })).toBe('anthropic')
+})
+
+test('resolveCallLLMProtocol: UI 无 token -> 回退 env 探测', () => {
+  expect(resolveCallLLMProtocol(null, { OPENAI_API_KEY: 'x' })).toBe('openai')
+  expect(resolveCallLLMProtocol({}, { OPENAI_API_KEY: 'x' })).toBe('openai')
+  expect(resolveCallLLMProtocol(null, {})).toBe('anthropic')
 })

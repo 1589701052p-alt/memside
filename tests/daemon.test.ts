@@ -140,6 +140,47 @@ test('sweepStuckRunning leaves pending/done/failed jobs untouched', async () => 
   expect(done[0]!.status).toBe('done')
 })
 
+// spec §动态协议派发器：UI protocol=openai 必须驱动 openai 后端（/chat/completions），
+// 且 UI 协议压过 env 的 MEMSIDE_LLM_BACKEND=anthropic。mock fetch 不发真实网络。
+test('resolveCallLLM: UI protocol=openai 驱动 openai 后端，压过 env', async () => {
+  const prevBackend = process.env.MEMSIDE_LLM_BACKEND
+  const prevKey = process.env.OPENAI_API_KEY
+  const origFetch = globalThis.fetch
+  process.env.MEMSIDE_LLM_BACKEND = 'anthropic' // 证明 UI 协议压过 env
+  delete process.env.OPENAI_API_KEY
+  const urls: string[] = []
+  try {
+    saveUiLlmConfig(db, {
+      token: 'sk-openai-ui',
+      protocol: 'openai',
+      baseURL: 'https://ark.cn-beijing.volces.com/api/plan/v3',
+      model: 'ark-code-latest',
+    })
+    const { jobId } = await enqueueDistillJob(db, {
+      sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0,
+    })
+    await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+    await db.insert(memoryDistillEvents).values({
+      distillJobId: jobId, attemptIndex: 0, ts: 1, kind: 'conversation',
+      payload: JSON.stringify([{ role: 'user', content: 'refund 14 days' }]),
+    })
+    globalThis.fetch = (async (input: unknown, _init?: RequestInit) => {
+      urls.push(String(input))
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ candidates: [] }) } }] }), { status: 200 })
+    }) as typeof fetch
+    await runDistillOnce(db, {})
+    expect(urls.length).toBeGreaterThan(0)
+    expect(urls[0]).toBe('https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions')
+    expect(urls.every((u) => u.endsWith('/chat/completions'))).toBe(true)
+  } finally {
+    globalThis.fetch = origFetch
+    if (prevBackend === undefined) delete process.env.MEMSIDE_LLM_BACKEND
+    else process.env.MEMSIDE_LLM_BACKEND = prevBackend
+    if (prevKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = prevKey
+  }
+})
+
 test('makeLoadTranscript: subagent job (sourceAgentId) returns full turns, ignores session offset', async () => {
   // 即使 subagent job 带 sessionId + 偏移表有记录，也必须返回全量（subagent 一次性，不切片）
   const { jobId } = await enqueueDistillJob(db, {

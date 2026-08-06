@@ -356,6 +356,7 @@ export default function App() {
  */
 function LlmSettings() {
   const [state, setState] = useState<LlmSettingsState | null>(null)
+  const [protocol, setProtocol] = useState<'anthropic' | 'openai'>('anthropic')
   const [baseURL, setBaseURL] = useState('')
   const [token, setToken] = useState('')
   const [model, setModel] = useState('')
@@ -364,7 +365,12 @@ function LlmSettings() {
   const [busy, setBusy] = useState(false)
 
   const refresh = async () => {
-    try { setState(await getLlmSettings()); setError(null) }
+    try {
+      const s = await getLlmSettings()
+      setState(s)
+      if (s?.saved?.protocol) setProtocol(s.saved.protocol) // 下拉跟随已存协议
+      setError(null)
+    }
     catch (e) { setError(String(e)) } // fetch 失败显错误（不静默）
   }
   useEffect(() => { void refresh() }, [])
@@ -372,18 +378,21 @@ function LlmSettings() {
   const onSave = async () => {
     setBusy(true); setMsg(null)
     try {
-      setState(await saveLlmSettings({
+      const s = await saveLlmSettings({
+        protocol,
         ...(baseURL !== '' ? { baseURL } : {}),
         ...(token !== '' ? { token } : {}),
         ...(model !== '' ? { model } : {}),
-      }))
+      })
+      setState(s)
+      if (s?.saved?.protocol) setProtocol(s.saved.protocol)
       setToken(''); setMsg('已保存')
     } catch (e) { setMsg(`保存失败: ${e}`) }
     finally { setBusy(false) }
   }
   const onClear = async () => {
     setBusy(true); setMsg(null)
-    try { setState(await saveLlmSettings({ clear: true })); setBaseURL(''); setModel(''); setMsg('已清除 UI 配置') }
+    try { setState(await saveLlmSettings({ clear: true })); setBaseURL(''); setModel(''); setProtocol('anthropic'); setMsg('已清除 UI 配置') }
     catch (e) { setMsg(`清除失败: ${e}`) }
     finally { setBusy(false) }
   }
@@ -391,6 +400,7 @@ function LlmSettings() {
     setBusy(true); setMsg(null)
     try {
       const r = await testLlmConnection({
+        protocol,
         ...(baseURL !== '' ? { baseURL } : {}),
         ...(token !== '' ? { token } : {}),
         ...(model !== '' ? { model } : {}),
@@ -407,12 +417,20 @@ function LlmSettings() {
       {/* 生效回显行（硬需求）：让用户一眼看到当前实际生效的是哪套 API */}
       <div style={{ marginBottom: 8, fontSize: 13 }}>
         当前生效：{eff
-          ? <><b>{llmSourceLabel(eff.source)}</b>{' · '}{eff.baseURL ?? '官方端点'}{' · '}{eff.model ?? '默认模型'}{' · '}token <code>{eff.tokenMasked}</code></>
+          ? <><b>{llmSourceLabel(eff.source)}</b>{' · '}{eff?.protocol ?? 'anthropic'}{' · '}{eff.baseURL ?? '官方端点'}{' · '}{eff.model ?? '默认模型'}{' · '}token <code>{eff.tokenMasked}</code></>
           : <b>未配置</b>}
       </div>
       {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <label style={{ fontSize: 13 }}>协议</label>
+        <select value={protocol} onChange={(e) => setProtocol(e.target.value as 'anthropic' | 'openai')}
+          style={{ flex: '0 0 auto' }}>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <input style={{ flex: '2 1 260px' }} placeholder={state?.saved?.baseURL ?? 'baseURL（留空=官方端点）'}
+        <input style={{ flex: '2 1 260px' }} placeholder={state?.saved?.baseURL ?? (protocol === 'openai' ? 'baseURL（OpenAI 格式，拼 /chat/completions）' : 'baseURL（留空=官方端点，拼 /v1/messages）')}
           value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
         <input style={{ flex: '2 1 260px' }} placeholder={state?.saved ? `token（留空保持 ${state.saved.tokenMasked}）` : 'token'}
           value={token} onChange={(e) => setToken(e.target.value)} />

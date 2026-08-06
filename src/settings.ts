@@ -2,14 +2,16 @@ import { eq } from 'drizzle-orm'
 import type { DbClient } from './db/client'
 import { appSettings } from './db/schema'
 
-/** UI 配置的三项 LLM 凭证。token 非空时整级生效（spec：整级短路）。 */
+/** UI 配置的 LLM 凭证。token 非空时整级生效（spec：整级短路）。 */
 export interface UiLlmConfig {
   baseURL?: string
   token?: string
   model?: string
+  /** 双协议支持：缺省（undefined）时由调用方决定回退协议。 */
+  protocol?: 'anthropic' | 'openai'
 }
 
-const KEYS = { baseURL: 'llm.base_url', token: 'llm.auth_token', model: 'llm.model' } as const
+const KEYS = { baseURL: 'llm.base_url', token: 'llm.auth_token', model: 'llm.model', protocol: 'llm.protocol' } as const
 
 /** token 打码：前6+…+后4；长度<=10 全码。任何 API 路径不得回明文（spec 硬约束）。 */
 export function maskToken(token: string): string {
@@ -24,6 +26,8 @@ export function loadUiLlmConfig(db: DbClient): UiLlmConfig | null {
   const token = map.get(KEYS.token)
   if (!token) return null
   const out: UiLlmConfig = { token }
+  const protocol = map.get(KEYS.protocol)
+  if (protocol === 'openai' || protocol === 'anthropic') out.protocol = protocol
   const baseURL = map.get(KEYS.baseURL)
   const model = map.get(KEYS.model)
   if (baseURL) out.baseURL = baseURL
@@ -33,13 +37,13 @@ export function loadUiLlmConfig(db: DbClient): UiLlmConfig | null {
 
 /**
  * 字段级合并写（spec）：
- * - clear:true -> 删除整级三个 key。
+ * - clear:true -> 删除整级 key（含 protocol）。
  * - token 提供且非空 -> upsert；缺省/空 -> 保持已存值。
  * - baseURL/model 提供（含 ''）-> 覆盖；'' = 删除该 key（回默认端点/默认模型）。
  */
 export function saveUiLlmConfig(
   db: DbClient,
-  patch: { baseURL?: string; token?: string; model?: string; clear?: boolean },
+  patch: { baseURL?: string; token?: string; model?: string; protocol?: 'anthropic' | 'openai'; clear?: boolean },
 ): void {
   if (patch.clear) {
     for (const k of Object.values(KEYS)) db.delete(appSettings).where(eq(appSettings.key, k)).run()
@@ -51,6 +55,7 @@ export function saveUiLlmConfig(
       .run()
   }
   if (patch.token) upsert(KEYS.token, patch.token)
+  if (patch.protocol) upsert(KEYS.protocol, patch.protocol)
   if (patch.baseURL !== undefined) {
     if (patch.baseURL === '') db.delete(appSettings).where(eq(appSettings.key, KEYS.baseURL)).run()
     else upsert(KEYS.baseURL, patch.baseURL)
