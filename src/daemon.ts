@@ -75,7 +75,7 @@ interface ResolveCallLLMDeps {
  * 凭证整级短路生效）。DB 读取异常降级为无 UI 级（返回 null），不沿 LLM 调用
  * 路径炸掉 distill——与全项目「存储异常降级」一致。
  */
-function resolveCallLLM(deps: ResolveCallLLMDeps = {}, db?: DbClient): LLMCall {
+export function resolveCallLLM(deps: ResolveCallLLMDeps = {}, db?: DbClient): LLMCall {
   return async function callLLM(system: string, user: string, opts?: LLMCallOpts): Promise<string> {
     // 每次调用现读 UI 配置；DB 读异常降级为无 UI 级（不炸 distill）
     let ui: UiLlmConfig | null = null
@@ -169,7 +169,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   // /hooks/opencode/inject 走它；capture 路由与 plugin 安装在 Task 5/6/7 落地。
   const opencodeAdapter = new OpencodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
-  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir })
+  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, callLLM: resolveCallLLM({}, db) })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {

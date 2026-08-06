@@ -201,3 +201,16 @@ test('App.tsx 含「判定」设置小节：模式下拉 + 预算输入 + /api/s
   expect(src).toContain('经济(单发判定)')
   expect(src).toContain('保存失败')
 })
+
+// 存量回扫（2026-08-06 Task 7）：候选 tab 有「回扫存量」按钮 + 进度/报告行 + 错误行，
+// 端点走 /api/rescan（api.ts wrapper）。源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx 候选 tab 含「回扫存量」按钮 + 进度行 + /api/rescan', () => {
+  const appSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  const apiSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
+  expect(appSrc).toContain('回扫存量')
+  expect(appSrc).toContain('/api/rescan')  // 按钮注释锚定端点
+  expect(appSrc).toContain('startRescan')
+  expect(appSrc).toContain('回扫中')
+  expect(appSrc).toContain('回扫失败')
+  expect(apiSrc).toContain('/api/rescan')
+})

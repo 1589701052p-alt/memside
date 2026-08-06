@@ -73,6 +73,15 @@ export async function patchMemory(
   return data.memory as MemoryItem
 }
 
+export interface RescanReportDto { processed: number; discarded: number; skipped: number; keptUpdated: number }
+
+export interface RescanState {
+  running: boolean
+  done: number
+  total: number
+  report: RescanReportDto | null
+}
+
 export interface MemsideStatus {
   events: number
   jobs: Record<string, number>
@@ -80,6 +89,8 @@ export interface MemsideStatus {
   discards: number
   distillRuns?: { total: number; byOutcome: Record<string, number> }
   lastError: { error: string } | null
+  /** 存量回扫(Task 7)进度/最近报告;老 daemon 无此字段。 */
+  rescan?: RescanState
 }
 
 /**
@@ -280,6 +291,17 @@ export async function testEffectiveLlmConnection(
     headers: { 'content-type': 'application/json' },
   })
   return (await res.json()) as { ok: boolean; error?: string }
+}
+
+/** POST /api/rescan — 存量回扫(Task 7):fire-and-forget,进度走 /api/status 轮询。
+ * 409 = 已在跑(不视为错误,进度由轮询显示);其它非 2xx 抛错,UI 显错误横幅不静默。 */
+export async function startRescan(fetchFn: FetchLike = fetch): Promise<void> {
+  const res = await fetchFn('/api/rescan', { method: 'POST' })
+  if (res.status === 409) return
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({})) as { error?: string }
+    throw new Error(data.error ?? `rescan failed (${res.status})`)
+  }
 }
 
 // --- 判定设置（judge mode + agent 预算）client ---------------------------------

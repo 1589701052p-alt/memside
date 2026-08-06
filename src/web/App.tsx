@@ -4,7 +4,7 @@ import {
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
-  fetchJudgeConfig, saveJudgeConfig,
+  fetchJudgeConfig, saveJudgeConfig, startRescan,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
@@ -63,6 +63,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
+  const [rescanError, setRescanError] = useState<string | null>(null)
 
   async function refresh(target: TabKey) {
     setPending((p) => ({ ...p, [target]: true }))
@@ -122,6 +123,18 @@ export default function App() {
   }
   async function promote(id: string) {
     await promoteDiscard(id)
+    void refresh(tab)
+  }
+
+  // 存量回扫(Task 7):POST /api/rescan fire-and-forget,进度经 /api/status 轮询
+  // (status.rescan)。失败显错误行不静默;409(已在跑)由 startRescan 内部吞掉。
+  async function rescan() {
+    setRescanError(null)
+    try {
+      await startRescan()
+    } catch (e) {
+      setRescanError(e instanceof Error ? e.message : String(e))
+    }
     void refresh(tab)
   }
 
@@ -258,11 +271,28 @@ export default function App() {
       ) : tab === 'candidate' ? (
         <>
           <p>{memItems.length} 条候选记忆待审</p>
-          {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
-            <button onClick={() => bulkRejectUnevaluated()} style={{ marginBottom: 12 }}>
-              批量拒绝未评估
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
+              <button onClick={() => bulkRejectUnevaluated()}>
+                批量拒绝未评估
+              </button>
+            ) : null}
+            <button onClick={() => rescan()} disabled={status?.rescan?.running === true}>
+              回扫存量
             </button>
-          ) : null}
+            {status?.rescan?.running ? (
+              <span style={{ fontSize: 13, color: '#666' }}>
+                回扫中 {status.rescan.done}/{status.rescan.total}
+              </span>
+            ) : status?.rescan?.report ? (
+              <span style={{ fontSize: 13, color: '#666' }}>
+                回扫完成: 处理 {status.rescan.report.processed} / 判丢 {status.rescan.report.discarded} / 跳过 {status.rescan.report.skipped}
+              </span>
+            ) : null}
+            {rescanError ? (
+              <span style={{ fontSize: 13, color: '#c00' }}>回扫失败: {rescanError}</span>
+            ) : null}
+          </div>
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}

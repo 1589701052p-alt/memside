@@ -18,7 +18,8 @@ import type { JudgeConfig } from '@/memory/judgeConfig'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { testConnection as defaultTestConnection } from './anthropic'
 import { testConnection as openAiTestConnection, loadOpenAiUiCreds, type OpenAiCreds } from './openai'
-import { resolveCallLLMProtocol, type LLMProtocol } from '@/llm'
+import { resolveCallLLMProtocol, type LLMProtocol, type LLMCall } from '@/llm'
+import { rescanCandidates, type RescanReport } from '@/memory/rescan'
 
 export interface AppDeps {
   db: DbClient
@@ -41,6 +42,10 @@ export interface AppDeps {
   loadEffectiveCreds?: () => ClaudeCreds
   loadEffectiveOpenAiCreds?: () => OpenAiCreds | null
   testConnection?: (cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
+  /** 存量回扫(Task 7)的 LLM 调用 seam。与 daemon 注入 scheduler 的 callLLM 同一份
+   * (组合根 resolveCallLLM)。缺省时 POST /api/rescan 回 503(不静默起假回扫);
+   * 测试注入 mock。 */
+  callLLM?: LLMCall
 }
 
 /**
@@ -326,6 +331,11 @@ export function createApp(deps: AppDeps) {
   })
 
   // --- Memory API ---------------------------------------------------------
+  // 回扫状态(单实例,随 createApp 闭包;fire-and-forget 与 distill loop 同款)。
+  // running 期间重按 -> 409;进度(done/total)与完成报告经 GET /api/status 暴露。
+  let rescanState: { running: boolean; done: number; total: number; report: RescanReport | null } =
+    { running: false, done: 0, total: 0, report: null }
+
   // Status (background visibility): lets the web UI show capture / distill
   // activity so the user isn't staring at an empty queue with no clue whether
   // the daemon is working. Returns event count, recent distill-job stats, and
@@ -352,7 +362,34 @@ export function createApp(deps: AppDeps) {
       discards: discardRows.length,
       distillRuns: { total: recentRuns.length, byOutcome: runStats },
       lastError: errored ? { error: errored.lastError } : null,
+      rescan: rescanState,
     })
+  })
+
+  // 存量回扫(Task 7,spec §4.7):fire-and-forget——202 立即返回,后台按当前判定
+  // 模式重判全部候选;进度(done/total)与完成报告在 GET /api/status 的 rescan 字段。
+  // 并发重按防护:running 期间 409。中断后直接重按,无脏状态(判丢离开候选池天然
+  // 不重判,判留重判幂等)。
+  app.post('/api/rescan', (c) => {
+    if (rescanState.running) return c.json({ error: 'rescan already running' }, 409)
+    if (!deps.callLLM) return c.json({ error: 'rescan unavailable: no LLM configured' }, 503)
+    const callLLM = deps.callLLM
+    rescanState = { running: true, done: 0, total: 0, report: null }
+    void (async () => {
+      try {
+        const report = await rescanCandidates(deps.db, {
+          callLLM,
+          loadJudgeConfig: () => loadJudgeConfig(deps.db),
+        }, (done, total) => { rescanState.done = done; rescanState.total = total })
+        rescanState.report = report
+      } catch (e) {
+        console.warn('memside: rescan failed', e)
+      } finally {
+        rescanState.running = false
+        deps.broadcast({ type: 'rescan' })
+      }
+    })()
+    return c.json({ started: true }, 202)
   })
 
   app.get('/api/memories', async (c) => {
