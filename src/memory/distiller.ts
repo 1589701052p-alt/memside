@@ -71,6 +71,13 @@ REJECT fleeting status updates, moods, one-off acknowledgements.
   ]
 }`
 
+/**
+ * subagent 蒸馏专用警示段(spec §4.2):追加在 user prompt 末尾。role:user 是主 agent
+ * 派发的任务工单,其中一次性任务约束(改哪些文件/验收标准)任务结束即失效,不得产记忆。
+ * 只动 user prompt,系统 prompt 一字不动。
+ */
+export const SUBAGENT_BRIEF_NOTE = `\n\n注意:本 transcript 来自 subagent。其中 role:user 的发言是主 agent 派发的任务工单,不是真人陈述。工单中只针对本次任务的约束(允许修改哪些文件、做到什么程度、验收标准)在任务结束时即失效,不得提取为候选记忆;只有跨会话持续成立的规则、决策、踩坑才可提取。`
+
 export type DistillOrigin = 'user-stated' | 'user-confirmed' | 'agent-observed'
 
 export interface DistillCandidate {
@@ -119,10 +126,12 @@ function renderUserPrompt(
   cwd: string,
   signals: ReturnType<typeof detectErrorSignals>,
   existingSlugs: string[],
+  sourceKind?: 'subagent' | 'conversation',
 ): string {
   const transcript = turns.map((t) => `[${t.role}] ${t.content}`).join('\n')
   const slugs = existingSlugs.length > 0 ? existingSlugs.join(', ') : '(none)'
-  return `Runtime: ${runtime}\nCwd: ${cwd}\nError signals detected: ${JSON.stringify(signals)}\nExisting subject slugs (reuse these when a candidate matches an existing subject): ${slugs}\n\nTranscript:\n${transcript}\n\nExtract candidate memories as JSON per the system instructions.`
+  const base = `Runtime: ${runtime}\nCwd: ${cwd}\nError signals detected: ${JSON.stringify(signals)}\nExisting subject slugs (reuse these when a candidate matches an existing subject): ${slugs}\n\nTranscript:\n${transcript}\n\nExtract candidate memories as JSON per the system instructions.`
+  return sourceKind === 'subagent' ? base + SUBAGENT_BRIEF_NOTE : base
 }
 
 /**
@@ -160,7 +169,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
   try {
     const signals = detectErrorSignals(input.turns)
     const filtered = filterTranscriptForDistill(input.turns)
-    const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals, input.existingSlugs)
+    const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals, input.existingSlugs, input.sourceKind)
     // callWithRetry swallows callLLM throws (returns undefined after exhausting
     // retries). callThrew tracks whether the underlying call threw, for two uses:
     // (a) errorMessage 取值（callThrew ? lastErrorMessage : null）,
