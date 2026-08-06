@@ -9,6 +9,11 @@ import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memor
 import type { DistillCandidate } from '@/memory/distiller'
 import { makeLoadTranscript } from '@/daemon'
 
+// Task 5 起 tick 默认质量模式(agent 判定器)。凡锁「单发 judgeValue 行为」的既有用例
+// 统一钉 economy 模式,保持原测试意图(单发判定语义由 economy 路径承载);
+// 模式分发本身由 tests/scheduler-judge-dispatch.test.ts 锁定。
+const ECONOMY = { mode: 'economy', maxRounds: 30, timeBudgetS: 300 } as const
+
 // Each test gets its own fresh subdirectory under `root`. We only ever wipe
 // `root` in `beforeAll` (before any DB is opened), and we close the raw handle
 // after each test. This avoids a Windows EBUSY: deleting a directory that still
@@ -152,6 +157,7 @@ test('tick skips dedup LLM when no existing memories in scope', async () => {
       return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(callCount).toBe(2)
   expect(createCalls).toBe(1)
@@ -259,6 +265,7 @@ test('tick discards value-filter public-knowledge, logs to memory_discards, no c
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(createCalls).toBe(0)
   const discards = await db.select().from(memoryDiscards)
@@ -282,6 +289,7 @@ test('tick passes valueClass into createCandidate for kept candidates', async ()
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
     },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(captured.valueClass).toBe('decision')
 })
@@ -306,6 +314,7 @@ test('tick 入库候选携带 origin/evidence（用户陈述类端到端入库�
       return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(callCount).toBe(2) // distill + judgeValue；dedup 短路
   expect(captured).not.toBeNull()
@@ -354,6 +363,7 @@ test('tick runs dedup before judgeValue (3-phase call order)', async () => {
       phases.push('judgeValue'); return JSON.stringify({ verdicts: [{ index: 0, category: 'trap' }] })
     },
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(phases).toEqual(['distill', 'dedup', 'judgeValue'])
 })
@@ -373,6 +383,7 @@ test('tick: protected invariant candidate survives with valueClass=decision (e2e
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
     },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(callCount).toBe(2) // distill + judgeValue; dedup skipped LLM (short-circuit)
   expect(captured).not.toBeNull()
@@ -397,6 +408,7 @@ test('tick: codebase invariant candidate is discarded when LLM says derivable (e
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(callCount).toBe(2) // distill + judgeValue; dedup short-circuits
   expect(createCalls).toBe(0) // discarded, not created
@@ -448,6 +460,7 @@ test('tick: codebase-ruleObject design-decision candidate is derivable-discarded
       return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(callCount).toBe(2) // distill + judgeValue; dedup short-circuits
   expect(createCalls).toBe(0) // discarded, not created
@@ -764,6 +777,7 @@ test('tick discards taming candidate to logDiscards (reason=taming), no createCa
       ] })  // judgeValue: 都 convention -> taming override 丢弃 #0
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
+    loadJudgeConfig: () => ECONOMY,
   })
   expect(createCalls).toBe(1)  // 只有非驯化候选 #1 入库
   const discards = await db.select().from(memoryDiscards)

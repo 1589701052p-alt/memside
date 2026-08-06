@@ -77,6 +77,9 @@ test('门禁：user-confirmed 候选被 judge 误判 derivable -> 仍入库 valu
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
     },
     createCandidate,
+    // Task 5 起 tick 默认质量模式(agent 判定器);本测试锁的是单发 judgeValue 的
+    // stated 免疫兜底,显式钉 economy 模式。
+    loadJudgeConfig: () => ({ mode: 'economy', maxRounds: 30, timeBudgetS: 300 }),
   })
   expect(callCount).toBe(2) // distill + judgeValue；dedup 短路不调 LLM
 
@@ -122,6 +125,8 @@ test('门禁：agent-observed 琐事被判 fleeting -> 进 memory_discards，pro
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
     },
     createCandidate,
+    // 同上:锁单发 judgeValue 的 fleeting 丢弃路径,钉 economy 模式(Task 5 默认 quality)。
+    loadJudgeConfig: () => ({ mode: 'economy', maxRounds: 30, timeBudgetS: 300 }),
   })
   expect(callCount).toBe(2) // distill + judgeValue；dedup 短路
 

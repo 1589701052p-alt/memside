@@ -10,9 +10,13 @@ export type ValueVerdict =
   | { index: number; keep: true; valueClass: ValueClass }
   | { index: number; keep: true; valueClass: null }
 
-export const VALUE_JUDGE_SYSTEM_PROMPT = `You are memside-value-judge. Assign exactly one category to each candidate memory.
+// Task 5: prompt 拆为 头+规则+输出段 三段再拼回。字节锁 tests/value-filter-prompt.test.ts
+// 保证重组后与原字面量逐字节一致(判定规则文本语义零变更);agent 判定器复用头+规则段
+// 并追加 agent 协议段,避免两份规则文本漂移。
+export const VALUE_JUDGE_HEADER = `You are memside-value-judge. Assign exactly one category to each candidate memory.
 
-Each candidate carries an origin tag: user-stated (the user said it in this session),
+`
+export const VALUE_JUDGE_RULES = `Each candidate carries an origin tag: user-stated (the user said it in this session),
 user-confirmed (the agent proposed it and the user explicitly adopted it), or
 agent-observed (the agent derived it on its own).
 
@@ -41,7 +45,8 @@ Drop categories (assign only when the stated test passes):
    user-confirmed.
 9. fleeting - TEST: in a brand-new session three months from now, would this entry
    still bind or inform? ("let's stop here for today" -> no; "every change lands via
-   branch + PR" -> yes.)
+   branch + PR" -> yes.)`
+const VALUE_JUDGE_OUTPUT_SECTION = `
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
 {
@@ -51,6 +56,7 @@ Drop categories (assign only when the stated test passes):
   ]
 }
 Emit one verdict per candidate, keyed by index.`
+export const VALUE_JUDGE_SYSTEM_PROMPT = VALUE_JUDGE_HEADER + VALUE_JUDGE_RULES + VALUE_JUDGE_OUTPUT_SECTION
 
 const TAMING_PATTERNS: readonly string[] = [
   // A 压制异议/批评/质疑
@@ -101,6 +107,54 @@ const DISCARD_CATEGORIES = new Set(['public-knowledge', 'derivable', 'fleeting']
 const VALUE_CLASS_MAP: Record<string, ValueClass> = {
   'user-rule': 'user-rule', decision: 'decision', preference: 'preference',
   convention: 'convention', trap: 'trap', topology: 'topology',
+}
+
+/** Task 5:agent 判定器合法类别 = 单发 9 类 + 第 10 类 duplicate(对已审批记忆语义重复)。 */
+export const AGENT_VALID_CATEGORIES: ReadonlySet<string> = new Set([
+  'user-rule', 'decision', 'preference', 'convention', 'trap', 'topology',
+  'public-knowledge', 'derivable', 'fleeting', 'duplicate',
+])
+
+/**
+ * 逐条 verdict 映射(经济/质量共用):discard 类 -> keep:false;retain 类 -> keep+valueClass;
+ * 非法类别/缺漏下标 -> 保守 keep(stated->decision,observed->null);
+ * stated 免疫硬兜底:origin 非 agent-observed 被判 derivable -> 改判 keep+decision
+ * (spec §R2 回归锁;duplicate 不免疫——用户复述一条已审批记忆同样是重复)。
+ */
+export function verdictsFromCategories(
+  entries: { index: number; category: string }[],
+  candidates: DistillCandidate[],
+  validCategories: ReadonlySet<string>,
+  discardCategories: ReadonlySet<string>,
+): ValueVerdict[] {
+  const n = candidates.length
+  const byIndex = new Map<number, ValueVerdict>()
+  for (const v of entries) {
+    if (typeof v.index !== 'number' || v.index < 0 || v.index >= n) continue
+    if (!validCategories.has(v.category)) {
+      // 与失败兜底一致(spec §R3):stated/confirmed -> decision(免疫批量拒绝未评估),
+      // observed -> null。幻觉类别兜底不能比 LLM-整体失败兜底更弱。
+      byIndex.set(v.index, { index: v.index, keep: true,
+        valueClass: candidates[v.index]!.origin === 'agent-observed' ? null : 'decision' })
+      continue
+    }
+    if (discardCategories.has(v.category)) {
+      // 代码硬兜底(spec §R2,7-30 误杀回归锁):用户陈述类免疫 derivable。
+      // prompt 已禁考 Q2;LLM 违规时这里改判 keep+decision。fleeting 不免疫
+      //(Q3 是 AI 对用户话语的判断权,"今天先到这吧" 该丢)。duplicate 同样不免疫。
+      if (v.category === 'derivable' && candidates[v.index]!.origin !== 'agent-observed') {
+        byIndex.set(v.index, { index: v.index, keep: true, valueClass: 'decision' })
+      } else {
+        byIndex.set(v.index, { index: v.index, keep: false, reason: v.category as DiscardReason })
+      }
+    } else {
+      byIndex.set(v.index, { index: v.index, keep: true, valueClass: VALUE_CLASS_MAP[v.category] })
+    }
+  }
+  return candidates.map((c, i) => byIndex.get(i) ?? {
+    index: i, keep: true,
+    valueClass: c.origin === 'agent-observed' ? null : 'decision',
+  })
 }
 
 function renderUserPrompt(candidates: DistillCandidate[]): string {
@@ -163,35 +217,14 @@ async function judgeValueBase(
       shouldRetry: valueShouldRetry(n),
     }) as { verdicts?: unknown } | undefined
     if (!parsed || !Array.isArray(parsed.verdicts)) return keepNull()
-    const byIndex = new Map<number, ValueVerdict>()
-    for (const v of parsed.verdicts) {
-      if (!v || typeof v !== 'object') continue
-      const o = v as { index?: unknown; category?: unknown }
-      if (typeof o.index !== 'number' || o.index < 0 || o.index >= n) continue
-      if (typeof o.category !== 'string' || !VALID_CATEGORIES.has(o.category)) {
-        // 与 keepNull 一致（spec §R3）：stated/confirmed -> decision（免疫批量拒绝未评估），
-        // observed -> null。幻觉类别兜底不能比 LLM-整体失败兜底更弱。
-        byIndex.set(o.index, { index: o.index, keep: true,
-          valueClass: candidates[o.index]!.origin === 'agent-observed' ? null : ('decision' as ValueClass) })
-        continue
-      }
-      if (DISCARD_CATEGORIES.has(o.category)) {
-        // 代码硬兜底（spec §R2，7-30 误杀回归锁）：用户陈述类免疫 derivable。
-        // prompt 已禁考 Q2；LLM 违规时这里改判 keep+decision。fleeting 不免疫
-        //（Q3 是 AI 对用户话语的判断权，"今天先到这吧" 该丢）。
-        if (o.category === 'derivable' && candidates[o.index]!.origin !== 'agent-observed') {
-          byIndex.set(o.index, { index: o.index, keep: true, valueClass: 'decision' })
-        } else {
-          byIndex.set(o.index, { index: o.index, keep: false, reason: o.category as DiscardReason })
-        }
-      } else {
-        byIndex.set(o.index, { index: o.index, keep: true, valueClass: VALUE_CLASS_MAP[o.category] })
-      }
-    }
-    return candidates.map((c, i) => byIndex.get(i) ?? {
-      index: i, keep: true,
-      valueClass: c.origin === 'agent-observed' ? null : ('decision' as ValueClass),
-    })
+    const entries = (parsed.verdicts as unknown[]).filter(
+      (v): v is { index: number; category: string } =>
+        !!v && typeof v === 'object' &&
+        typeof (v as { index?: unknown }).index === 'number' &&
+        typeof (v as { category?: unknown }).category === 'string',
+    )
+    // Task 5:逐条映射逻辑抽为 verdictsFromCategories(与 agent 判定器共用),语义不变。
+    return verdictsFromCategories(entries, candidates, VALID_CATEGORIES, DISCARD_CATEGORIES)
   } catch {
     return keepNull()
   }

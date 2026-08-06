@@ -1,12 +1,16 @@
 import { and, asc, eq, lte } from 'drizzle-orm'
 import { ulid } from 'ulid'
+import { existsSync } from 'node:fs'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, type DiscardRecord } from '@/memory/store'
+import { listForDedupByScope, listApprovedByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, type DiscardRecord } from '@/memory/store'
 import { exactDedupCandidates } from '@/memory/exactDedup'
 import { judgeDuplicates } from '@/memory/dedup'
-import { judgeValue, type ValueClass } from '@/memory/valueFilter'
+import { judgeValue, type ValueClass, type ValueVerdict } from '@/memory/valueFilter'
+import { judgeValueAgentic } from '@/memory/agentJudge'
+import { DEFAULT_JUDGE_CONFIG, type JudgeConfig } from '@/memory/judgeConfig'
+import type { AgentStep } from '@/memory/agentLoop'
 import type { MemoryInput, Memory } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 import type { LLMCall } from '@/llm'
@@ -47,6 +51,8 @@ export interface TickDeps {
   callLLM: LLMCall
   /** Signature matches store.createCandidate(db, MemoryInput): Promise<Memory>. */
   createCandidate: (db: DbClient, input: MemoryInput) => Promise<Memory>
+  /** 判定配置(模式+预算);缺省 DEFAULT_JUDGE_CONFIG(质量模式)。Task 6 daemon 接 app_settings。 */
+  loadJudgeConfig?: () => JudgeConfig
 }
 
 /**
@@ -183,11 +189,31 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       // Dedup FIRST (same-batch siblings + cross-batch existing), so valueFilter
       // only runs on survivors (no wasted calls, no per-dupe mis-classification).
       const deduped = await dedupCandidates(db, deps.callLLM, exact.kept, job.cwd ?? null)
-      // Value filter: 九分类（spec §R2）。public-knowledge/derivable/fleeting => discard
-      // (audit-logged)；6 价值筐 => keep with valueClass。用户陈述类免疫 derivable
-      // （judgeValue 代码兜底）。judgeValue swallows its own LLM errors
-      // （stated->decision / observed->null），never bubbles.
-      const verdicts = await judgeValue(deduped, deps.callLLM)
+      // Value filter: 模式分发(spec §4.6)。economy = 九分类单发 judgeValue;
+      // quality = agent 终审(judgeValueAgentic,第 10 类 duplicate + 仓库工具查验)。
+      // 两路径都吞自身 LLM 错误(stated->decision / observed->null),never bubbles。
+      const judgeCfg = deps.loadJudgeConfig?.() ?? DEFAULT_JUDGE_CONFIG
+      let verdicts: ValueVerdict[]
+      let agentTrace: AgentStep[] | null = null
+      if (judgeCfg.mode === 'economy' || deduped.length === 0) {
+        verdicts = await judgeValue(deduped, deps.callLLM)
+      } else {
+        // 质量模式(spec §4.5):agent 终审。已审批标题清单查询失败 -> 空清单降级;
+        // job.cwd 目录不存在 -> rootDir=null(工具全部返错文本,agent 凭材料判)。
+        let approvedTitles: string[] = []
+        try {
+          const set = await listApprovedByScope(db, { projectId: job.cwd ?? 'unknown' })
+          approvedTitles = [...set.byScope.project, ...set.byScope.global].map((m) => m.title).slice(0, 100)
+        } catch (e) { console.warn('memside: listApprovedByScope failed', e) }
+        const rootDir = job.cwd && existsSync(job.cwd) ? job.cwd : null
+        const r = await judgeValueAgentic(deduped, {
+          callLLM: deps.callLLM, rootDir, approvedTitles,
+          sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
+          maxRounds: judgeCfg.maxRounds, timeBudgetMs: judgeCfg.timeBudgetS * 1000,
+        })
+        verdicts = r.verdicts
+        agentTrace = r.trace
+      }
       const keepWithClass: { cand: DistillCandidate; valueClass: ValueClass | null }[] = []
       const discarded: DiscardRecord[] = []
       verdicts.forEach((v, i) => {
@@ -239,7 +265,12 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           // success (callThrew=true from attempt 0 but candidates produced on
           // attempt 1) is classified 'produced', not 'llm_error'.
           outcome,
-          rawOutput, rawCount, acceptedCount: candidates.length, dedupedCount: deduped.length,
+          // agent 运行(质量模式)把 trace 并入 rawOutput;形状向后兼容:既有
+          // `.candidates` 键不动,仅加可选 `agentTrace` 键(spec §4.5 落盘)。
+          rawOutput: agentTrace
+            ? { ...(rawOutput && typeof rawOutput === 'object' ? rawOutput as Record<string, unknown> : { raw: rawOutput ?? null }), agentTrace }
+            : rawOutput,
+          rawCount, acceptedCount: candidates.length, dedupedCount: deduped.length,
           filteredCount: keepWithClass.length, storedCount: keepWithClass.length,
           discardedCount: discarded.length + exact.drops.length, durationMs, errorMessage,
         })
