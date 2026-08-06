@@ -13,7 +13,8 @@ import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript
 import { parseOpencodeMessages } from '@/opencode/transcript'
 import type { OpencodeMessage } from '@/opencode/transcript'
 import type { EnqueueInput } from '@/scheduler'
-import { loadUiLlmConfig, saveUiLlmConfig, maskToken, type UiLlmConfig } from '@/settings'
+import { loadUiLlmConfig, saveUiLlmConfig, maskToken, loadJudgeConfig, saveJudgeConfig, type UiLlmConfig } from '@/settings'
+import type { JudgeConfig } from '@/memory/judgeConfig'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { testConnection as defaultTestConnection } from './anthropic'
 import { testConnection as openAiTestConnection, loadOpenAiUiCreds, type OpenAiCreds } from './openai'
@@ -543,6 +544,24 @@ export function createApp(deps: AppDeps) {
     if (!effective?.apiKey) return c.json({ ok: false, error: 'no credentials' })
     const proto = resolveCallLLMProtocol(saved, process.env)
     return c.json(await testConn({ protocol: proto, baseURL: effective.baseURL, token: effective.apiKey, model: effective.model }))
+  })
+
+  // --- Judge settings (判定模式 + agent 预算) ---------------------------------
+  // GET 回当前生效配置（脏数据逐字段回默认/夹取，见 settings.loadJudgeConfig）。
+  // PUT 字段级保存：非法 mode / 非数字预算 400 拒绝，不落存储；读取回显最新生效值。
+  // scheduler 每次 tick 现读（TickDeps.loadJudgeConfig），UI 改动即时生效不重启。
+  app.get('/api/settings/judge', (c) => c.json(loadJudgeConfig(deps.db)))
+
+  app.put('/api/settings/judge', async (c) => {
+    const body = await c.req.json().catch(() => null)
+    if (!body || typeof body !== 'object') return c.json({ error: 'invalid body' }, 400)
+    const b = body as Record<string, unknown>
+    if (b.mode !== undefined && b.mode !== 'quality' && b.mode !== 'economy') return c.json({ error: 'invalid mode' }, 400)
+    for (const k of ['maxRounds', 'timeBudgetS'] as const) {
+      if (b[k] !== undefined && (typeof b[k] !== 'number' || !Number.isFinite(b[k]))) return c.json({ error: `invalid ${k}` }, 400)
+    }
+    saveJudgeConfig(deps.db, b as Partial<JudgeConfig>)
+    return c.json(loadJudgeConfig(deps.db))
   })
 
   // --- Archive / unarchive / restore --------------------------------------

@@ -281,3 +281,25 @@ export async function testEffectiveLlmConnection(
   })
   return (await res.json()) as { ok: boolean; error?: string }
 }
+
+// --- 判定设置（judge mode + agent 预算）client ---------------------------------
+
+export interface JudgeConfigDto { mode: 'quality' | 'economy'; maxRounds: number; timeBudgetS: number }
+
+/** GET /api/settings/judge — 当前生效判定配置（脏数据已逐字段回默认/夹取）。 */
+export async function fetchJudgeConfig(fetchFn: FetchLike = fetch): Promise<JudgeConfigDto> {
+  const res = await fetchFn('/api/settings/judge')
+  return (await res.json()) as JudgeConfigDto
+}
+
+/** PUT /api/settings/judge — 字段级保存；非法输入 server 400 拒绝。返回最新生效值。 */
+export async function saveJudgeConfig(patch: Partial<JudgeConfigDto>, fetchFn: FetchLike = fetch): Promise<JudgeConfigDto> {
+  const res = await fetchFn('/api/settings/judge', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+    headers: { 'content-type': 'application/json' },
+  })
+  const data = (await res.json()) as JudgeConfigDto & { error?: string }
+  if (!res.ok) throw new Error(data.error ?? 'save failed')
+  return data
+}

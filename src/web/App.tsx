@@ -4,8 +4,9 @@ import {
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
+  fetchJudgeConfig, saveJudgeConfig,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
-  type DistillRunListItem, type LlmSettingsState,
+  type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, type MemoryTabKey } from './tab-cache'
@@ -233,6 +234,9 @@ export default function App() {
       {/* LLM 设置区块 - 生效回显行 + 保存/测试连接/清除 */}
       <LlmSettings />
 
+      {/* 判定设置区块 - 模式 + agent 预算 */}
+      <JudgeSettings />
+
       {error ? (
         <div
           style={{
@@ -445,6 +449,86 @@ function LlmSettings() {
         <button disabled={busy} onClick={() => void onClear()}>清除</button>
         {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
         {msg ? <span style={{ color: msg.startsWith('连接失败') || msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * 判定设置区块（agentic value judge Task 6）。
+ * 模式下拉（质量=agent 终审 / 经济=单发判定）+ 轮次上限(1-200) + 时间预算(30-3600 秒)。
+ * 保存后回显当前生效值;fetch/保存失败显错误,不静默。scheduler 每 tick 现读,
+ * UI 改动即时生效不重启 daemon。
+ */
+function JudgeSettings() {
+  const [cfg, setCfg] = useState<JudgeConfigDto | null>(null)
+  const [mode, setMode] = useState<'quality' | 'economy'>('quality')
+  const [maxRounds, setMaxRounds] = useState('30')
+  const [timeBudgetS, setTimeBudgetS] = useState('300')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = async () => {
+    try {
+      const c = await fetchJudgeConfig()
+      setCfg(c)
+      setMode(c.mode)
+      setMaxRounds(String(c.maxRounds))
+      setTimeBudgetS(String(c.timeBudgetS))
+      setError(null)
+    }
+    catch (e) { setError(String(e)) } // fetch 失败显错误（不静默）
+  }
+  useEffect(() => { void refresh() }, [])
+
+  const onSave = async () => {
+    setBusy(true); setMsg(null)
+    try {
+      const c = await saveJudgeConfig({
+        mode,
+        maxRounds: Number(maxRounds),
+        timeBudgetS: Number(timeBudgetS),
+      })
+      setCfg(c)
+      setMode(c.mode)
+      setMaxRounds(String(c.maxRounds))
+      setTimeBudgetS(String(c.timeBudgetS))
+      setMsg('已保存')
+    } catch (e) { setMsg(`保存失败: ${e}`) }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <section style={{ margin: '12px 0', padding: 12, border: '1px solid #ddd', borderRadius: 8 }}>
+      <h3 style={{ margin: '0 0 8px' }}>判定</h3>
+      {/* 生效回显行：保存后/加载后回显当前生效配置 */}
+      <div style={{ marginBottom: 8, fontSize: 13 }}>
+        当前生效：{cfg
+          ? <><b>{cfg.mode === 'quality' ? '质量(agent 终审)' : '经济(单发判定)'}</b>{' · '}轮次上限 {cfg.maxRounds}{' · '}时间预算 {cfg.timeBudgetS} 秒</>
+          : <b>读取中…</b>}
+      </div>
+      {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <label style={{ fontSize: 13 }}>模式</label>
+        <select value={mode} onChange={(e) => setMode(e.target.value as 'quality' | 'economy')}
+          style={{ flex: '0 0 auto' }}>
+          <option value="quality">质量(agent 终审)</option>
+          <option value="economy">经济(单发判定)</option>
+        </select>
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <input style={{ flex: '1 1 160px' }} type="number" min={1} max={200}
+          placeholder="轮次上限(1-200)"
+          value={maxRounds} onChange={(e) => setMaxRounds(e.target.value)} />
+        <input style={{ flex: '1 1 160px' }} type="number" min={30} max={3600}
+          placeholder="时间预算秒(30-3600)"
+          value={timeBudgetS} onChange={(e) => setTimeBudgetS(e.target.value)} />
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button disabled={busy} onClick={() => void onSave()}>保存</button>
+        {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
+        {msg ? <span style={{ color: msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
       </div>
     </section>
   )

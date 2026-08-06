@@ -10,7 +10,7 @@ import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
 import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
 import { resolveCallLLMProtocol, type LLMCall, type LLMCallOpts } from '@/llm'
-import { loadUiLlmConfig, type UiLlmConfig } from './settings'
+import { loadUiLlmConfig, loadJudgeConfig, type UiLlmConfig } from './settings'
 import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
@@ -176,6 +176,9 @@ export async function startDaemon(opts: DaemonOpts = {}) {
     loadTranscript: makeLoadTranscript(db),
     callLLM: resolveCallLLM({}, db),
     createCandidate,
+    // 每 tick 现读 app_settings 的判定配置：UI 设置页改动即时生效，不重启 daemon
+    // （与 resolveCallLLM 的「每次调用现读 UI 配置」同一语义）。
+    loadJudgeConfig: () => loadJudgeConfig(db),
   }
   const stopLoop = startMemoryDistillLoop(db, tickDeps)
 

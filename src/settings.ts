@@ -1,6 +1,8 @@
 import { eq } from 'drizzle-orm'
 import type { DbClient } from './db/client'
 import { appSettings } from './db/schema'
+import type { JudgeConfig } from '@/memory/judgeConfig'
+import { DEFAULT_JUDGE_CONFIG } from '@/memory/judgeConfig'
 
 /** UI 配置的 LLM 凭证。token 非空时整级生效（spec：整级短路）。 */
 export interface UiLlmConfig {
@@ -64,4 +66,39 @@ export function saveUiLlmConfig(
     if (patch.model === '') db.delete(appSettings).where(eq(appSettings.key, KEYS.model)).run()
     else upsert(KEYS.model, patch.model)
   }
+}
+
+// --- 判定配置（judge mode + agent 预算）--------------------------------------
+
+const JUDGE_KEYS = { mode: 'judge.mode', maxRounds: 'judge.max_rounds', timeBudgetS: 'judge.time_budget_s' } as const
+const MAX_ROUNDS_RANGE = [1, 200] as const
+const TIME_BUDGET_RANGE = [30, 3600] as const
+
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n))
+
+/** 判定配置读取:缺失/非法逐字段回默认;数字夹取到合法区间。 */
+export function loadJudgeConfig(db: DbClient): JudgeConfig {
+  const rows = db.select().from(appSettings).all()
+  const map = new Map(rows.map((r) => [r.key, r.value]))
+  const mode = map.get(JUDGE_KEYS.mode)
+  const rounds = Number(map.get(JUDGE_KEYS.maxRounds))
+  const budget = Number(map.get(JUDGE_KEYS.timeBudgetS))
+  return {
+    mode: mode === 'quality' || mode === 'economy' ? mode : DEFAULT_JUDGE_CONFIG.mode,
+    maxRounds: Number.isFinite(rounds) && map.has(JUDGE_KEYS.maxRounds)
+      ? clamp(Math.round(rounds), MAX_ROUNDS_RANGE[0], MAX_ROUNDS_RANGE[1]) : DEFAULT_JUDGE_CONFIG.maxRounds,
+    timeBudgetS: Number.isFinite(budget) && map.has(JUDGE_KEYS.timeBudgetS)
+      ? clamp(Math.round(budget), TIME_BUDGET_RANGE[0], TIME_BUDGET_RANGE[1]) : DEFAULT_JUDGE_CONFIG.timeBudgetS,
+  }
+}
+
+/** 判定配置字段级保存(提供的字段才写,同 saveUiLlmConfig 的字段级语义)。 */
+export function saveJudgeConfig(db: DbClient, patch: Partial<JudgeConfig>): void {
+  const upsert = (key: string, value: string) => {
+    db.insert(appSettings).values({ key, value, updatedAt: Date.now() })
+      .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: Date.now() } }).run()
+  }
+  if (patch.mode !== undefined) upsert(JUDGE_KEYS.mode, patch.mode)
+  if (patch.maxRounds !== undefined) upsert(JUDGE_KEYS.maxRounds, String(patch.maxRounds))
+  if (patch.timeBudgetS !== undefined) upsert(JUDGE_KEYS.timeBudgetS, String(patch.timeBudgetS))
 }

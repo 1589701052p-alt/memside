@@ -185,3 +185,19 @@ test('App.tsx stale-while-revalidate：用 memCache + shouldShowLoading，不再
   expect(src).not.toContain('setDiscards([])')
   expect(src).not.toContain('setRuns([])')
 })
+
+// agentic value judge 配置面（2026-08-06 Task 6）：设置区「判定」小节存在且走
+// /api/settings/judge，含模式下拉（质量/经济）与两个预算输入；保存失败显错误不静默。
+// 源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx 含「判定」设置小节：模式下拉 + 预算输入 + /api/settings/judge', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  const api = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
+  expect(src).toContain('判定')
+  expect(api).toContain('/api/settings/judge') // URL 在 api.ts wrapper 层
+  expect(src).toContain('JudgeSettings')
+  expect(src).toContain('fetchJudgeConfig')
+  expect(src).toContain('saveJudgeConfig')
+  expect(src).toContain('质量(agent 终审)')
+  expect(src).toContain('经济(单发判定)')
+  expect(src).toContain('保存失败')
+})
