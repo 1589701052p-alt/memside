@@ -59,7 +59,7 @@ App.tsx 三处入口短路：
 
 1. `refresh(target)` 开头：`if (!isListTab(target)) return`。
 2. `loadMore(target)` 开头：`if (!isListTab(target)) return`。
-3. 轮询 `useEffect`（依赖 `[tab]`）开头：`if (!isListTab(tab)) return`——不拉数据、不建 interval。
+3. 轮询 `useEffect`（依赖 `[tab]`）：settings 时**不拉列表、不建 interval**，但仍做**一次性** `getStatus()`（成功 `setStatus`、失败 `setError`）——§4 要求 daemon 断连时全局错误 banner 在设置 tab 也可见，而 banner 由 `error` 状态驱动，若设置 tab 零 fetch 则 banner 永不出现；一次性 status 同时让状态栏进 tab 时是新鲜值。
 
 无限滚动哨兵的 `IntersectionObserver` effect 同理（`loadMoreRef` 本身已短路，哨兵触发也是空调用；为清晰起见 observer effect 同样在 settings 时不挂载 observer）。
 
