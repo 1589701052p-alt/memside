@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount } from '../src/web/tab-cache'
+import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab } from '../src/web/tab-cache'
 
 // Task 1（perf/tab-switch-cache）：tab 切换 stale-while-revalidate 缓存的纯函数。
 // 数据按 tab 缓存，回访直接渲染缓存 + 后台刷新。纯函数层可单测（CLAUDE.md「首选可断言面」）。
@@ -130,4 +130,15 @@ test('tabTotalCount: status 缺字段/老 daemon 降级', () => {
   // 老 daemon 无 allTime -> 降级 total；distillRuns 整个缺 -> 0
   expect(tabTotalCount({ memories: {}, discards: 0, distillRuns: { total: 7 } }, 'runs')).toBe(7)
   expect(tabTotalCount({ memories: {}, discards: 0 }, 'runs')).toBe(0)
+})
+
+// --- 设置 tab（docs/superpowers/specs/2026-08-07-settings-tab-design.md §3.2）---
+
+test('isListTab: 五个列表 tab 全 true，settings false', () => {
+  expect(isListTab('candidate')).toBe(true)
+  expect(isListTab('approved')).toBe(true)
+  expect(isListTab('rejected')).toBe(true)
+  expect(isListTab('discards')).toBe(true)
+  expect(isListTab('runs')).toBe(true)
+  expect(isListTab('settings')).toBe(false)
 })

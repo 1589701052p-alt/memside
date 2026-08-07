@@ -98,3 +98,14 @@ export function tabTotalCount(
     case 'runs': return s.distillRuns?.allTime ?? s.distillRuns?.total ?? 0
   }
 }
+
+// --- 设置 tab（spec 2026-08-07 settings-tab §3.2）---------------------------
+
+/**
+ * 该 tab 是否走列表数据流（refresh / loadMore / 轮询 / 无限滚动 / 列表尾部）。
+ * settings tab 无列表：不进这些入口——它只在激活时挂载设置区块，区块自管理
+ * fetch/保存/错误行。新增非列表 tab 时此函数是唯一需要改的判据。
+ */
+export function isListTab(tab: string): boolean {
+  return tab !== 'settings'
+}
