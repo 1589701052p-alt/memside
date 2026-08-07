@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, nextCursorAfter } from '../src/web/tab-cache'
+import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, mergeRefreshPage, nextCursorAfter } from '../src/web/tab-cache'
 
 // Task 1（perf/tab-switch-cache）：tab 切换 stale-while-revalidate 缓存的纯函数。
 // 数据按 tab 缓存，回访直接渲染缓存 + 后台刷新。纯函数层可单测（CLAUDE.md「首选可断言面」）。
@@ -58,4 +58,52 @@ test('nextCursorAfter: hasMore 真返回游标，假/缺游标返回 null', () =
   expect(nextCursorAfter({ hasMore: true, nextCursor: { ts: 1, id: 'a' } })).toEqual({ ts: 1, id: 'a' })
   expect(nextCursorAfter({ hasMore: false, nextCursor: { ts: 1, id: 'a' } })).toBeNull()
   expect(nextCursorAfter({ hasMore: true, nextCursor: null })).toBeNull()
+})
+
+// --- 回归（2026-08-07 实测 bug）：3s 轮询 refresh 不得用页 1 响应覆盖已翻深的游标 ---
+//  bug 现象：翻到 100 条后轮询把 nextCursor 重置回页 1 末尾，loadMore 反复拉到
+//  已加载的重复页、mergeAppend 全去重，无限滚动永远卡在第一页之后一页。
+//  游标语义 = 已加载列表的尾部位置；页 1 轮询只刷顶部，不动尾部。
+
+test('mergeRefreshPage: 已翻深的列表保留旧游标与 hasMore（不被页 1 覆盖）', () => {
+  const old = {
+    items: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }],
+    nextCursor: { ts: 100, id: 'd' }, // 已翻到 d 之后
+    hasMore: true,
+  }
+  const firstPage = {
+    items: [{ id: 'n' }, { id: 'a' }], // 页 1 轮询：新条目 n + a 新版
+    nextCursor: { ts: 300, id: 'a' }, // 页 1 自己的游标——不得采用
+    hasMore: true,
+  }
+  const merged = mergeRefreshPage(old, firstPage, (t) => t.id)
+  expect(merged.items.map((t) => t.id)).toEqual(['n', 'a', 'b', 'c', 'd']) // mergePage 语义不变
+  expect(merged.nextCursor).toEqual({ ts: 100, id: 'd' }) // 游标保留旧值
+  expect(merged.hasMore).toBe(true)
+})
+
+test('mergeRefreshPage: 已全部加载（hasMore=false）不被页 1 的 true 复活', () => {
+  const old = { items: [{ id: 'a' }], nextCursor: { ts: 1, id: 'a' }, hasMore: false }
+  const firstPage = { items: [{ id: 'n' }, { id: 'a' }], nextCursor: { ts: 9, id: 'a' }, hasMore: true }
+  const merged = mergeRefreshPage(old, firstPage, (t) => t.id)
+  expect(merged.items.map((t) => t.id)).toEqual(['n', 'a'])
+  expect(merged.hasMore).toBe(false) // 新条目在顶部，不影响「没有更老的」
+  expect(merged.nextCursor).toEqual({ ts: 1, id: 'a' })
+})
+
+test('mergeRefreshPage: 空旧列表（首载 / emptyPage 重置后）采用页 1 的游标', () => {
+  const old = { items: [] as { id: string }[], nextCursor: null, hasMore: true }
+  const firstPage = { items: [{ id: 'a' }], nextCursor: { ts: 5, id: 'a' }, hasMore: true }
+  const merged = mergeRefreshPage(old, firstPage, (t) => t.id)
+  expect(merged.items.map((t) => t.id)).toEqual(['a'])
+  expect(merged.nextCursor).toEqual({ ts: 5, id: 'a' })
+  expect(merged.hasMore).toBe(true)
+})
+
+test('mergeRefreshPage: 空旧列表 + 页 1 也不足一页 → hasMore=false 落准', () => {
+  const old = { items: [] as { id: string }[], nextCursor: null, hasMore: true }
+  const firstPage = { items: [{ id: 'a' }], nextCursor: null, hasMore: false }
+  const merged = mergeRefreshPage(old, firstPage, (t) => t.id)
+  expect(merged.hasMore).toBe(false)
+  expect(merged.nextCursor).toBeNull()
 })

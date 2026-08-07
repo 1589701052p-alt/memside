@@ -304,6 +304,15 @@ test('App.tsx no legacy full-array memCache (source text)', () => {
   expect(src).not.toContain('Record<MemoryTabKey, MemoryItem[]>')
 })
 
+// 回归防护（2026-08-07 实测 bug）：refresh（3s 轮询）必须走 mergeRefreshPage
+// 保留已翻深的游标；若回退成「mergePage + 采用页 1 的 nextCursor/hasMore」，
+// 轮询每 3s 把翻页进度重置回第一页末尾，loadMore 反复拉重复页被全去重，
+// 无限滚动永远卡在第二页（实测现象：只能显示 100 条）。
+test('App.tsx refresh keeps deep cursor via mergeRefreshPage (source text)', () => {
+  expect(src).toContain('mergeRefreshPage')
+  expect(src).not.toContain('nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))\n        setStatus')
+})
+
 // 回归防护（Task 8 评审 Important #1）：哨兵 div 必须渲染在
 // `error ? null : showLoading ? null : (` 门控块之外（之前）。哨兵若在门控内，
 // 首访 tab 时 pending=true -> showLoading=true -> 哨兵不在 DOM，observer effect

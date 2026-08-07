@@ -44,6 +44,25 @@ export function mergeAppend<T>(loaded: T[], nextPage: T[], key: (t: T) => string
   return [...loaded, ...nextPage.filter((t) => !seen.has(key(t)))]
 }
 
+/**
+ * 轮询刷第 1 页后的整页合并：items 按 mergePage 语义合并，但游标/hasMore
+ * 只在「旧列表为空」（首载或 emptyPage 重置后首次刷新）时采用页 1 响应值；
+ * 已加载过条目时保留旧值——游标语义 = 已加载尾部位置，页 1 轮询只刷顶部，
+ * 若用页 1 的游标覆盖会把翻页进度重置回第一页末尾，loadMore 因此反复拉到
+ * 已加载的重复页（实测 bug：滚动永远卡在第二页）。
+ */
+export function mergeRefreshPage<T>(
+  oldPage: { items: T[]; nextCursor: { ts: number; id: string } | null; hasMore: boolean },
+  firstPage: { items: T[]; nextCursor: { ts: number; id: string } | null; hasMore: boolean },
+  key: (t: T) => string,
+): { items: T[]; nextCursor: { ts: number; id: string } | null; hasMore: boolean } {
+  const items = mergePage(oldPage.items, firstPage.items, key)
+  if (oldPage.items.length === 0) {
+    return { items, nextCursor: firstPage.nextCursor, hasMore: firstPage.hasMore }
+  }
+  return { items, nextCursor: oldPage.nextCursor, hasMore: oldPage.hasMore }
+}
+
 /** 翻页游标推进：hasMore=false 或无游标 -> null（不再发 loadMore）。 */
 export function nextCursorAfter<T>(page: { hasMore: boolean; nextCursor: { ts: number; id: string } | null }): { ts: number; id: string } | null {
   return page.hasMore ? page.nextCursor : null
