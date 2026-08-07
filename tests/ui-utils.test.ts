@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -161,4 +161,13 @@ test('discardReasonLabel: 四理由中文化 + 未知原样', () => {
   expect(discardReasonLabel('taming')).toBe('驯化指令')
   expect(discardReasonLabel('fleeting')).toBe('一次性/琐事')
   expect(discardReasonLabel('bogus')).toBe('bogus')
+})
+
+// 回扫进度条百分比(spec 2026-08-07 §3.2):total=0 -> 0;上限夹取 100。
+test('rescanPercent: 百分比计算与夹取', () => {
+  expect(rescanPercent(0, 0)).toBe(0)
+  expect(rescanPercent(0, 734)).toBe(0)
+  expect(rescanPercent(367, 734)).toBe(50)
+  expect(rescanPercent(734, 734)).toBe(100)
+  expect(rescanPercent(800, 734)).toBe(100)  // 夹取:不得超过 100
 })

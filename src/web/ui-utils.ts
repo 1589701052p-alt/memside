@@ -111,3 +111,14 @@ export function discardReasonLabel(reason: string): string {
   }
   return m[reason] ?? reason
 }
+
+/**
+ * 回扫进度条百分比(0-100,整数)。total<=0 -> 0(未开始/空队列不显示 NaN);
+ * 上限夹取 100(回调乱序不得撑破进度条)。纯函数,可单测。
+ *
+ * 设计依据:docs/superpowers/specs/2026-08-07-judge-rescan-ux-design.md §3.2。
+ */
+export function rescanPercent(done: number, total: number): number {
+  if (total <= 0) return 0
+  return Math.min(100, Math.round((done / total) * 100))
+}

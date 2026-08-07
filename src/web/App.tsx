@@ -4,11 +4,11 @@ import {
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
-  fetchJudgeConfig, saveJudgeConfig, startRescan,
+  fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, type MemoryTabKey } from './tab-cache'
 
 /**
@@ -157,6 +157,10 @@ export default function App() {
     : (memCache[tab as MemoryTabKey] ?? []).length === 0
   const showLoading = shouldShowLoading(loaded, pending, tab)
 
+  // 回扫状态缩写(spec 2026-08-07 §3.2):rs 驱动进度条/停止按钮/结果卡片。
+  const rs = status?.rescan
+  const rsPct = rescanPercent(rs?.done ?? 0, rs?.total ?? 0)
+
   const tabs: ReadonlyArray<{ key: TabKey; label: string; count: number }> = [
     { key: 'candidate', label: '候选审批', count: status?.memories.candidate ?? 0 },
     { key: 'approved', label: '已审批', count: (status?.memories.approved ?? 0) + (status?.memories.archived ?? 0) + (status?.memories.superseded ?? 0) },
@@ -271,23 +275,57 @@ export default function App() {
       ) : tab === 'candidate' ? (
         <>
           <p>{memItems.length} 条候选记忆待审</p>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
-              <button onClick={() => bulkRejectUnevaluated()}>
-                批量拒绝未评估
-              </button>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
+                <button onClick={() => bulkRejectUnevaluated()}>
+                  批量拒绝未评估
+                </button>
+              ) : null}
+              {/* 回扫端点 /api/rescan(开始)与 /api/rescan/cancel(批边界停止) */}
+              {rs?.running ? (
+                <button onClick={() => void cancelRescan().catch(() => {})}>
+                  停止筛查
+                </button>
+              ) : (
+                <button onClick={() => rescan()}>重新筛查全部候选</button>
+              )}
+              {rs?.running && rs?.stopping ? (
+                <span style={{ fontSize: 13, color: '#b80' }}>正在停止(当前这批判完即停)…</span>
+              ) : null}
+            </div>
+            <div style={{ fontSize: 12, color: '#888', margin: '6px 0' }}>
+              把候选队列按当前判定模式全部重判一遍,判丢的进「AI自动拒绝」,可恢复。
+            </div>
+            {rs?.running ? (
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ width: 240, height: 10, background: '#eee', borderRadius: 5, overflow: 'hidden' }}>
+                  <div style={{ width: `${rsPct}%`, height: '100%', background: '#222', transition: 'width .3s' }} />
+                </div>
+                <span style={{ fontSize: 13, color: '#666' }}>
+                  已处理 {rs.done}/{rs.total}({rsPct}%) · 已判丢 {rs.discarded ?? 0} 条
+                </span>
+              </div>
             ) : null}
-            <button onClick={() => rescan()} disabled={status?.rescan?.running === true}>
-              回扫存量
-            </button>
-            {status?.rescan?.running ? (
-              <span style={{ fontSize: 13, color: '#666' }}>
-                回扫中 {status.rescan.done}/{status.rescan.total}
-              </span>
-            ) : status?.rescan?.report ? (
-              <span style={{ fontSize: 13, color: '#666' }}>
-                回扫完成: 处理 {status.rescan.report.processed} / 判丢 {status.rescan.report.discarded} / 跳过 {status.rescan.report.skipped}
-              </span>
+            {!rs?.running && rs?.report ? (
+              <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 13, background: '#fafafa' }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                  {rs.report.stopped
+                    ? `已停止(剩余 ${rs.total - rs.report.processed} 条未筛查)`
+                    : '筛查完成'}
+                </div>
+                <div>
+                  处理 {rs.report.processed} · 判丢 {rs.report.discarded} · 保留 {rs.report.keptUpdated} · 跳过 {rs.report.skipped}(目录已删除的项目)
+                </div>
+                {rs.report.discarded > 0 ? (
+                  <button style={{ marginTop: 6, fontSize: 13 }} onClick={() => setTab('discards')}>
+                    查看判丢的 {rs.report.discarded} 条 →
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {rs?.error ? (
+              <div style={{ fontSize: 13, color: '#c00' }}>回扫失败: {rs.error}</div>
             ) : null}
             {rescanError ? (
               <span style={{ fontSize: 13, color: '#c00' }}>回扫失败: {rescanError}</span>
