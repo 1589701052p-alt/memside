@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react'
 import {
-  listMemories, promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput,
-  listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
-  listDistillRuns, getDistillRun, getDistillRunSourceInput,
+  listMemoriesPage, listDiscardsPage, listDistillRunsPage, WEB_PAGE_SIZE,
+  promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput,
+  restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
+  getDistillRun, getDistillRunSourceInput,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
-import { memoryTabFilter, shouldShowLoading, type MemoryTabKey } from './tab-cache'
+import { memoryTabFilter, shouldShowLoading, mergePage, type MemoryTabKey } from './tab-cache'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -35,6 +36,13 @@ function priorityRank(vc: string | null | undefined): number {
 type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs'
 
 /**
+ * 每 tab 的分页缓存形状（spec 2026-08-07 tab 列表分页）。items=已加载条目，
+ * nextCursor=下一页游标（before），hasMore=是否还有更多。Task 8 无限滚动直接复用。
+ */
+interface TabPage<T> { items: T[]; nextCursor: { ts: number; id: string } | null; hasMore: boolean }
+function emptyPage<T>(): TabPage<T> { return { items: [], nextCursor: null, hasMore: true } }
+
+/**
  * 4-tab 审计视图。顶部 tab 切换:候选审批 / 已审批 / 已拒绝 / AI自动拒绝。每 tab
  * 独立数据源 + 操作 + 3s 轮询;切 tab 清旧 interval 建新的(useEffect 依赖 tab)。
  * 候选 tab 仍同时拉 status;其余 tab 也拉 status(计数徽标 + 状态栏)。
@@ -50,11 +58,11 @@ type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs'
  */
 export default function App() {
   const [tab, setTab] = useState<TabKey>('candidate')
-  const [memCache, setMemCache] = useState<Record<MemoryTabKey, MemoryItem[]>>({
-    candidate: [], approved: [], rejected: [],
+  const [memCache, setMemCache] = useState<Record<MemoryTabKey, TabPage<MemoryItem>>>({
+    candidate: emptyPage(), approved: emptyPage(), rejected: emptyPage(),
   })
-  const [discards, setDiscards] = useState<DiscardItem[]>([])
-  const [runs, setRuns] = useState<DistillRunListItem[]>([])
+  const [discards, setDiscards] = useState<TabPage<DiscardItem>>(emptyPage())
+  const [runs, setRuns] = useState<TabPage<DistillRunListItem>>(emptyPage())
   const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
   // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
   // (对齐重构前的初始 loading=true 行为)。
@@ -69,14 +77,16 @@ export default function App() {
     setPending((p) => ({ ...p, [target]: true }))
     try {
       if (target === 'discards') {
-        const [ds, st] = await Promise.all([listDiscards(), getStatus()])
-        setDiscards(ds); setStatus(st)
+        const [pg, st] = await Promise.all([listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus()])
+        setDiscards((d) => ({ items: mergePage(d.items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+        setStatus(st)
       } else if (target === 'runs') {
-        const [runItems, st] = await Promise.all([listDistillRuns(fetch), getStatus(fetch)])
-        setRuns(runItems); setStatus(st)
+        const [pg, st] = await Promise.all([listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus(fetch)])
+        setRuns((r) => ({ items: mergePage(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+        setStatus(st)
       } else {
-        const [mems, st] = await Promise.all([listMemories(fetch, memoryTabFilter(target)), getStatus()])
-        setMemCache((c) => ({ ...c, [target]: mems }))
+        const [pg, st] = await Promise.all([listMemoriesPage(fetch, { status: memoryTabFilter(target), limit: WEB_PAGE_SIZE }), getStatus()])
+        setMemCache((c) => ({ ...c, [target]: { items: mergePage(c[target].items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))
         setStatus(st)
       }
       setLoaded((l) => ({ ...l, [target]: true }))
@@ -139,7 +149,7 @@ export default function App() {
   }
 
   async function bulkRejectUnevaluated() {
-    const ids = (memCache.candidate)
+    const ids = (memCache.candidate.items)
       .filter((i) => i.status === 'candidate' && priorityRank(i.valueClass) === 2)
       .map((i) => i.id)
     if (ids.length === 0) return
@@ -149,12 +159,12 @@ export default function App() {
 
   // 记忆列表按 createdAt 倒序(newest first)。memCache 在 candidate/approved/rejected
   // tab 分别是对应 status 的子集(server 已过滤),客户端再排一次保证顺序一致。
-  const memItems = sortCandidatesByTime(memCache[tab as MemoryTabKey] ?? [])
+  const memItems = sortCandidatesByTime(memCache[tab as MemoryTabKey]?.items ?? [])
   const jobs = status?.jobs ?? {}
   const running = (jobs.running ?? 0) + (jobs.pending ?? 0)
-  const listEmpty = tab === 'discards' ? discards.length === 0
-    : tab === 'runs' ? runs.length === 0
-    : (memCache[tab as MemoryTabKey] ?? []).length === 0
+  const listEmpty = tab === 'discards' ? discards.items.length === 0
+    : tab === 'runs' ? runs.items.length === 0
+    : (memCache[tab as MemoryTabKey]?.items ?? []).length === 0
   const showLoading = shouldShowLoading(loaded, pending, tab)
 
   // 回扫状态缩写(spec 2026-08-07 §3.2):rs 驱动进度条/停止按钮/结果卡片。
@@ -379,21 +389,21 @@ export default function App() {
         </>
       ) : tab === 'runs' ? (
         <div>
-          <p>共 {runs.length} 条蒸馏记录</p>
-          {runs.map((r) => (
+          <p>共 {runs.items.length} 条蒸馏记录</p>
+          {runs.items.map((r) => (
             <DistillRunRow key={r.distillJobId} r={r} onOpen={() => setRunDetailFor(r.distillJobId)} />
           ))}
-          {runs.length === 0 && !showLoading && (
+          {runs.items.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无蒸馏记录</p>
           )}
         </div>
       ) : (
         <>
-          <p>{discards.length} 条 AI 自动拒绝记录</p>
-          {discards.map((d) => (
+          <p>{discards.items.length} 条 AI 自动拒绝记录</p>
+          {discards.items.map((d) => (
             <DiscardCard key={d.id} d={d} onPromote={() => promote(d.id)} />
           ))}
-          {discards.length === 0 && !showLoading && (
+          {discards.items.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无 AI 自动拒绝记录</p>
           )}
         </>
