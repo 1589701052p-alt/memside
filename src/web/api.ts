@@ -94,7 +94,7 @@ export interface MemsideStatus {
   jobs: Record<string, number>
   memories: Record<string, number>
   discards: number
-  distillRuns?: { total: number; byOutcome: Record<string, number> }
+  distillRuns?: { total: number; byOutcome: Record<string, number>; allTime?: number }
   lastError: { error: string } | null
   /** 存量回扫(Task 7)进度/最近报告;老 daemon 无此字段。 */
   rescan?: RescanState

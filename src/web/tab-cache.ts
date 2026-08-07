@@ -67,3 +67,34 @@ export function mergeRefreshPage<T>(
 export function nextCursorAfter<T>(page: { hasMore: boolean; nextCursor: { ts: number; id: string } | null }): { ts: number; id: string } | null {
   return page.hasMore ? page.nextCursor : null
 }
+
+// --- tab 实际总数（status 派生）---------------------------------------------
+
+/** tabTotalCount 依赖的 status 计数子集（与 api.ts MemsideStatus 结构兼容）。 */
+export interface TabStatusCounts {
+  memories: Record<string, number>
+  discards: number
+  distillRuns?: { total: number; allTime?: number }
+}
+
+/**
+ * 各 tab 列表头的「实际总数」：必须来自服务端全表计数（/api/status），
+ * 不是前端已加载条数——分页后 items.length 只是前 N 页，当总数会误导用户
+ * （2026-08-07 实测反馈）。approved 含 archived/superseded 历史态（与 tab
+ * 徽标同公式）；runs 用 allTime 全量（distillRuns.total 只是 24h 活动窗口），
+ * 老 daemon 无 allTime 时降级 total。status 未就绪返回 null（调用方回退
+ * 已加载条数）。
+ */
+export function tabTotalCount(
+  s: TabStatusCounts | null,
+  tab: 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs',
+): number | null {
+  if (!s) return null
+  switch (tab) {
+    case 'candidate': return s.memories.candidate ?? 0
+    case 'approved': return (s.memories.approved ?? 0) + (s.memories.archived ?? 0) + (s.memories.superseded ?? 0)
+    case 'rejected': return s.memories.rejected ?? 0
+    case 'discards': return s.discards
+    case 'runs': return s.distillRuns?.allTime ?? s.distillRuns?.total ?? 0
+  }
+}
