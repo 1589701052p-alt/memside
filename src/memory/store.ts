@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs } from '@/db/schema'
@@ -704,4 +704,49 @@ export async function listRecentDistillRuns(
       sourceAgentId: j?.sourceAgentId ?? null,
     }
   })
+}
+
+// ---------------------------------------------------------------------------
+// 五 tab 无限滚动分页（spec 2026-08-07）：复合游标 (sortTs, id) + limit+1 探测
+// hasMore。schema created_at/ts 均 notNull，无需 COALESCE。旧全量/LIMIT-200
+// 函数保留（无 limit 参数的兼容路径继续用），分页函数并列新增。
+// ---------------------------------------------------------------------------
+
+export interface PageCursor { ts: number; id: string }
+export interface Page<T> { items: T[]; hasMore: boolean; nextCursor: PageCursor | null }
+
+export const MEMORY_PAGE_DEFAULT_LIMIT = 50
+export const MEMORY_PAGE_MAX_LIMIT = 200
+
+/** limit clamp 到 [1, 200]；undefined/NaN -> 默认 50。 */
+export function clampPageLimit(limit?: number): number {
+  if (limit === undefined || !Number.isFinite(limit)) return MEMORY_PAGE_DEFAULT_LIMIT
+  return Math.min(Math.max(Math.floor(limit), 1), MEMORY_PAGE_MAX_LIMIT)
+}
+
+export async function listMemoriesPage(
+  db: DbClient,
+  opts: { statuses: MemoryStatus[]; limit?: number; before?: PageCursor },
+): Promise<Page<Memory>> {
+  const limit = clampPageLimit(opts.limit)
+  const conds = []
+  if (opts.statuses.length > 0) conds.push(inArray(memories.status, opts.statuses))
+  if (opts.before) {
+    conds.push(or(
+      lt(memories.createdAt, opts.before.ts),
+      and(eq(memories.createdAt, opts.before.ts), lt(memories.id, opts.before.id)),
+    ))
+  }
+  const rows = await db.select().from(memories)
+    .where(conds.length > 0 ? and(...conds) : undefined)
+    .orderBy(desc(memories.createdAt), desc(memories.id))
+    .limit(limit + 1).all()
+  const hasMore = rows.length > limit
+  const pageRows = rows.slice(0, limit)
+  const last = pageRows[pageRows.length - 1]
+  return {
+    items: pageRows.map(rowToMemory),
+    hasMore,
+    nextCursor: hasMore && last ? { ts: last.createdAt, id: last.id } : null,
+  }
 }
