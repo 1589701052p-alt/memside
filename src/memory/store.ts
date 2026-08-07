@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs } from '@/db/schema'
@@ -31,7 +31,7 @@ export interface MemoryInput {
   valueClass?: ValueClass | null
   /** 主题归组键（spec §4.4）；缺省/null = 未分组。 */
   subjectSlug?: string | null
-  /** 出处（spec §R1）；缺省/null = 未标注（老行/手动记忆/promoteDiscard 提升行）。 */
+  /** 出处（spec §R1）；缺省/null = 未标注（老行迁移/手动记忆/promoteDiscard 提升行）。 */
   origin?: DistillOrigin | null
   /** 出处原句摘抄；缺省/null = 无。 */
   evidence?: string | null
@@ -826,4 +826,32 @@ export async function listDistillRunsPage(
     hasMore,
     nextCursor: hasMore && last ? { ts: last.ts, id: last.distillJobId } : null,
   }
+}
+
+/** 6 个保护类 valueClass（= 前端 priorityRank < 2 的全集）；其余候选视为「未评估」。 */
+export const PROTECTED_VALUE_CLASSES: readonly string[] = [
+  'user-rule', 'decision', 'preference', 'convention', 'trap', 'topology',
+]
+
+/**
+ * 服务端按条件批量拒绝「未评估」候选（spec 2026-08-07 决策 4）：分页后前端只加载
+ * 第一页，批量拒绝必须覆盖整个尾队。逐行走既有 promoteCandidate 路径（状态机 +
+ * 审计一致）；not-found/终态竞态跳过继续（与 server bulk-promote 同款容错）。
+ */
+export async function bulkRejectUnevaluated(db: DbClient): Promise<{ rejected: number }> {
+  const rows = await db.select({ id: memories.id }).from(memories)
+    .where(and(
+      eq(memories.status, 'candidate'),
+      or(isNull(memories.valueClass), notInArray(memories.valueClass, [...PROTECTED_VALUE_CLASSES])),
+    )).all()
+  let rejected = 0
+  for (const r of rows) {
+    try {
+      await promoteCandidate(db, r.id, { action: 'reject' })
+      rejected += 1
+    } catch {
+      // 并发下已被处置的行跳过，继续其余
+    }
+  }
+  return { rejected }
 }

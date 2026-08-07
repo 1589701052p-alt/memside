@@ -10,6 +10,7 @@ import {
   createCandidate, clampPageLimit, listMemoriesPage, logDiscards, saveDistillRun,
   listDiscardsPage, listDistillRunsPage,
   MEMORY_PAGE_DEFAULT_LIMIT, MEMORY_PAGE_MAX_LIMIT,
+  bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES,
 } from '@/memory/store'
 
 // 回归锁定：五 tab 无限滚动分页（spec 2026-08-07 §store）。
@@ -153,4 +154,31 @@ test('listDistillRunsPage: 翻页 + job 元数据带出 + 孤儿 run cwd=null', 
   expect(orphan.cwd).toBeNull()
   const j1 = all.find((r) => r.distillJobId === 'j1')
   expect(j1?.cwd).toBe('C:/proj/j1')
+})
+
+// --- Task 3: bulkRejectUnevaluated -----------------------------------------
+
+test('bulkRejectUnevaluated: 只拒未评估候选，保护类/非候选不动', async () => {
+  const c1 = await seedMemory(1000, 'candidate', null)          // 拒（NULL）
+  const c2 = await seedMemory(2000, 'candidate', 'weird-class' as ValueClass)  // 拒（未知类）
+  const k1 = await seedMemory(3000, 'candidate', 'decision')     // 留（保护类）
+  const k2 = await seedMemory(4000, 'candidate', 'user-rule')    // 留
+  const k3 = await seedMemory(5000, 'approved', null)            // 不动（非候选）
+  const k4 = await seedMemory(6000, 'rejected', null)            // 不动（已终态）
+  const r = await bulkRejectUnevaluated(db)
+  expect(r.rejected).toBe(2)
+  const statusOf = async (id: string) =>
+    (await db.select().from(memories).where(eq(memories.id, id)).limit(1).all())[0]!.status
+  expect(await statusOf(c1)).toBe('rejected')
+  expect(await statusOf(c2)).toBe('rejected')
+  expect(await statusOf(k1)).toBe('candidate')
+  expect(await statusOf(k2)).toBe('candidate')
+  expect(await statusOf(k3)).toBe('approved')
+  expect(await statusOf(k4)).toBe('rejected')
+  expect(PROTECTED_VALUE_CLASSES).toContain('decision')
+  expect(PROTECTED_VALUE_CLASSES.length).toBe(6)
+})
+
+test('bulkRejectUnevaluated: 空队列 -> 0', async () => {
+  expect((await bulkRejectUnevaluated(db)).rejected).toBe(0)
 })
