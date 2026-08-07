@@ -3,11 +3,12 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { memories } from '@/db/schema'
+import { memories, memoryDistillJobs } from '@/db/schema'
 import type { MemoryStatus } from '@/memory/pure'
 import type { ValueClass } from '@/memory/valueFilter'
 import {
-  createCandidate, clampPageLimit, listMemoriesPage,
+  createCandidate, clampPageLimit, listMemoriesPage, logDiscards, saveDistillRun,
+  listDiscardsPage, listDistillRunsPage,
   MEMORY_PAGE_DEFAULT_LIMIT, MEMORY_PAGE_MAX_LIMIT,
 } from '@/memory/store'
 
@@ -86,4 +87,70 @@ test('listMemoriesPage: status inArray 过滤', async () => {
 test('listMemoriesPage: 空表 -> 空页无游标', async () => {
   const page = await listMemoriesPage(db, { statuses: ['candidate'], limit: 50 })
   expect(page).toEqual({ items: [], hasMore: false, nextCursor: null })
+})
+
+// --- Task 2: listDiscardsPage / listDistillRunsPage -------------------------
+// 与 brief 的偏差（以 schema.ts / store-crud.test.ts 为准校准）：
+//  - memoryDistillJobs 无 payloadHash 列、debounceKey notNull -> 照抄 store-crud 的 insert 形状
+//  - memoryDiscards.distillJobId 有 FK -> seedDiscards 先插 job 行
+
+async function seedDiscards(n: number) {
+  // logDiscards 一次写 n 行（同一 ts = Date.now()，天然同毫秒批量）
+  db.insert(memoryDistillJobs).values({ id: 'job-d', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code', cwd: '/r', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 0 }).run()
+  await logDiscards(db, 'job-d', Array.from({ length: n }, (_, i) => ({
+    title: `d-${i}`, bodyMd: 'b', reason: 'fleeting' as const,
+    scopeType: 'global' as const, scopeId: null, sourceCwd: null,
+    runtime: null, sourceKind: 'conversation' as const,
+  })))
+}
+
+test('listDiscardsPage: 同毫秒批量翻页不重不漏 + hasMore', async () => {
+  await seedDiscards(3)
+  const p1 = await listDiscardsPage(db, { limit: 2 })
+  expect(p1.items.length).toBe(2)
+  expect(p1.hasMore).toBe(true)
+  const p2 = await listDiscardsPage(db, { limit: 2, before: p1.nextCursor! })
+  expect(p2.items.length).toBe(1)
+  expect(p2.hasMore).toBe(false)
+  const allIds = [...p1.items, ...p2.items].map((d) => d.id)
+  expect(new Set(allIds).size).toBe(3)
+})
+
+test('listDiscardsPage: 空表 -> 空页', async () => {
+  expect(await listDiscardsPage(db, { limit: 50 })).toEqual({ items: [], hasMore: false, nextCursor: null })
+})
+
+async function seedRun(jobId: string) {
+  db.insert(memoryDistillJobs).values({
+    id: jobId, debounceKey: 'k', sourceEventId: 'e', status: 'done', cwd: `C:/proj/${jobId}`, runtime: 'claude-code',
+    attempts: 0, nextRunAt: 0, createdAt: 1,
+  }).run()
+  await saveDistillRun(db, jobId, {
+    outcome: 'produced', rawOutput: null, rawCount: 1, acceptedCount: 1,
+    dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0,
+    durationMs: 10, errorMessage: null,
+  })
+}
+
+test('listDistillRunsPage: 翻页 + job 元数据带出 + 孤儿 run cwd=null', async () => {
+  await seedRun('j1')
+  await seedRun('j2')
+  // 孤儿 run（无 job 行）
+  await saveDistillRun(db, 'j-orphan', {
+    outcome: 'empty_output', rawOutput: null, rawCount: 0, acceptedCount: 0,
+    dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 1, errorMessage: null,
+  })
+  const p1 = await listDistillRunsPage(db, { limit: 2 })
+  expect(p1.items.length).toBe(2)
+  expect(p1.hasMore).toBe(true)
+  const p2 = await listDistillRunsPage(db, { limit: 2, before: p1.nextCursor! })
+  expect(p2.items.length).toBe(1)
+  expect(p2.hasMore).toBe(false)
+  const all = [...p1.items, ...p2.items]
+  expect(new Set(all.map((r) => r.distillJobId)).size).toBe(3)
+  const orphan = all.find((r) => r.distillJobId === 'j-orphan')!
+  expect(orphan.cwd).toBeNull()
+  const j1 = all.find((r) => r.distillJobId === 'j1')
+  expect(j1?.cwd).toBe('C:/proj/j1')
 })
