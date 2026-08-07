@@ -313,6 +313,17 @@ test('App.tsx refresh keeps deep cursor via mergeRefreshPage (source text)', () 
   expect(src).not.toContain('nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))\n        setStatus')
 })
 
+// 回归防护（2026-08-07 用户反馈）：五 tab 列表头计数必须来自服务端全表计数
+// （tabTotalCount / /api/status），不是前端已加载条数——分页后 items.length
+// 只是前 N 页，当总数会误导用户（实测「20 条候选记忆待审」实为 538 条）。
+// runs 总数走 distillRuns.allTime（total 只是 24h 活动窗口）。
+test('App.tsx list headers show server-side totals via tabTotalCount (source text)', () => {
+  expect(src).toContain('tabTotalCount')
+  expect(src).not.toContain('{memItems.length} 条')
+  expect(src).not.toContain('{runs.items.length} 条')
+  expect(src).not.toContain('{discards.items.length} 条')
+})
+
 // 回归防护（Task 8 评审 Important #1）：哨兵 div 必须渲染在
 // `error ? null : showLoading ? null : (` 门控块之外（之前）。哨兵若在门控内，
 // 首访 tab 时 pending=true -> showLoading=true -> 哨兵不在 DOM，observer effect

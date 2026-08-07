@@ -11,7 +11,7 @@ import {
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
-import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, type MemoryTabKey } from './tab-cache'
+import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, type MemoryTabKey } from './tab-cache'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -258,11 +258,11 @@ export default function App() {
   const rsPct = rescanPercent(rs?.done ?? 0, rs?.total ?? 0)
 
   const tabs: ReadonlyArray<{ key: TabKey; label: string; count: number }> = [
-    { key: 'candidate', label: '候选审批', count: status?.memories.candidate ?? 0 },
-    { key: 'approved', label: '已审批', count: (status?.memories.approved ?? 0) + (status?.memories.archived ?? 0) + (status?.memories.superseded ?? 0) },
-    { key: 'rejected', label: '已拒绝', count: status?.memories.rejected ?? 0 },
-    { key: 'discards', label: 'AI自动拒绝', count: status?.discards ?? 0 },
-    { key: 'runs', label: '蒸馏记录', count: status?.distillRuns?.total ?? 0 },
+    { key: 'candidate', label: '候选审批', count: tabTotalCount(status, 'candidate') ?? 0 },
+    { key: 'approved', label: '已审批', count: tabTotalCount(status, 'approved') ?? 0 },
+    { key: 'rejected', label: '已拒绝', count: tabTotalCount(status, 'rejected') ?? 0 },
+    { key: 'discards', label: 'AI自动拒绝', count: tabTotalCount(status, 'discards') ?? 0 },
+    { key: 'runs', label: '蒸馏记录', count: tabTotalCount(status, 'runs') ?? 0 },
   ]
 
   return (
@@ -370,7 +370,7 @@ export default function App() {
         <p>加载中…</p>
       ) : tab === 'candidate' ? (
         <>
-          <p>{memItems.length} 条候选记忆待审</p>
+          <p>{tabTotalCount(status, 'candidate') ?? memItems.length} 条候选记忆待审</p>
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {(status?.unevaluatedCandidates ?? 0) > 0 ? (
@@ -445,7 +445,7 @@ export default function App() {
         </>
       ) : tab === 'approved' ? (
         <>
-          <p>{memItems.length} 条已审批记忆</p>
+          <p>{tabTotalCount(status, 'approved') ?? memItems.length} 条已审批记忆</p>
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}
@@ -461,7 +461,7 @@ export default function App() {
         </>
       ) : tab === 'rejected' ? (
         <>
-          <p>{memItems.length} 条已拒绝记忆</p>
+          <p>{tabTotalCount(status, 'rejected') ?? memItems.length} 条已拒绝记忆</p>
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}
@@ -475,7 +475,7 @@ export default function App() {
         </>
       ) : tab === 'runs' ? (
         <div>
-          <p>共 {runs.items.length} 条蒸馏记录</p>
+          <p>共 {tabTotalCount(status, 'runs') ?? runs.items.length} 条蒸馏记录</p>
           {runs.items.map((r) => (
             <DistillRunRow key={r.distillJobId} r={r} onOpen={() => setRunDetailFor(r.distillJobId)} />
           ))}
@@ -485,7 +485,7 @@ export default function App() {
         </div>
       ) : (
         <>
-          <p>{discards.items.length} 条 AI 自动拒绝记录</p>
+          <p>{tabTotalCount(status, 'discards') ?? discards.items.length} 条 AI 自动拒绝记录</p>
           {discards.items.map((d) => (
             <DiscardCard key={d.id} d={d} onPromote={() => promote(d.id)} />
           ))}

@@ -741,6 +741,8 @@ test('GET /api/status 聚合语义不变：24h 外的 run 不计入 distillRuns'
   expect(r.status).toBe(200)
   expect(r.body.distillRuns.total).toBe(1)
   expect(r.body.distillRuns.byOutcome).toEqual({ produced: 1 })
+  // allTime = 全量 run 数（含 24h 外），runs tab 列表计数用
+  expect(r.body.distillRuns.allTime).toBe(2)
 })
 
 // --- Task 5: distill-error-capture -- errorMessage 端点验证 ---

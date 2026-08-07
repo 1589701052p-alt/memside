@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, mergeRefreshPage, nextCursorAfter } from '../src/web/tab-cache'
+import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount } from '../src/web/tab-cache'
 
 // Task 1（perf/tab-switch-cache）：tab 切换 stale-while-revalidate 缓存的纯函数。
 // 数据按 tab 缓存，回访直接渲染缓存 + 后台刷新。纯函数层可单测（CLAUDE.md「首选可断言面」）。
@@ -106,4 +106,28 @@ test('mergeRefreshPage: 空旧列表 + 页 1 也不足一页 → hasMore=false �
   const merged = mergeRefreshPage(old, firstPage, (t) => t.id)
   expect(merged.hasMore).toBe(false)
   expect(merged.nextCursor).toBeNull()
+})
+
+// --- 回归（2026-08-07 用户反馈）：tab 列表头计数必须是服务端全表总数， ---
+//  不是前端已加载条数（分页后 items.length 只是一页，当总数会误导用户）。
+
+test('tabTotalCount: 五 tab 各自取服务端全表计数', () => {
+  const s = {
+    memories: { candidate: 538, approved: 100, archived: 5, superseded: 2, rejected: 2554 },
+    discards: 673,
+    distillRuns: { total: 7, allTime: 413 },
+  }
+  expect(tabTotalCount(s, 'candidate')).toBe(538)
+  expect(tabTotalCount(s, 'approved')).toBe(107) // approved+archived+superseded（与徽标同公式）
+  expect(tabTotalCount(s, 'rejected')).toBe(2554)
+  expect(tabTotalCount(s, 'discards')).toBe(673)
+  expect(tabTotalCount(s, 'runs')).toBe(413) // allTime 全量，不是 24h 窗口的 total=7
+})
+
+test('tabTotalCount: status 缺字段/老 daemon 降级', () => {
+  expect(tabTotalCount(null, 'candidate')).toBeNull() // status 未就绪
+  expect(tabTotalCount({ memories: {}, discards: 0 }, 'approved')).toBe(0) // 缺 status key -> 0
+  // 老 daemon 无 allTime -> 降级 total；distillRuns 整个缺 -> 0
+  expect(tabTotalCount({ memories: {}, discards: 0, distillRuns: { total: 7 } }, 'runs')).toBe(7)
+  expect(tabTotalCount({ memories: {}, discards: 0 }, 'runs')).toBe(0)
 })

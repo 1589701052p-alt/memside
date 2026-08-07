@@ -357,6 +357,8 @@ export function createApp(deps: AppDeps) {
     const discardCount = await deps.db.select({ n: count() }).from(memoryDiscards).all()
     const runGroups = await deps.db.select({ outcome: memoryDistillRuns.outcome, n: count() })
       .from(memoryDistillRuns).where(gt(memoryDistillRuns.ts, cutoff)).groupBy(memoryDistillRuns.outcome).all()
+    // 全量 run 数：runs tab 列表计数用（total 是 24h 活动窗口，当总数会误导）。
+    const runAllTime = await deps.db.select({ n: count() }).from(memoryDistillRuns).all()
     // 未评估候选计数（与 bulkRejectUnevaluated 同条件，spec 决策 4）：保护类
     // valueClass 之外/无 valueClass 的 candidate。
     const unevalCount = await deps.db.select({ n: count() }).from(memories).where(and(
@@ -375,7 +377,7 @@ export function createApp(deps: AppDeps) {
       jobs: jobStats,
       memories: memStats,
       discards: discardCount[0]?.n ?? 0,
-      distillRuns: { total: runGroups.reduce((s, g) => s + g.n, 0), byOutcome: runStats },
+      distillRuns: { total: runGroups.reduce((s, g) => s + g.n, 0), byOutcome: runStats, allTime: runAllTime[0]?.n ?? 0 },
       lastError: errored ? { error: errored.lastError } : null,
       unevaluatedCandidates: unevalCount[0]?.n ?? 0,
       rescan: rescanState,
