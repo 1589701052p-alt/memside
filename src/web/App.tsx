@@ -1,16 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, WEB_PAGE_SIZE,
-  promoteMemory, patchMemory, getStatus, bulkPromote, getSourceInput,
+  promoteMemory, patchMemory, getStatus, getSourceInput,
   restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   getDistillRun, getDistillRunSourceInput,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
+  bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
-import { memoryTabFilter, shouldShowLoading, mergePage, type MemoryTabKey } from './tab-cache'
+import { memoryTabFilter, shouldShowLoading, mergePage, mergeAppend, nextCursorAfter, type MemoryTabKey } from './tab-cache'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -72,6 +73,10 @@ export default function App() {
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
   const [rescanError, setRescanError] = useState<string | null>(null)
+  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
+  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null })
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  const loadMoreRef = useRef<(t: TabKey) => Promise<void>>(async () => {})
 
   async function refresh(target: TabKey) {
     setPending((p) => ({ ...p, [target]: true }))
@@ -98,6 +103,52 @@ export default function App() {
     }
   }
 
+  // 当前 tab 分页读取 helper：discards/runs 独立 state，其余走 memCache。
+  function tabPageOf(target: TabKey): TabPage<MemoryItem> | TabPage<DiscardItem> | TabPage<DistillRunListItem> {
+    return target === 'discards' ? discards : target === 'runs' ? runs : memCache[target as MemoryTabKey]
+  }
+
+  // 无限滚动加载下一页：守卫（首轮/加载中）-> 按游标拉下一页 -> mergeAppend 追加。
+  // 失败记 loadMoreError，尾部显重试按钮，不静默。
+  async function loadMore(target: TabKey) {
+    if (pending[target] || loadingMore[target]) return
+    const cur = tabPageOf(target)
+    const before = nextCursorAfter(cur)
+    if (!before) return // hasMore=false 或无游标
+    setLoadingMore((l) => ({ ...l, [target]: true }))
+    setLoadMoreError((e) => ({ ...e, [target]: null }))
+    try {
+      if (target === 'discards') {
+        const pg = await listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE, before })
+        setDiscards((d) => ({ items: mergeAppend(d.items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+      } else if (target === 'runs') {
+        const pg = await listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE, before })
+        setRuns((r) => ({ items: mergeAppend(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+      } else {
+        const pg = await listMemoriesPage(fetch, { status: memoryTabFilter(target), limit: WEB_PAGE_SIZE, before })
+        setMemCache((c) => ({ ...c, [target]: { items: mergeAppend(c[target].items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))
+      }
+    } catch (e) {
+      setLoadMoreError((er) => ({ ...er, [target]: e instanceof Error ? e.message : String(e) }))
+    } finally {
+      setLoadingMore((l) => ({ ...l, [target]: false }))
+    }
+  }
+
+  // loadMoreRef 每渲染同步最新闭包，避免 Observer 回调拿陈旧 state
+  useEffect(() => { loadMoreRef.current = loadMore })
+
+  // 无限滚动哨兵：触底自动追加下一页；切 tab/卸载 disconnect（spec 决策 1）
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) void loadMoreRef.current(tab)
+    })
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [tab])
+
   // 切 tab:不清空缓存,直接后台刷新(stale-while-revalidate),只轮询激活 tab。
   // cleanup 清旧 interval,无轮询泄漏。依赖 [tab],切 tab 才重建。
   useEffect(() => {
@@ -107,12 +158,43 @@ export default function App() {
     return () => clearInterval(t)
   }, [tab])
 
+  // 回扫结束（完成/停止，running true->false 跳变）-> 候选池批量变更，
+  // 页 1 merge 感知不到已移出条目，重置 candidate 缓存防滞留（spec 决策 8）
+  const prevRescanRunning = useRef(false)
+  useEffect(() => {
+    const running = status?.rescan?.running === true
+    if (prevRescanRunning.current && !running) {
+      setMemCache((c) => ({ ...c, candidate: emptyPage() }))
+      if (tab === 'candidate') void refresh('candidate')
+    }
+    prevRescanRunning.current = running
+  }, [status])
+
+  // 操作后本地移除该卡（approve/reject/restore 跨 tab 移动，即时消失不必等轮询）。
+  function removeFromTab(target: TabKey, id: string) {
+    if (target === 'candidate' || target === 'approved' || target === 'rejected') {
+      setMemCache((c) => ({ ...c, [target]: { ...c[target], items: c[target].items.filter((x) => x.id !== id) } }))
+    } else if (target === 'discards') {
+      setDiscards((d) => ({ ...d, items: d.items.filter((x) => x.id !== id) }))
+    }
+  }
+
+  // 操作后本地 patch 该卡字段（archive/unarchive 不换 tab，徽标/按钮即时切换）。
+  function patchInMemTab(target: MemoryTabKey, id: string, patch: Partial<MemoryItem>) {
+    setMemCache((c) => ({
+      ...c,
+      [target]: { ...c[target], items: c[target].items.map((x) => (x.id === id ? { ...x, ...patch } : x)) },
+    }))
+  }
+
   async function approve(id: string) {
     await promoteMemory(id, { action: 'approve' })
+    removeFromTab(tab, id)
     void refresh(tab)
   }
   async function reject(id: string) {
     await promoteMemory(id, { action: 'reject' })
+    removeFromTab(tab, id)
     void refresh(tab)
   }
   async function edit(id: string, title: string, bodyMd: string, scopeType: 'project' | 'global', subjectSlug: string | null) {
@@ -121,18 +203,22 @@ export default function App() {
   }
   async function archive(id: string) {
     await archiveMemory(id)
+    if (tab === 'approved') patchInMemTab('approved', id, { status: 'archived' })
     void refresh(tab)
   }
   async function unarchive(id: string) {
     await unarchiveMemory(id)
+    if (tab === 'approved') patchInMemTab('approved', id, { status: 'approved' })
     void refresh(tab)
   }
   async function restore(id: string) {
     await restoreMemory(id)
+    removeFromTab(tab, id)
     void refresh(tab)
   }
   async function promote(id: string) {
-    await promoteDiscard(id)
+    const m = await promoteDiscard(id)
+    if (m) setDiscards((d) => ({ ...d, items: d.items.map((x) => (x.id === id ? { ...x, promotedMemoryId: m.id } : x)) }))
     void refresh(tab)
   }
 
@@ -148,13 +234,13 @@ export default function App() {
     void refresh(tab)
   }
 
+  // 服务端按条件批量（spec 决策 4）：POST /api/memories/bulk-reject-unevaluated
+  // 清空整个未评估尾队，不限于已加载部分。返回后重置 candidate 缓存（决策 8）
+  // 防已拒条目滞留，refresh 拉页 1 重建。
   async function bulkRejectUnevaluated() {
-    const ids = (memCache.candidate.items)
-      .filter((i) => i.status === 'candidate' && priorityRank(i.valueClass) === 2)
-      .map((i) => i.id)
-    if (ids.length === 0) return
-    await bulkPromote(ids, 'reject')
-    void refresh(tab)
+    await bulkRejectUnevaluatedApi()
+    setMemCache((c) => ({ ...c, candidate: emptyPage() }))
+    void refresh('candidate')
   }
 
   // 记忆列表按 createdAt 倒序(newest first)。memCache 在 candidate/approved/rejected
@@ -287,9 +373,9 @@ export default function App() {
           <p>{memItems.length} 条候选记忆待审</p>
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
+              {(status?.unevaluatedCandidates ?? 0) > 0 ? (
                 <button onClick={() => bulkRejectUnevaluated()}>
-                  批量拒绝未评估
+                  批量拒绝未评估 ({status!.unevaluatedCandidates})
                 </button>
               ) : null}
               {/* 回扫端点 /api/rescan(开始)与 /api/rescan/cancel(批边界停止) */}
@@ -406,6 +492,22 @@ export default function App() {
           {discards.items.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无 AI 自动拒绝记录</p>
           )}
+        </>
+      )}
+
+      {/* 列表尾部（五 tab 共用）：哨兵 + 加载更多 / 失败重试 / 到底提示 */}
+      {error ? null : showLoading ? null : (
+        <>
+          <div ref={sentinelRef} style={{ height: 1 }} />
+          {loadingMore[tab] ? <p style={{ color: '#888', fontSize: 13 }}>加载更多…</p> : null}
+          {loadMoreError[tab] ? (
+            <button style={{ fontSize: 13 }} onClick={() => void loadMore(tab)}>
+              加载更多失败，点击重试（{loadMoreError[tab]}）
+            </button>
+          ) : null}
+          {!tabPageOf(tab).hasMore && !listEmpty ? (
+            <p style={{ color: '#aaa', fontSize: 12 }}>没有更多了</p>
+          ) : null}
         </>
       )}
 

@@ -278,3 +278,28 @@ test('api.ts cancelRescan 走 /api/rescan/cancel + 409 静默(source text)', () 
   expect(s).toContain('export async function cancelRescan')
   expect(s).toContain('res.status === 409')
 })
+
+// 五 tab 无限滚动（spec 2026-08-07）：哨兵 + loadMore + 分页缓存结构 +
+// 服务端批量拒绝 + 回扫完成缓存重置。refactor 删掉任一锚点即红。
+test('App.tsx infinite scroll anchors (source text)', () => {
+  expect(src).toContain('IntersectionObserver')
+  expect(src).toContain('loadMore')
+  expect(src).toContain('nextCursor')
+  expect(src).toContain('hasMore')
+  expect(src).toContain('加载更多失败')
+  expect(src).toContain('没有更多了')
+})
+
+test('App.tsx bulk-reject moved to server-side endpoint (source text)', () => {
+  expect(src).toContain('bulk-reject-unevaluated')
+  expect(src).toContain('unevaluatedCandidates')
+})
+
+test('App.tsx resets candidate cache on rescan completion (source text)', () => {
+  expect(src).toContain('prevRescanRunning')
+  expect(src).toContain('emptyPage')
+})
+
+test('App.tsx no legacy full-array memCache (source text)', () => {
+  expect(src).not.toContain('Record<MemoryTabKey, MemoryItem[]>')
+})
