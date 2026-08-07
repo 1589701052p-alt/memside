@@ -98,6 +98,8 @@ export interface MemsideStatus {
   lastError: { error: string } | null
   /** 存量回扫(Task 7)进度/最近报告;老 daemon 无此字段。 */
   rescan?: RescanState
+  /** 未评估候选数（status='candidate' 且 valueClass 非保护类）；老 daemon 无此字段。 */
+  unevaluatedCandidates?: number
 }
 
 /**
@@ -247,6 +249,66 @@ export async function getDistillRunSourceInput(
   const res = await fetchFn(`/api/distill-runs/${jobId}/source-input`)
   if (!res.ok) return null
   return (await res.json()) as { turnCount: number; charCount: number; turns: SourceTurn[] }
+}
+
+// --- 五 tab 无限滚动分页 client（spec 2026-08-07）--------------------------
+// 统一分页形状；旧 daemon 不认识 limit 时返回 { items } 旧形状，hasMore/nextCursor
+// 缺省降级 false/null（一页装全部，不崩）。
+
+export interface PageDto<T> { items: T[]; hasMore: boolean; nextCursor: { ts: number; id: string } | null }
+
+export const WEB_PAGE_SIZE = 50
+
+export interface PageOpts { limit?: number; before?: { ts: number; id: string } }
+
+function pageParams(opts?: PageOpts): URLSearchParams {
+  const p = new URLSearchParams()
+  p.set('limit', String(opts?.limit ?? WEB_PAGE_SIZE))
+  if (opts?.before) {
+    p.set('before', String(opts.before.ts))
+    p.set('beforeId', opts.before.id)
+  }
+  return p
+}
+
+async function parsePage<T>(res: Response): Promise<PageDto<T>> {
+  const data = await res.json()
+  return {
+    items: (data.items ?? []) as T[],
+    hasMore: data.hasMore ?? false,
+    nextCursor: data.nextCursor ?? null,
+  }
+}
+
+export async function listMemoriesPage(
+  fetchFn: FetchLike = fetch,
+  opts: { status: string } & PageOpts = { status: '' },
+): Promise<PageDto<MemoryItem>> {
+  const p = pageParams(opts)
+  p.set('status', opts.status)
+  // status 放最前，与测试锁定的 URL 顺序一致
+  const qs = new URLSearchParams()
+  qs.set('status', opts.status)
+  for (const [k, v] of p) qs.set(k, v)
+  return parsePage<MemoryItem>(await fetchFn(`/api/memories?${qs}`))
+}
+
+export async function listDiscardsPage(
+  fetchFn: FetchLike = fetch, opts: PageOpts = {},
+): Promise<PageDto<DiscardItem>> {
+  return parsePage<DiscardItem>(await fetchFn(`/api/discards?${pageParams(opts)}`))
+}
+
+export async function listDistillRunsPage(
+  fetchFn: FetchLike = fetch, opts: PageOpts = {},
+): Promise<PageDto<DistillRunListItem>> {
+  return parsePage<DistillRunListItem>(await fetchFn(`/api/distill-runs?${pageParams(opts)}`))
+}
+
+/** POST /api/memories/bulk-reject-unevaluated — 服务端按条件清空未评估尾队。 */
+export async function bulkRejectUnevaluated(fetchFn: FetchLike = fetch): Promise<{ rejected: number }> {
+  const res = await fetchFn('/api/memories/bulk-reject-unevaluated', { method: 'POST' })
+  return (await res.json()) as { rejected: number }
 }
 
 // --- LLM 设置（凭证 UI 配置）client -------------------------------------------
