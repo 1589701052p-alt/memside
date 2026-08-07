@@ -26,6 +26,8 @@ export interface RescanReport {
   discarded: number
   skipped: number
   keptUpdated: number
+  /** 被 shouldStop 截停(true)= 还有候选没判,可重跑续判。 */
+  stopped: boolean
 }
 
 const RESCAN_BATCH = 15
@@ -45,10 +47,11 @@ const toCandidate = (m: Memory): DistillCandidate => ({
  */
 export async function rescanCandidates(
   db: DbClient, deps: RescanDeps,
-  onProgress?: (done: number, total: number) => void,
+  onProgress?: (done: number, total: number, discarded: number) => void,
+  shouldStop?: () => boolean,
 ): Promise<RescanReport> {
   const all = await listAllCandidatesForRescan(db)
-  const report: RescanReport = { processed: 0, discarded: 0, skipped: 0, keptUpdated: 0 }
+  const report: RescanReport = { processed: 0, discarded: 0, skipped: 0, keptUpdated: 0, stopped: false }
   if (all.length === 0) return report
   // 审计行挂一个合成 job 行(distill_job_id NOT NULL + FK)。
   const jobId = ulid()
@@ -73,7 +76,7 @@ export async function rescanCandidates(
     if (!rootDir || !existsSync(rootDir) || parsePath(rootDir).root === rootDir) {
       report.skipped += group.length
       report.processed += group.length
-      onProgress?.(report.processed, all.length)
+      onProgress?.(report.processed, all.length, report.discarded)
       continue
     }
     let approvedTitles: string[] = []
@@ -92,6 +95,8 @@ export async function rescanCandidates(
     }
     for (const [sourceKind, kindGroup] of byKind) {
     for (let i = 0; i < kindGroup.length; i += RESCAN_BATCH) {
+      // 批边界停止(spec §3.2):批内不查——正在判的批照常判完落库,无脏状态。
+      if (shouldStop?.()) { report.stopped = true; return report }
       const batch = kindGroup.slice(i, i + RESCAN_BATCH)
       const cands = batch.map(toCandidate)
       // 故障倒向保留:单批判定抛错不中断整个回扫,该批全部保留并计数。
@@ -107,7 +112,7 @@ export async function rescanCandidates(
         console.warn('memside: rescan batch judge failed, keeping batch', e)
         report.keptUpdated += batch.length
         report.processed += batch.length
-        onProgress?.(report.processed, all.length)
+        onProgress?.(report.processed, all.length, report.discarded)
         continue
       }
       for (let j = 0; j < batch.length; j++) {
@@ -135,7 +140,7 @@ export async function rescanCandidates(
         }
       }
       report.processed += batch.length
-      onProgress?.(report.processed, all.length)
+      onProgress?.(report.processed, all.length, report.discarded)
     }
     }
   }

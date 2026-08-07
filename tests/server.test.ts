@@ -768,7 +768,7 @@ test('POST /api/rescan 202 fire-and-forget + status 暴露 rescan 字段', async
     st = (await req('/api/status')).body
   }
   expect(st.rescan.running).toBe(false)
-  expect(st.rescan.report).toEqual({ processed: 0, discarded: 0, skipped: 0, keptUpdated: 0 })
+  expect(st.rescan.report).toEqual({ processed: 0, discarded: 0, skipped: 0, keptUpdated: 0, stopped: false })
 })
 
 test('POST /api/rescan 运行中重按 -> 409(并发防护)', async () => {
