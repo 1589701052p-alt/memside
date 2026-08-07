@@ -1,5 +1,9 @@
 import { test, expect } from 'bun:test'
-import { listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard, listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection, type MemoryItem } from '@/web/api'
+import {
+  listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
+  listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection, type MemoryItem,
+  listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated,
+} from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
 // not unit-tested; this client is the testable seam — a `fetchFn` param lets
@@ -240,4 +244,52 @@ test('listMemories 透传 origin/evidence 字段', async () => {
   // items: MemoryItem[] -- 访问 .origin/.evidence 要求类型声明这两个字段
   expect(items[0]!.origin).toBe('user-stated')
   expect(items[0]!.evidence).toBe('用户原话摘抄')
+})
+
+// --- Task 5: tab list pagination client (infinite scroll) ---
+// Locks the paginated list wrappers: listMemoriesPage / listDiscardsPage /
+// listDistillRunsPage build correct cursor URLs, parse PageDto, and degrade
+// gracefully when an old daemon returns the legacy { items } shape.
+
+test('listMemoriesPage: URL 拼 status/limit/游标，解析分页形状', async () => {
+  let called = ''
+  const fetchFn = (async (url: string) => {
+    called = url
+    return new Response(JSON.stringify({ items: [{ id: '1' }], hasMore: true, nextCursor: { ts: 123, id: 'abc' } }), { status: 200 })
+  }) as any
+  const page = await listMemoriesPage(fetchFn, { status: 'candidate', limit: 50, before: { ts: 456, id: 'x/y' } })
+  expect(called).toBe('/api/memories?status=candidate&limit=50&before=456&beforeId=x%2Fy')
+  expect(page.hasMore).toBe(true)
+  expect(page.nextCursor).toEqual({ ts: 123, id: 'abc' })
+})
+
+test('listMemoriesPage: 旧 daemon 无 hasMore -> false（兼容降级）', async () => {
+  const fetchFn = (async () => new Response(JSON.stringify({ items: [{ id: '1' }] }), { status: 200 })) as any
+  const page = await listMemoriesPage(fetchFn, { status: 'candidate' })
+  expect(page.hasMore).toBe(false)
+  expect(page.nextCursor).toBeNull()
+})
+
+test('listDiscardsPage / listDistillRunsPage: URL 与形状', async () => {
+  const urls: string[] = []
+  const fetchFn = (async (url: string) => {
+    urls.push(url)
+    return new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null }), { status: 200 })
+  }) as any
+  await listDiscardsPage(fetchFn, { limit: 50, before: { ts: 1, id: 'a' } })
+  expect(urls[0]).toBe('/api/discards?limit=50&before=1&beforeId=a')
+  await listDistillRunsPage(fetchFn, { limit: 50 })
+  expect(urls[1]).toBe('/api/distill-runs?limit=50')
+})
+
+test('bulkRejectUnevaluated: POST 到按条件批量端点', async () => {
+  let captured: { url: string; method: string } | null = null
+  const fetchFn = (async (url: string, init: any) => {
+    captured = { url, method: init.method }
+    return new Response(JSON.stringify({ rejected: 3 }), { status: 200 })
+  }) as any
+  const r = await bulkRejectUnevaluated(fetchFn)
+  expect(captured!.url).toBe('/api/memories/bulk-reject-unevaluated')
+  expect(captured!.method).toBe('POST')
+  expect(r.rejected).toBe(3)
 })

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs } from '@/db/schema'
@@ -31,7 +31,7 @@ export interface MemoryInput {
   valueClass?: ValueClass | null
   /** 主题归组键（spec §4.4）；缺省/null = 未分组。 */
   subjectSlug?: string | null
-  /** 出处（spec §R1）；缺省/null = 未标注（老行/手动记忆/promoteDiscard 提升行）。 */
+  /** 出处（spec §R1）；缺省/null = 未标注（老行迁移/手动记忆/promoteDiscard 提升行）。 */
   origin?: DistillOrigin | null
   /** 出处原句摘抄；缺省/null = 无。 */
   evidence?: string | null
@@ -505,17 +505,21 @@ export interface DiscardRow {
   promotedMemoryId: string | null
 }
 
+function rowToDiscard(r: any): DiscardRow {
+  return {
+    id: r.id, distillJobId: r.distillJobId, title: r.title, bodyMd: r.bodyMd, reason: r.reason,
+    ts: r.ts, scopeType: r.scopeType ?? null, scopeId: r.scopeId ?? null, sourceCwd: r.sourceCwd ?? null,
+    runtime: r.runtime ?? null, sourceKind: r.sourceKind ?? null, promotedMemoryId: r.promotedMemoryId ?? null,
+  }
+}
+
 export async function listDiscards(
   db: DbClient,
   opts: { limit?: number } = {},
 ): Promise<DiscardRow[]> {
   const limit = opts.limit ?? DISCARDS_LIST_LIMIT
   const rows = await db.select().from(memoryDiscards).orderBy(desc(memoryDiscards.ts)).limit(limit).all()
-  return rows.map((r) => ({
-    id: r.id, distillJobId: r.distillJobId, title: r.title, bodyMd: r.bodyMd, reason: r.reason,
-    ts: r.ts, scopeType: r.scopeType ?? null, scopeId: r.scopeId ?? null, sourceCwd: r.sourceCwd ?? null,
-    runtime: r.runtime ?? null, sourceKind: r.sourceKind ?? null, promotedMemoryId: r.promotedMemoryId ?? null,
-  }))
+  return rows.map(rowToDiscard)
 }
 
 // ---------------------------------------------------------------------------
@@ -670,25 +674,34 @@ export interface DistillRunListRow {
   sourceAgentId: string | null
 }
 
-/**
- * 最近 N 条 run（ts DESC，默认 200）。不含 rawOutput（走 GET /api/distill-runs/:jobId）。
- * job 元数据（cwd/runtime/createdAt/sourceAgentId）通过 inArray 二次查询带出，避免
- * drizzle JOIN 结果键名不确定性。孤儿 run（job 已删）-> cwd=null / createdAt=0。
- */
-export async function listRecentDistillRuns(
-  db: DbClient, opts: { limit?: number } = {},
+const RUN_LIST_COLS = {
+  distillJobId: memoryDistillRuns.distillJobId, outcome: memoryDistillRuns.outcome,
+  rawCount: memoryDistillRuns.distilledCount, acceptedCount: memoryDistillRuns.acceptedCount,
+  dedupedCount: memoryDistillRuns.dedupedCount, filteredCount: memoryDistillRuns.filteredCount,
+  storedCount: memoryDistillRuns.storedCount, discardedCount: memoryDistillRuns.discardedCount,
+  durationMs: memoryDistillRuns.durationMs, errorMessage: memoryDistillRuns.errorMessage,
+  ts: memoryDistillRuns.ts,
+}
+
+interface RunListBaseRow {
+  distillJobId: string
+  outcome: string
+  rawCount: number
+  acceptedCount: number
+  dedupedCount: number
+  filteredCount: number
+  storedCount: number
+  discardedCount: number
+  durationMs: number
+  errorMessage: string | null
+  ts: number
+}
+
+/** run 行（已按 ts/id 排好序、已截页）拼 job 元数据；孤儿 run（job 已删）-> cwd=null / createdAt=0。 */
+async function attachRunJobMeta(
+  db: DbClient,
+  runRows: RunListBaseRow[],
 ): Promise<DistillRunListRow[]> {
-  const limit = opts.limit ?? DISTILL_RUNS_LIST_LIMIT
-  const cols = {
-    distillJobId: memoryDistillRuns.distillJobId, outcome: memoryDistillRuns.outcome,
-    rawCount: memoryDistillRuns.distilledCount, acceptedCount: memoryDistillRuns.acceptedCount,
-    dedupedCount: memoryDistillRuns.dedupedCount, filteredCount: memoryDistillRuns.filteredCount,
-    storedCount: memoryDistillRuns.storedCount, discardedCount: memoryDistillRuns.discardedCount,
-    durationMs: memoryDistillRuns.durationMs, errorMessage: memoryDistillRuns.errorMessage,
-    ts: memoryDistillRuns.ts,
-  }
-  const runRows = await db.select(cols).from(memoryDistillRuns)
-    .orderBy(desc(memoryDistillRuns.ts)).limit(limit).all()
   if (runRows.length === 0) return []
   const jobRows = await db.select().from(memoryDistillJobs)
     .where(inArray(memoryDistillJobs.id, runRows.map((r) => r.distillJobId))).all()
@@ -704,4 +717,141 @@ export async function listRecentDistillRuns(
       sourceAgentId: j?.sourceAgentId ?? null,
     }
   })
+}
+
+/**
+ * 最近 N 条 run（ts DESC，默认 200）。不含 rawOutput（走 GET /api/distill-runs/:jobId）。
+ * job 元数据（cwd/runtime/createdAt/sourceAgentId）通过 inArray 二次查询带出，避免
+ * drizzle JOIN 结果键名不确定性。孤儿 run（job 已删）-> cwd=null / createdAt=0。
+ */
+export async function listRecentDistillRuns(
+  db: DbClient, opts: { limit?: number } = {},
+): Promise<DistillRunListRow[]> {
+  const limit = opts.limit ?? DISTILL_RUNS_LIST_LIMIT
+  const runRows = await db.select(RUN_LIST_COLS).from(memoryDistillRuns)
+    .orderBy(desc(memoryDistillRuns.ts)).limit(limit).all()
+  return attachRunJobMeta(db, runRows)
+}
+
+// ---------------------------------------------------------------------------
+// 五 tab 无限滚动分页（spec 2026-08-07）：复合游标 (sortTs, id) + limit+1 探测
+// hasMore。schema created_at/ts 均 notNull，无需 COALESCE。旧全量/LIMIT-200
+// 函数保留（无 limit 参数的兼容路径继续用），分页函数并列新增。
+// ---------------------------------------------------------------------------
+
+export interface PageCursor { ts: number; id: string }
+export interface Page<T> { items: T[]; hasMore: boolean; nextCursor: PageCursor | null }
+
+export const MEMORY_PAGE_DEFAULT_LIMIT = 50
+export const MEMORY_PAGE_MAX_LIMIT = 200
+
+/** limit clamp 到 [1, 200]；undefined/NaN -> 默认 50。 */
+export function clampPageLimit(limit?: number): number {
+  if (limit === undefined || !Number.isFinite(limit)) return MEMORY_PAGE_DEFAULT_LIMIT
+  return Math.min(Math.max(Math.floor(limit), 1), MEMORY_PAGE_MAX_LIMIT)
+}
+
+export async function listMemoriesPage(
+  db: DbClient,
+  opts: { statuses: MemoryStatus[]; limit?: number; before?: PageCursor },
+): Promise<Page<Memory>> {
+  const limit = clampPageLimit(opts.limit)
+  const conds = []
+  if (opts.statuses.length > 0) conds.push(inArray(memories.status, opts.statuses))
+  if (opts.before) {
+    conds.push(or(
+      lt(memories.createdAt, opts.before.ts),
+      and(eq(memories.createdAt, opts.before.ts), lt(memories.id, opts.before.id)),
+    ))
+  }
+  const rows = await db.select().from(memories)
+    .where(conds.length > 0 ? and(...conds) : undefined)
+    .orderBy(desc(memories.createdAt), desc(memories.id))
+    .limit(limit + 1).all()
+  const hasMore = rows.length > limit
+  const pageRows = rows.slice(0, limit)
+  const last = pageRows[pageRows.length - 1]
+  return {
+    items: pageRows.map(rowToMemory),
+    hasMore,
+    nextCursor: hasMore && last ? { ts: last.createdAt, id: last.id } : null,
+  }
+}
+
+export async function listDiscardsPage(
+  db: DbClient,
+  opts: { limit?: number; before?: PageCursor } = {},
+): Promise<Page<DiscardRow>> {
+  const limit = clampPageLimit(opts.limit)
+  const conds = opts.before
+    ? [or(
+        lt(memoryDiscards.ts, opts.before.ts),
+        and(eq(memoryDiscards.ts, opts.before.ts), lt(memoryDiscards.id, opts.before.id)),
+      )]
+    : []
+  const rows = await db.select().from(memoryDiscards)
+    .where(conds.length > 0 ? and(...conds) : undefined)
+    .orderBy(desc(memoryDiscards.ts), desc(memoryDiscards.id))
+    .limit(limit + 1).all()
+  const hasMore = rows.length > limit
+  const pageRows = rows.slice(0, limit)
+  const last = pageRows[pageRows.length - 1]
+  return {
+    items: pageRows.map(rowToDiscard),
+    hasMore,
+    nextCursor: hasMore && last ? { ts: last.ts, id: last.id } : null,
+  }
+}
+
+export async function listDistillRunsPage(
+  db: DbClient,
+  opts: { limit?: number; before?: PageCursor } = {},
+): Promise<Page<DistillRunListRow>> {
+  const limit = clampPageLimit(opts.limit)
+  const conds = opts.before
+    ? [or(
+        lt(memoryDistillRuns.ts, opts.before.ts),
+        and(eq(memoryDistillRuns.ts, opts.before.ts), lt(memoryDistillRuns.distillJobId, opts.before.id)),
+      )]
+    : []
+  const runRows = await db.select(RUN_LIST_COLS).from(memoryDistillRuns)
+    .where(conds.length > 0 ? and(...conds) : undefined)
+    .orderBy(desc(memoryDistillRuns.ts), desc(memoryDistillRuns.distillJobId))
+    .limit(limit + 1).all()
+  const hasMore = runRows.length > limit
+  const pageRows = runRows.slice(0, limit)
+  const last = pageRows[pageRows.length - 1]
+  return {
+    items: await attachRunJobMeta(db, pageRows),
+    hasMore,
+    nextCursor: hasMore && last ? { ts: last.ts, id: last.distillJobId } : null,
+  }
+}
+
+/** 6 个保护类 valueClass（= 前端 priorityRank < 2 的全集）；其余候选视为「未评估」。 */
+export const PROTECTED_VALUE_CLASSES: readonly string[] = [
+  'user-rule', 'decision', 'preference', 'convention', 'trap', 'topology',
+]
+
+/**
+ * 服务端按条件批量拒绝「未评估」候选（spec 2026-08-07 决策 4）：分页后前端只加载
+ * 第一页，批量拒绝必须覆盖整个尾队。逐行走既有 promoteCandidate 路径（状态机 +
+ * 审计一致）；not-found/终态竞态跳过继续（与 server bulk-promote 同款容错）。
+ */
+export async function bulkRejectUnevaluated(db: DbClient): Promise<{ rejected: number }> {
+  const rows = await db.select({ id: memories.id }).from(memories)
+    .where(and(
+      eq(memories.status, 'candidate'),
+      or(isNull(memories.valueClass), notInArray(memories.valueClass, [...PROTECTED_VALUE_CLASSES])),
+    )).all()
+  let rejected = 0
+  for (const r of rows) {
+    try {
+      await promoteCandidate(db, r.id, { action: 'reject' })
+      rejected += 1
+    } catch {
+      // 并发下已被处置的行跳过，继续其余
+    }
+  }
+  return { rejected }
 }

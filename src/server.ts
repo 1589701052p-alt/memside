@@ -8,7 +8,7 @@ import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memor
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus } from '@/memory/pure'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, MemoryNotFoundError } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor } from '@/memory/store'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
 import type { OpencodeMessage } from '@/opencode/transcript'
@@ -359,6 +359,13 @@ export function createApp(deps: AppDeps) {
     const runStats: Record<string, number> = {}
     for (const r of recentRuns) runStats[r.outcome] = (runStats[r.outcome] ?? 0) + 1
     const errored = jobs.find((j) => j.lastError)
+    // 未评估候选计数：memRows 已全量加载，直接 JS 计数，不加查询
+    // （status 全表扫描优化是非目标）。保护类 valueClass 之外/无 valueClass 的
+    // candidate 即「未评估」（与 bulkRejectUnevaluated 同条件，spec 决策 4）。
+    const protectedVc = new Set<string>(PROTECTED_VALUE_CLASSES)
+    const unevaluatedCandidates = memRows.filter(
+      (m) => m.status === 'candidate' && (m.valueClass === null || !protectedVc.has(m.valueClass)),
+    ).length
     return c.json({
       events: events.length,
       jobs: jobStats,
@@ -366,6 +373,7 @@ export function createApp(deps: AppDeps) {
       discards: discardRows.length,
       distillRuns: { total: recentRuns.length, byOutcome: runStats },
       lastError: errored ? { error: errored.lastError } : null,
+      unevaluatedCandidates,
       rescan: rescanState,
     })
   })
@@ -416,10 +424,29 @@ export function createApp(deps: AppDeps) {
     return c.json({ stopping: true }, 202)
   })
 
+  /** 非法/缺省游标宽松忽略（undefined = 第一页），不 400（spec 契约）。 */
+  function parseBefore(c: { req: { query: (k: string) => string | undefined } }): PageCursor | undefined {
+    const b = c.req.query('before')
+    const bid = c.req.query('beforeId')
+    if (!b || !bid) return undefined
+    const ts = Number(b)
+    if (!Number.isFinite(ts)) return undefined
+    return { ts, id: bid }
+  }
+
   app.get('/api/memories', async (c) => {
     const statusParam = c.req.query('status') ?? ''
     const VALID: Set<string> = new Set(['candidate', 'approved', 'archived', 'superseded', 'rejected'])
     const wanted = statusParam.split(',').map((s) => s.trim()).filter((s): s is MemoryStatus => s.length > 0 && VALID.has(s))
+    // 带 limit -> 游标分页（spec 2026-08-07）；不带 -> 旧全量形状（兼容锚点）
+    if (c.req.query('limit') !== undefined) {
+      const page = await listMemoriesPage(deps.db, {
+        statuses: wanted,
+        limit: Number(c.req.query('limit')),
+        before: parseBefore(c),
+      })
+      return c.json(page)
+    }
     const rows = wanted.length > 0
       ? await deps.db.select().from(memories).where(inArray(memories.status, wanted)).orderBy(desc(memories.createdAt)).all()
       : await deps.db.select().from(memories).orderBy(desc(memories.createdAt)).all()
@@ -505,8 +532,19 @@ export function createApp(deps: AppDeps) {
     return c.json({ rejected: count })
   })
 
+  // 服务端按条件批量拒绝「未评估」候选（spec 决策 4）：覆盖整个尾队，
+  // 不依赖前端分页加载了多少。
+  app.post('/api/memories/bulk-reject-unevaluated', async (c) => {
+    const r = await bulkRejectUnevaluated(deps.db)
+    deps.broadcast({ type: 'memories.bulk-rejected', rejected: r.rejected })
+    return c.json(r)
+  })
+
   // --- Discards (AI 自动拒绝审计) -----------------------------------------
   app.get('/api/discards', async (c) => {
+    if (c.req.query('limit') !== undefined) {
+      return c.json(await listDiscardsPage(deps.db, { limit: Number(c.req.query('limit')), before: parseBefore(c) }))
+    }
     const items = await listDiscards(deps.db)
     return c.json({ items })
   })
@@ -526,13 +564,13 @@ export function createApp(deps: AppDeps) {
   // 列表不含 rawOutput（走详情端点懒加载）；详情返回完整 DistillRunRow 或 404；
   // source-input 复用按 distillJobId 查快照的 store 函数。
   app.get('/api/distill-runs', async (c) => {
-    const limitParam = c.req.query('limit')
-    let limit = 200
-    if (limitParam) {
-      const n = Number(limitParam)
-      if (Number.isFinite(n) && n > 0) limit = Math.min(Math.floor(n), 500)
+    // 带 limit -> 游标分页；不带 -> 旧 LIMIT 200 形状（兼容锚点）。
+    // 旧 limit 参数解析（cap 500）随分流删除——带 limit 现在走分页形状；
+    // 现有 web UI 不传 limit（App.tsx 的 listDistillRuns(fetch)），无行为回退。
+    if (c.req.query('limit') !== undefined) {
+      return c.json(await listDistillRunsPage(deps.db, { limit: Number(c.req.query('limit')), before: parseBefore(c) }))
     }
-    const items = await listRecentDistillRuns(deps.db, { limit })
+    const items = await listRecentDistillRuns(deps.db, { limit: 200 })
     return c.json({ items })
   })
 

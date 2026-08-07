@@ -1,12 +1,15 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
+import { eq } from 'drizzle-orm'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
-import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun } from '@/memory/store'
+import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun, logDiscards } from '@/memory/store'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
 import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards } from '@/db/schema'
+import type { MemoryStatus } from '@/memory/pure'
+import type { ValueClass } from '@/memory/valueFilter'
 
 // EBUSY-safe pattern (same as store-promote.test.ts / adapter-claude.test.ts):
 // wipe `root` once in beforeAll, give each test its own fresh subdir, and
@@ -881,4 +884,95 @@ test('POST /api/rescan 运行级崩溃 -> status.rescan.error 可见(不静默�
   }
   expect(st.rescan.running).toBe(false)
   expect(st.rescan.error).toContain('boom-insert')
+})
+
+// --- Task 4 (2026-08-07 tab-list-pagination): 三列表端点游标分页分流 + ----------
+// bulk-reject-unevaluated + /api/status unevaluatedCandidates。
+// 锁定 HTTP 契约：带 limit -> {items,hasMore,nextCursor} 分页形状；不带 -> 旧全量
+// 形状（兼容锚点）；非法游标宽松忽略不 400；bulk-reject 走服务端按条件批量 + broadcast。
+
+async function seedMem(createdAt: number, status: MemoryStatus, valueClass: ValueClass | null = null) {
+  const m = await createCandidate(db, {
+    scopeType: 'global', scopeId: null, title: `t-${createdAt}`, bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null, valueClass,
+  })
+  await db.update(memories).set({ createdAt, status }).where(eq(memories.id, m.id)).run()
+  return m.id
+}
+
+test('GET /api/memories?limit 分页形状 + 游标翻页', async () => {
+  for (const ts of [1000, 2000, 3000]) await seedMem(ts, 'candidate')
+  const p1 = await req('/api/memories?status=candidate&limit=2')
+  expect(p1.status).toBe(200)
+  expect(p1.body.items.length).toBe(2)
+  expect(p1.body.hasMore).toBe(true)
+  expect(p1.body.nextCursor).toEqual({ ts: 2000, id: p1.body.items[1].id })
+  const p2 = await req(`/api/memories?status=candidate&limit=2&before=${p1.body.nextCursor.ts}&beforeId=${p1.body.nextCursor.id}`)
+  expect(p2.body.items.length).toBe(1)
+  expect(p2.body.hasMore).toBe(false)
+  expect(p2.body.nextCursor).toBeNull()
+})
+
+test('GET /api/memories 不带 limit -> 旧全量形状（兼容锚点）', async () => {
+  for (const ts of [1000, 2000, 3000]) await seedMem(ts, 'candidate')
+  const r = await req('/api/memories?status=candidate')
+  expect(r.status).toBe(200)
+  expect(r.body.items.length).toBe(3)
+  expect('hasMore' in r.body).toBe(false)
+})
+
+test('GET /api/memories 非法游标宽松忽略不 400', async () => {
+  await seedMem(1000, 'candidate')
+  const r = await req('/api/memories?status=candidate&limit=50&before=abc&beforeId=x')
+  expect(r.status).toBe(200)
+  expect(r.body.items.length).toBe(1)
+})
+
+test('GET /api/memories limit clamp：0 -> 1 条，9999 -> 不报错', async () => {
+  for (const ts of [1000, 2000, 3000]) await seedMem(ts, 'candidate')
+  const r0 = await req('/api/memories?status=candidate&limit=0')
+  expect(r0.body.items.length).toBe(1)
+  const rBig = await req('/api/memories?status=candidate&limit=9999')
+  expect(rBig.status).toBe(200)
+  expect(rBig.body.hasMore).toBe(false)
+})
+
+test('GET /api/discards 分页/旧形状分流', async () => {
+  await logDiscards(db, 'job-d', [1, 2, 3].map((i) => ({
+    title: `d-${i}`, bodyMd: 'b', reason: 'fleeting' as const,
+    scopeType: 'global' as const, scopeId: null, sourceCwd: null,
+    runtime: null, sourceKind: 'conversation' as const,
+  })))
+  const legacy = await req('/api/discards')
+  expect(legacy.body.items.length).toBe(3)
+  expect('hasMore' in legacy.body).toBe(false)
+  const p1 = await req('/api/discards?limit=2')
+  expect(p1.body.items.length).toBe(2)
+  expect(p1.body.hasMore).toBe(true)
+})
+
+test('GET /api/distill-runs 分页/旧形状分流', async () => {
+  const legacy = await req('/api/distill-runs')
+  expect(legacy.status).toBe(200)
+  expect('hasMore' in legacy.body).toBe(false)
+  const paged = await req('/api/distill-runs?limit=50')
+  expect(paged.status).toBe(200)
+  expect(paged.body).toEqual({ items: [], hasMore: false, nextCursor: null })
+})
+
+test('POST /api/memories/bulk-reject-unevaluated 按条件批量 + broadcast', async () => {
+  await seedMem(1000, 'candidate', null)
+  await seedMem(2000, 'candidate', 'decision')
+  const r = await req('/api/memories/bulk-reject-unevaluated', { method: 'POST' })
+  expect(r.status).toBe(200)
+  expect(r.body.rejected).toBe(1)
+  expect(broadcastCalls.some((m: any) => m?.type === 'memories.bulk-rejected')).toBe(true)
+})
+
+test('GET /api/status 含 unevaluatedCandidates 且数值正确', async () => {
+  await seedMem(1000, 'candidate', null)
+  await seedMem(2000, 'candidate', 'decision')
+  await seedMem(3000, 'approved', null)
+  const r = await req('/api/status')
+  expect(r.body.unevaluatedCandidates).toBe(1)
 })

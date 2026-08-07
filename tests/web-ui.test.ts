@@ -278,3 +278,44 @@ test('api.ts cancelRescan 走 /api/rescan/cancel + 409 静默(source text)', () 
   expect(s).toContain('export async function cancelRescan')
   expect(s).toContain('res.status === 409')
 })
+
+// 五 tab 无限滚动（spec 2026-08-07）：哨兵 + loadMore + 分页缓存结构 +
+// 服务端批量拒绝 + 回扫完成缓存重置。refactor 删掉任一锚点即红。
+test('App.tsx infinite scroll anchors (source text)', () => {
+  expect(src).toContain('IntersectionObserver')
+  expect(src).toContain('loadMore')
+  expect(src).toContain('nextCursor')
+  expect(src).toContain('hasMore')
+  expect(src).toContain('加载更多失败')
+  expect(src).toContain('没有更多了')
+})
+
+test('App.tsx bulk-reject moved to server-side endpoint (source text)', () => {
+  expect(src).toContain('bulk-reject-unevaluated')
+  expect(src).toContain('unevaluatedCandidates')
+})
+
+test('App.tsx resets candidate cache on rescan completion (source text)', () => {
+  expect(src).toContain('prevRescanRunning')
+  expect(src).toContain('emptyPage')
+})
+
+test('App.tsx no legacy full-array memCache (source text)', () => {
+  expect(src).not.toContain('Record<MemoryTabKey, MemoryItem[]>')
+})
+
+// 回归防护（Task 8 评审 Important #1）：哨兵 div 必须渲染在
+// `error ? null : showLoading ? null : (` 门控块之外（之前）。哨兵若在门控内，
+// 首访 tab 时 pending=true -> showLoading=true -> 哨兵不在 DOM，observer effect
+// （依赖 [tab]，只在切 tab 时跑）读到 null 早退，此后不再重跑 -> 无限滚动死锁，
+// 直到切走再切回才恢复；transient error 后还会观察已 detach 的旧节点。
+// 哨兵无条件渲染无害：Observer 回调走 loadMore，已被 pending/loadingMore/
+// nextCursorAfter 三重守卫，加载中相交是安全 no-op。
+test('App.tsx sentinel renders outside the error/showLoading gate (source text)', () => {
+  const sentinelIdx = src.indexOf('ref={sentinelRef}')
+  const gateIdx = src.indexOf('error ? null : showLoading ? null : (')
+  expect(sentinelIdx).toBeGreaterThan(-1)
+  expect(gateIdx).toBeGreaterThan(-1)
+  // 哨兵必须在门控 opener 之前（无条件渲染），否则首访 tab observer 无 DOM 可挂
+  expect(sentinelIdx).toBeLessThan(gateIdx)
+})
