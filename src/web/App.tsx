@@ -44,7 +44,8 @@ interface TabPage<T> { items: T[]; nextCursor: { ts: number; id: string } | null
 function emptyPage<T>(): TabPage<T> { return { items: [], nextCursor: null, hasMore: true } }
 
 /**
- * 4-tab 审计视图。顶部 tab 切换:候选审批 / 已审批 / 已拒绝 / AI自动拒绝。每 tab
+ * 5+1 tab 视图：候选审批 / 已审批 / 已拒绝 / AI自动拒绝 / 蒸馏记录 五个列表 tab
+ * + 设置 tab（isListTab 判据区分，spec 2026-08-07 settings-tab）。顶部 tab 切换。每列表 tab
  * 独立数据源 + 操作 + 3s 轮询;切 tab 清旧 interval 建新的(useEffect 依赖 tab)。
  * 候选 tab 仍同时拉 status;其余 tab 也拉 status(计数徽标 + 状态栏)。
  *
@@ -510,11 +511,12 @@ export default function App() {
 
       {isListTab(tab) ? (
         <>
-          {/* 列表尾部（五列表 tab 共用）。哨兵无条件渲染、在门控块外：observer effect 依赖
-              [tab] 只在切 tab 时跑一次，哨兵若藏进门控（首访 pending=true -> 不在 DOM）
+          {/* 列表尾部（五列表 tab 共用，settings 由外层 isListTab 门控整体不渲染）。
+              哨兵对列表 tab 无条件渲染、在内层 error/showLoading 门控块外：observer effect
+              依赖 [tab] 只在切 tab 时跑一次，哨兵若藏进内层门控（首访 pending=true -> 不在 DOM）
               则 observer 首访永远挂不上、无限滚动死锁（评审 Important #1）。加载中/出错时
               哨兵相交是安全 no-op——loadMore 有 pending/loadingMore/nextCursorAfter 三重守卫。
-              加载更多 / 失败重试 / 到底提示仍在门控内。 */}
+              加载更多 / 失败重试 / 到底提示仍在内层门控内。 */}
           <div ref={sentinelRef} style={{ height: 1 }} />
           {error ? null : showLoading ? null : (
             <>
