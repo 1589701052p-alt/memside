@@ -203,7 +203,7 @@ test('App.tsx stale-while-revalidate：用 memCache + shouldShowLoading，不再
 // agentic value judge 配置面（2026-08-06 Task 6）：设置区「判定」小节存在且走
 // /api/settings/judge，含模式下拉（质量/经济）与两个预算输入；保存失败显错误不静默。
 // 源码文本断言锁锚点，refactor 删除即变红。
-test('App.tsx 含「判定」设置小节：模式下拉 + 预算输入 + /api/settings/judge', () => {
+test('App.tsx 含「判定」设置小节：模式卡片 + 预算输入 + /api/settings/judge', () => {
   const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
   const api = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
   expect(src).toContain('判定')
@@ -211,8 +211,9 @@ test('App.tsx 含「判定」设置小节：模式下拉 + 预算输入 + /api/s
   expect(src).toContain('JudgeSettings')
   expect(src).toContain('fetchJudgeConfig')
   expect(src).toContain('saveJudgeConfig')
-  expect(src).toContain('质量(agent 终审)')
-  expect(src).toContain('经济(单发判定)')
+  expect(src).toContain('质量模式(默认)')
+  expect(src).toContain('经济模式')
+  expect(src).toContain('有未保存修改')
   expect(src).toContain('保存失败')
 })
 
@@ -227,4 +228,34 @@ test('App.tsx 候选 tab 含「回扫存量」按钮 + 进度行 + /api/rescan',
   expect(appSrc).toContain('回扫中')
   expect(appSrc).toContain('回扫失败')
   expect(apiSrc).toContain('/api/rescan')
+})
+
+// 回归防护(spec 2026-08-07 §3.1):判定设置区必须让人看懂——模式卡片带后果说明、
+// 预算字段完整中文 label + 「不会误丢」附注、预算段仅质量模式显示、保存行有
+// 「有未保存修改」脏提示。源码文本断言,refactor 删除即变红。
+test('JudgeSettings 模式卡片 + 人话说明(source text)', () => {
+  const s = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(s).toContain('每条候选记忆进审批队列前')
+  expect(s).toContain('质量模式(默认)')
+  expect(s).toContain('经济模式')
+  expect(s).toContain('亲手搜代码、读文件查证后再判决')
+  expect(s).toContain('不会误丢有用的')
+})
+
+test('JudgeSettings 预算段:完整 label + 附注 + 仅质量模式显示(source text)', () => {
+  const s = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(s).toContain('查证次数上限')
+  expect(s).toContain('查证时间上限(秒)')
+  expect(s).toContain('查满就用已有信息直接判决')
+  expect(s).toContain('不会误丢')
+  expect(s).toContain("mode === 'quality'")  // 预算段条件渲染
+  expect(s).toContain('有未保存修改')
+  expect(s).toContain('已保存,立即生效')
+})
+
+test('api.ts cancelRescan 走 /api/rescan/cancel + 409 静默(source text)', () => {
+  const s = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
+  expect(s).toContain('/api/rescan/cancel')
+  expect(s).toContain('export async function cancelRescan')
+  expect(s).toContain('res.status === 409')
 })

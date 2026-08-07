@@ -485,9 +485,9 @@ function LlmSettings() {
 }
 
 /**
- * 判定设置区块（agentic value judge Task 6）。
- * 模式下拉（质量=agent 终审 / 经济=单发判定）+ 轮次上限(1-200) + 时间预算(30-3600 秒)。
- * 保存后回显当前生效值;fetch/保存失败显错误,不静默。scheduler 每 tick 现读,
+ * 判定设置区块(spec 2026-08-07 §3.1)。模式卡片(radio 语义,带后果说明)+
+ * 预算段(仅质量模式显示,完整中文 label)+ 保存行聚合(输入框初值=生效值,
+ * 改动显「有未保存修改」)。fetch/保存失败显错误,不静默。scheduler 每 tick 现读,
  * UI 改动即时生效不重启 daemon。
  */
 function JudgeSettings() {
@@ -524,40 +524,84 @@ function JudgeSettings() {
       setMode(c.mode)
       setMaxRounds(String(c.maxRounds))
       setTimeBudgetS(String(c.timeBudgetS))
-      setMsg('已保存')
+      setMsg('已保存,立即生效')
     } catch (e) { setMsg(`保存失败: ${e}`) }
     finally { setBusy(false) }
   }
 
+  const dirty = cfg !== null && (
+    mode !== cfg.mode
+    || Number(maxRounds) !== cfg.maxRounds
+    || Number(timeBudgetS) !== cfg.timeBudgetS)
+
   return (
     <section style={{ margin: '12px 0', padding: 12, border: '1px solid #ddd', borderRadius: 8 }}>
       <h3 style={{ margin: '0 0 8px' }}>判定</h3>
-      {/* 生效回显行：保存后/加载后回显当前生效配置 */}
-      <div style={{ marginBottom: 8, fontSize: 13 }}>
-        当前生效：{cfg
-          ? <><b>{cfg.mode === 'quality' ? '质量(agent 终审)' : '经济(单发判定)'}</b>{' · '}轮次上限 {cfg.maxRounds}{' · '}时间预算 {cfg.timeBudgetS} 秒</>
-          : <b>读取中…</b>}
-      </div>
+      <p style={{ margin: '0 0 10px', fontSize: 13, color: '#666' }}>
+        每条候选记忆进审批队列前,AI 先判一遍值不值得记;被判丢的直接进「AI自动拒绝」,可恢复。
+      </p>
       {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-        <label style={{ fontSize: 13 }}>模式</label>
-        <select value={mode} onChange={(e) => setMode(e.target.value as 'quality' | 'economy')}
-          style={{ flex: '0 0 auto' }}>
-          <option value="quality">质量(agent 终审)</option>
-          <option value="economy">经济(单发判定)</option>
-        </select>
+      {/* 模式卡片:radio 语义,选中高亮边框,带后果说明 */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+        <div onClick={() => setMode('quality')}
+          style={{
+            flex: '1 1 260px', cursor: 'pointer', padding: 10, borderRadius: 8, fontSize: 13,
+            border: mode === 'quality' ? '2px solid #222' : '1px solid #ddd',
+            background: mode === 'quality' ? '#fafafa' : '#fff',
+          }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            <input type="radio" checked={mode === 'quality'} onChange={() => setMode('quality')} style={{ marginRight: 6 }} />
+            质量模式(默认)
+          </div>
+          <div style={{ color: '#666' }}>
+            AI 会打开候选来源的项目仓库,亲手搜代码、读文件查证后再判决。判得准,但慢、费 token。
+          </div>
+        </div>
+        <div onClick={() => setMode('economy')}
+          style={{
+            flex: '1 1 260px', cursor: 'pointer', padding: 10, borderRadius: 8, fontSize: 13,
+            border: mode === 'economy' ? '2px solid #222' : '1px solid #ddd',
+            background: mode === 'economy' ? '#fafafa' : '#fff',
+          }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            <input type="radio" checked={mode === 'economy'} onChange={() => setMode('economy')} style={{ marginRight: 6 }} />
+            经济模式
+          </div>
+          <div style={{ color: '#666' }}>
+            AI 只看候选文字本身,一次出判决,不查仓库。快、省 token;拿不准时倾向把候选留下(不会误丢有用的)。
+          </div>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <input style={{ flex: '1 1 160px' }} type="number" min={1} max={200}
-          placeholder="轮次上限(1-200)"
-          value={maxRounds} onChange={(e) => setMaxRounds(e.target.value)} />
-        <input style={{ flex: '1 1 160px' }} type="number" min={30} max={3600}
-          placeholder="时间预算秒(30-3600)"
-          value={timeBudgetS} onChange={(e) => setTimeBudgetS(e.target.value)} />
-      </div>
+      {/* 预算段:仅质量模式显示(经济模式不跑 agent,预算无意义) */}
+      {mode === 'quality' ? (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 6 }}>
+            <label style={{ fontSize: 13 }}>
+              查证次数上限
+              <input type="number" min={1} max={200} value={maxRounds}
+                onChange={(e) => setMaxRounds(e.target.value)}
+                style={{ display: 'block', marginTop: 4, width: 120 }} />
+              <span style={{ display: 'block', marginTop: 4, color: '#888', fontSize: 12, maxWidth: 240 }}>
+                每批 15 条候选,AI 最多动手查多少次;查满就用已有信息直接判决。
+              </span>
+            </label>
+            <label style={{ fontSize: 13 }}>
+              查证时间上限(秒)
+              <input type="number" min={30} max={3600} value={timeBudgetS}
+                onChange={(e) => setTimeBudgetS(e.target.value)}
+                style={{ display: 'block', marginTop: 4, width: 120 }} />
+              <span style={{ display: 'block', marginTop: 4, color: '#888', fontSize: 12, maxWidth: 240 }}>
+                每批最多花多少秒,超时同上。
+              </span>
+            </label>
+          </div>
+          <div style={{ fontSize: 12, color: '#888' }}>预算耗尽或出任何故障,结果都是「保留」,不会误丢。</div>
+        </div>
+      ) : null}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <button disabled={busy} onClick={() => void onSave()}>保存</button>
         {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
+        {!busy && dirty ? <span style={{ color: '#b80', fontSize: 13 }}>有未保存修改</span> : null}
         {msg ? <span style={{ color: msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
       </div>
     </section>
