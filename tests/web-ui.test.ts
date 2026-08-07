@@ -339,3 +339,22 @@ test('App.tsx sentinel renders outside the error/showLoading gate (source text)'
   // 哨兵必须在门控 opener 之前（无条件渲染），否则首访 tab observer 无 DOM 可挂
   expect(sentinelIdx).toBeLessThan(gateIdx)
 })
+
+// 设置 tab 统一收拢（spec 2026-08-07 settings-tab）：LLM/判定设置从常驻位置收进
+// 独立「设置」tab。回归防护：
+// 1. tab 栏有 settings 条目且不显计数徽标；
+// 2. LlmSettings/JudgeSettings 恰一处 JSX 挂载（常驻位置已删，只在 settings 分支）；
+// 3. 五处列表数据流入口都有 isListTab 短路守卫。
+test('App.tsx 设置 tab 存在 + 区块恰一处挂载 + 数据流短路 (source text)', () => {
+  const s = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  // tab 条目 + 无计数徽标
+  expect(s).toContain("key: 'settings'")
+  expect(s).toContain("label: '设置'")
+  expect(s).toContain('count: null')
+  // 区块只在 settings 分支挂载（常驻位置已移除 => 全文恰一处）
+  expect(s).toContain("tab === 'settings'")
+  expect((s.match(/<LlmSettings \/>/g) ?? []).length).toBe(1)
+  expect((s.match(/<JudgeSettings \/>/g) ?? []).length).toBe(1)
+  // 五处入口守卫：refresh / loadMore / observer effect / 轮询 effect / 列表尾部
+  expect((s.match(/isListTab\(/g) ?? []).length).toBeGreaterThanOrEqual(5)
+})

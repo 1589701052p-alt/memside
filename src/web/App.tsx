@@ -11,7 +11,7 @@ import {
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
-import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, type MemoryTabKey } from './tab-cache'
+import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, type MemoryTabKey } from './tab-cache'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -34,7 +34,7 @@ function priorityRank(vc: string | null | undefined): number {
   return 2
 }
 
-type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs'
+type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'settings'
 
 /**
  * 每 tab 的分页缓存形状（spec 2026-08-07 tab 列表分页）。items=已加载条目，
@@ -64,21 +64,22 @@ export default function App() {
   })
   const [discards, setDiscards] = useState<TabPage<DiscardItem>>(emptyPage())
   const [runs, setRuns] = useState<TabPage<DistillRunListItem>>(emptyPage())
-  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
+  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false })
   // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
   // (对齐重构前的初始 loading=true 行为)。
-  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false })
+  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false })
   const [status, setStatus] = useState<MemsideStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
   const [rescanError, setRescanError] = useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false })
-  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null })
+  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false })
+  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null, settings: null })
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadMoreRef = useRef<(t: TabKey) => Promise<void>>(async () => {})
 
   async function refresh(target: TabKey) {
+    if (!isListTab(target)) return // settings tab 无列表数据流（spec settings-tab §3.2）
     setPending((p) => ({ ...p, [target]: true }))
     try {
       if (target === 'discards') {
@@ -90,8 +91,8 @@ export default function App() {
         setRuns((r) => mergeRefreshPage(r, pg, (x) => x.distillJobId))
         setStatus(st)
       } else {
-        const [pg, st] = await Promise.all([listMemoriesPage(fetch, { status: memoryTabFilter(target), limit: WEB_PAGE_SIZE }), getStatus()])
-        setMemCache((c) => ({ ...c, [target]: mergeRefreshPage(c[target], pg, (x) => x.id) }))
+        const [pg, st] = await Promise.all([listMemoriesPage(fetch, { status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE }), getStatus()])
+        setMemCache((c) => ({ ...c, [target as MemoryTabKey]: mergeRefreshPage(c[target as MemoryTabKey], pg, (x) => x.id) }))
         setStatus(st)
       }
       setLoaded((l) => ({ ...l, [target]: true }))
@@ -111,6 +112,7 @@ export default function App() {
   // 无限滚动加载下一页：守卫（首轮/加载中）-> 按游标拉下一页 -> mergeAppend 追加。
   // 失败记 loadMoreError，尾部显重试按钮，不静默。
   async function loadMore(target: TabKey) {
+    if (!isListTab(target)) return // settings tab 无列表数据流（spec settings-tab §3.2）
     if (pending[target] || loadingMore[target]) return
     const cur = tabPageOf(target)
     const before = nextCursorAfter(cur)
@@ -125,8 +127,8 @@ export default function App() {
         const pg = await listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE, before })
         setRuns((r) => ({ items: mergeAppend(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
       } else {
-        const pg = await listMemoriesPage(fetch, { status: memoryTabFilter(target), limit: WEB_PAGE_SIZE, before })
-        setMemCache((c) => ({ ...c, [target]: { items: mergeAppend(c[target].items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))
+        const pg = await listMemoriesPage(fetch, { status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE, before })
+        setMemCache((c) => ({ ...c, [target as MemoryTabKey]: { items: mergeAppend(c[target as MemoryTabKey].items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))
       }
     } catch (e) {
       setLoadMoreError((er) => ({ ...er, [target]: e instanceof Error ? e.message : String(e) }))
@@ -140,6 +142,7 @@ export default function App() {
 
   // 无限滚动哨兵：触底自动追加下一页；切 tab/卸载 disconnect（spec 决策 1）
   useEffect(() => {
+    if (!isListTab(tab)) return // settings tab 无无限滚动
     const el = sentinelRef.current
     if (!el) return
     const obs = new IntersectionObserver((entries) => {
@@ -153,6 +156,11 @@ export default function App() {
   // cleanup 清旧 interval,无轮询泄漏。依赖 [tab],切 tab 才重建。
   useEffect(() => {
     setError(null)
+    if (!isListTab(tab)) {
+      // settings tab：不拉列表、不建轮询；一次性 status（断连 banner + 状态栏可见性）
+      void getStatus().then(setStatus).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      return
+    }
     void refresh(tab)
     const t = setInterval(() => void refresh(tab), 3000)
     return () => clearInterval(t)
@@ -257,12 +265,13 @@ export default function App() {
   const rs = status?.rescan
   const rsPct = rescanPercent(rs?.done ?? 0, rs?.total ?? 0)
 
-  const tabs: ReadonlyArray<{ key: TabKey; label: string; count: number }> = [
+  const tabs: ReadonlyArray<{ key: TabKey; label: string; count: number | null }> = [
     { key: 'candidate', label: '候选审批', count: tabTotalCount(status, 'candidate') ?? 0 },
     { key: 'approved', label: '已审批', count: tabTotalCount(status, 'approved') ?? 0 },
     { key: 'rejected', label: '已拒绝', count: tabTotalCount(status, 'rejected') ?? 0 },
     { key: 'discards', label: 'AI自动拒绝', count: tabTotalCount(status, 'discards') ?? 0 },
     { key: 'runs', label: '蒸馏记录', count: tabTotalCount(status, 'runs') ?? 0 },
+    { key: 'settings', label: '设置', count: null }, // 设置 tab 无计数徽标
   ]
 
   return (
@@ -288,7 +297,9 @@ export default function App() {
               }}
             >
               {t.label}
-              <span style={{ marginLeft: 6, fontSize: 12, opacity: 0.85 }}>{t.count}</span>
+              {t.count !== null ? (
+                <span style={{ marginLeft: 6, fontSize: 12, opacity: 0.85 }}>{t.count}</span>
+              ) : null}
             </button>
           )
         })}
@@ -344,12 +355,6 @@ export default function App() {
         )}
       </div>
 
-      {/* LLM 设置区块 - 生效回显行 + 保存/测试连接/清除 */}
-      <LlmSettings />
-
-      {/* 判定设置区块 - 模式 + agent 预算 */}
-      <JudgeSettings />
-
       {error ? (
         <div
           style={{
@@ -366,7 +371,15 @@ export default function App() {
       ) : null}
 
       {/* 列表 - 按 tab 渲染对应数据 + 操作;加载中 / 空 / 错误三态不静默 stall */}
-      {error ? null : showLoading && listEmpty ? (
+      {tab === 'settings' ? (
+        <>
+          {/* 设置区块挂载点（spec 2026-08-07 settings-tab §3.5）：
+              新增设置 = 新 section 组件 + 此处追加一行。
+              section 约定：<section> 包裹 + <h3> 标题 + 自管理 fetch/保存/错误行。 */}
+          <LlmSettings />
+          <JudgeSettings />
+        </>
+      ) : error ? null : showLoading && listEmpty ? (
         <p>加载中…</p>
       ) : tab === 'candidate' ? (
         <>
@@ -495,25 +508,29 @@ export default function App() {
         </>
       )}
 
-      {/* 列表尾部（五 tab 共用）。哨兵无条件渲染、在门控块外：observer effect 依赖
-          [tab] 只在切 tab 时跑一次，哨兵若藏进门控（首访 pending=true -> 不在 DOM）
-          则 observer 首访永远挂不上、无限滚动死锁（评审 Important #1）。加载中/出错时
-          哨兵相交是安全 no-op——loadMore 有 pending/loadingMore/nextCursorAfter 三重守卫。
-          加载更多 / 失败重试 / 到底提示仍在门控内。 */}
-      <div ref={sentinelRef} style={{ height: 1 }} />
-      {error ? null : showLoading ? null : (
+      {isListTab(tab) ? (
         <>
-          {loadingMore[tab] ? <p style={{ color: '#888', fontSize: 13 }}>加载更多…</p> : null}
-          {loadMoreError[tab] ? (
-            <button style={{ fontSize: 13 }} onClick={() => void loadMore(tab)}>
-              加载更多失败，点击重试（{loadMoreError[tab]}）
-            </button>
-          ) : null}
-          {!tabPageOf(tab).hasMore && !listEmpty ? (
-            <p style={{ color: '#aaa', fontSize: 12 }}>没有更多了</p>
-          ) : null}
+          {/* 列表尾部（五列表 tab 共用）。哨兵无条件渲染、在门控块外：observer effect 依赖
+              [tab] 只在切 tab 时跑一次，哨兵若藏进门控（首访 pending=true -> 不在 DOM）
+              则 observer 首访永远挂不上、无限滚动死锁（评审 Important #1）。加载中/出错时
+              哨兵相交是安全 no-op——loadMore 有 pending/loadingMore/nextCursorAfter 三重守卫。
+              加载更多 / 失败重试 / 到底提示仍在门控内。 */}
+          <div ref={sentinelRef} style={{ height: 1 }} />
+          {error ? null : showLoading ? null : (
+            <>
+              {loadingMore[tab] ? <p style={{ color: '#888', fontSize: 13 }}>加载更多…</p> : null}
+              {loadMoreError[tab] ? (
+                <button style={{ fontSize: 13 }} onClick={() => void loadMore(tab)}>
+                  加载更多失败，点击重试（{loadMoreError[tab]}）
+                </button>
+              ) : null}
+              {!tabPageOf(tab).hasMore && !listEmpty ? (
+                <p style={{ color: '#aaa', fontSize: 12 }}>没有更多了</p>
+              ) : null}
+            </>
+          )}
         </>
-      )}
+      ) : null}
 
       {sourceInputFor ? (
         <SourceInputModal memoryId={sourceInputFor} onClose={() => setSourceInputFor(null)} />
