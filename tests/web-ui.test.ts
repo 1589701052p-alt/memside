@@ -303,3 +303,19 @@ test('App.tsx resets candidate cache on rescan completion (source text)', () => 
 test('App.tsx no legacy full-array memCache (source text)', () => {
   expect(src).not.toContain('Record<MemoryTabKey, MemoryItem[]>')
 })
+
+// 回归防护（Task 8 评审 Important #1）：哨兵 div 必须渲染在
+// `error ? null : showLoading ? null : (` 门控块之外（之前）。哨兵若在门控内，
+// 首访 tab 时 pending=true -> showLoading=true -> 哨兵不在 DOM，observer effect
+// （依赖 [tab]，只在切 tab 时跑）读到 null 早退，此后不再重跑 -> 无限滚动死锁，
+// 直到切走再切回才恢复；transient error 后还会观察已 detach 的旧节点。
+// 哨兵无条件渲染无害：Observer 回调走 loadMore，已被 pending/loadingMore/
+// nextCursorAfter 三重守卫，加载中相交是安全 no-op。
+test('App.tsx sentinel renders outside the error/showLoading gate (source text)', () => {
+  const sentinelIdx = src.indexOf('ref={sentinelRef}')
+  const gateIdx = src.indexOf('error ? null : showLoading ? null : (')
+  expect(sentinelIdx).toBeGreaterThan(-1)
+  expect(gateIdx).toBeGreaterThan(-1)
+  // 哨兵必须在门控 opener 之前（无条件渲染），否则首访 tab observer 无 DOM 可挂
+  expect(sentinelIdx).toBeLessThan(gateIdx)
+})

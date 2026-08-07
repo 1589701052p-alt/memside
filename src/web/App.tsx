@@ -495,10 +495,14 @@ export default function App() {
         </>
       )}
 
-      {/* 列表尾部（五 tab 共用）：哨兵 + 加载更多 / 失败重试 / 到底提示 */}
+      {/* 列表尾部（五 tab 共用）。哨兵无条件渲染、在门控块外：observer effect 依赖
+          [tab] 只在切 tab 时跑一次，哨兵若藏进门控（首访 pending=true -> 不在 DOM）
+          则 observer 首访永远挂不上、无限滚动死锁（评审 Important #1）。加载中/出错时
+          哨兵相交是安全 no-op——loadMore 有 pending/loadingMore/nextCursorAfter 三重守卫。
+          加载更多 / 失败重试 / 到底提示仍在门控内。 */}
+      <div ref={sentinelRef} style={{ height: 1 }} />
       {error ? null : showLoading ? null : (
         <>
-          <div ref={sentinelRef} style={{ height: 1 }} />
           {loadingMore[tab] ? <p style={{ color: '#888', fontSize: 13 }}>加载更多…</p> : null}
           {loadMoreError[tab] ? (
             <button style={{ fontSize: 13 }} onClick={() => void loadMore(tab)}>
