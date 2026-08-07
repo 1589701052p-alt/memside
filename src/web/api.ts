@@ -257,7 +257,7 @@ export async function getDistillRunSourceInput(
 
 export interface PageDto<T> { items: T[]; hasMore: boolean; nextCursor: { ts: number; id: string } | null }
 
-export const WEB_PAGE_SIZE = 50
+export const WEB_PAGE_SIZE = 20
 
 export interface PageOpts { limit?: number; before?: { ts: number; id: string } }
 

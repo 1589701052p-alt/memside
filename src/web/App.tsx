@@ -11,7 +11,7 @@ import {
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
-import { memoryTabFilter, shouldShowLoading, mergePage, mergeAppend, nextCursorAfter, type MemoryTabKey } from './tab-cache'
+import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, type MemoryTabKey } from './tab-cache'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -83,15 +83,15 @@ export default function App() {
     try {
       if (target === 'discards') {
         const [pg, st] = await Promise.all([listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus()])
-        setDiscards((d) => ({ items: mergePage(d.items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+        setDiscards((d) => mergeRefreshPage(d, pg, (x) => x.id))
         setStatus(st)
       } else if (target === 'runs') {
         const [pg, st] = await Promise.all([listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus(fetch)])
-        setRuns((r) => ({ items: mergePage(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+        setRuns((r) => mergeRefreshPage(r, pg, (x) => x.distillJobId))
         setStatus(st)
       } else {
         const [pg, st] = await Promise.all([listMemoriesPage(fetch, { status: memoryTabFilter(target), limit: WEB_PAGE_SIZE }), getStatus()])
-        setMemCache((c) => ({ ...c, [target]: { items: mergePage(c[target].items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))
+        setMemCache((c) => ({ ...c, [target]: mergeRefreshPage(c[target], pg, (x) => x.id) }))
         setStatus(st)
       }
       setLoaded((l) => ({ ...l, [target]: true }))

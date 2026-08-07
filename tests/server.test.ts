@@ -7,7 +7,7 @@ import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun, log
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns } from '@/db/schema'
 import type { MemoryStatus } from '@/memory/pure'
 import type { ValueClass } from '@/memory/valueFilter'
 
@@ -725,6 +725,22 @@ test('GET /api/status includes distillRuns counts', async () => {
   expect(r.status).toBe(200)
   expect(r.body.distillRuns).toBeDefined()
   expect(r.body.distillRuns.total).toBeGreaterThanOrEqual(2)
+})
+
+// 回归（2026-08-07 性能修复）：/api/status 计数从全表物化改 SQL 聚合
+// （COUNT/GROUP BY）后语义必须不变——distillRuns 只计近 24h（严格 ts > 截止），
+// byOutcome 分桶一致。此前旧实现对 memory_distill_events（大 payload 表）
+// 做全表 SELECT * 仅为数行数，实测单请求 ~870ms。
+test('GET /api/status 聚合语义不变：24h 外的 run 不计入 distillRuns', async () => {
+  await seedRunRow('job-recent', 'produced')
+  await seedRunRow('job-stale', 'produced')
+  const staleTs = Date.now() - 25 * 60 * 60 * 1000
+  await db.update(memoryDistillRuns).set({ ts: staleTs })
+    .where(eq(memoryDistillRuns.distillJobId, 'job-stale')).run()
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.distillRuns.total).toBe(1)
+  expect(r.body.distillRuns.byOutcome).toEqual({ produced: 1 })
 })
 
 // --- Task 5: distill-error-capture -- errorMessage 端点验证 ---

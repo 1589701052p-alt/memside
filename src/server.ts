@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
-import { desc, inArray } from 'drizzle-orm'
+import { and, count, desc, eq, gt, inArray, isNull, notInArray, or } from 'drizzle-orm'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { DbClient } from '@/db/client'
@@ -344,36 +344,40 @@ export function createApp(deps: AppDeps) {
   // activity so the user isn't staring at an empty queue with no clue whether
   // the daemon is working. Returns event count, recent distill-job stats, and
   // the most recent error (if any).
+  // 计数全部走 SQL 聚合（COUNT/GROUP BY），不做全表物化——此前 5 个 SELECT *
+  // 仅用于数行数，其中 memory_distill_events 含完整 hook payload，实测全表
+  // 物化 ~870ms（2741 行），拖慢每次 tab 切换与 3s 轮询（Promise.all 同等待）。
   app.get('/api/status', async (c) => {
-    const jobs = await deps.db.select().from(memoryDistillJobs).orderBy(desc(memoryDistillJobs.createdAt)).limit(20).all()
-    const events = await deps.db.select().from(memoryDistillEvents).all()
-    const memRows = await deps.db.select().from(memories).all()
-    const discardRows = await deps.db.select().from(memoryDiscards).all()
-    const runRows = await deps.db.select().from(memoryDistillRuns).all()
-    const now = Date.now()
-    const recentRuns = runRows.filter((r) => now - (r.ts as number) < 24 * 60 * 60 * 1000)
+    // jobs 统计语义 = 最近 20 个 job（按 createdAt desc）——只取所需两列。
+    const jobs = await deps.db.select({ status: memoryDistillJobs.status, lastError: memoryDistillJobs.lastError })
+      .from(memoryDistillJobs).orderBy(desc(memoryDistillJobs.createdAt)).limit(20).all()
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000
+    const eventCount = await deps.db.select({ n: count() }).from(memoryDistillEvents).all()
+    const memGroups = await deps.db.select({ status: memories.status, n: count() }).from(memories).groupBy(memories.status).all()
+    const discardCount = await deps.db.select({ n: count() }).from(memoryDiscards).all()
+    const runGroups = await deps.db.select({ outcome: memoryDistillRuns.outcome, n: count() })
+      .from(memoryDistillRuns).where(gt(memoryDistillRuns.ts, cutoff)).groupBy(memoryDistillRuns.outcome).all()
+    // 未评估候选计数（与 bulkRejectUnevaluated 同条件，spec 决策 4）：保护类
+    // valueClass 之外/无 valueClass 的 candidate。
+    const unevalCount = await deps.db.select({ n: count() }).from(memories).where(and(
+      eq(memories.status, 'candidate'),
+      or(isNull(memories.valueClass), notInArray(memories.valueClass, [...PROTECTED_VALUE_CLASSES])),
+    )).all()
     const jobStats: Record<string, number> = {}
     for (const j of jobs) jobStats[j.status] = (jobStats[j.status] ?? 0) + 1
     const memStats: Record<string, number> = {}
-    for (const m of memRows) memStats[m.status] = (memStats[m.status] ?? 0) + 1
+    for (const g of memGroups) memStats[g.status] = g.n
     const runStats: Record<string, number> = {}
-    for (const r of recentRuns) runStats[r.outcome] = (runStats[r.outcome] ?? 0) + 1
+    for (const g of runGroups) runStats[g.outcome] = g.n
     const errored = jobs.find((j) => j.lastError)
-    // 未评估候选计数：memRows 已全量加载，直接 JS 计数，不加查询
-    // （status 全表扫描优化是非目标）。保护类 valueClass 之外/无 valueClass 的
-    // candidate 即「未评估」（与 bulkRejectUnevaluated 同条件，spec 决策 4）。
-    const protectedVc = new Set<string>(PROTECTED_VALUE_CLASSES)
-    const unevaluatedCandidates = memRows.filter(
-      (m) => m.status === 'candidate' && (m.valueClass === null || !protectedVc.has(m.valueClass)),
-    ).length
     return c.json({
-      events: events.length,
+      events: eventCount[0]?.n ?? 0,
       jobs: jobStats,
       memories: memStats,
-      discards: discardRows.length,
-      distillRuns: { total: recentRuns.length, byOutcome: runStats },
+      discards: discardCount[0]?.n ?? 0,
+      distillRuns: { total: runGroups.reduce((s, g) => s + g.n, 0), byOutcome: runStats },
       lastError: errored ? { error: errored.lastError } : null,
-      unevaluatedCandidates,
+      unevaluatedCandidates: unevalCount[0]?.n ?? 0,
       rescan: rescanState,
     })
   })
