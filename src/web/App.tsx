@@ -4,8 +4,9 @@ import {
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
+  fetchJudgeConfig, saveJudgeConfig, startRescan,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
-  type DistillRunListItem, type LlmSettingsState,
+  type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, type MemoryTabKey } from './tab-cache'
@@ -62,6 +63,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
+  const [rescanError, setRescanError] = useState<string | null>(null)
 
   async function refresh(target: TabKey) {
     setPending((p) => ({ ...p, [target]: true }))
@@ -121,6 +123,18 @@ export default function App() {
   }
   async function promote(id: string) {
     await promoteDiscard(id)
+    void refresh(tab)
+  }
+
+  // 存量回扫(Task 7):POST /api/rescan fire-and-forget,进度经 /api/status 轮询
+  // (status.rescan)。失败显错误行不静默;409(已在跑)由 startRescan 内部吞掉。
+  async function rescan() {
+    setRescanError(null)
+    try {
+      await startRescan()
+    } catch (e) {
+      setRescanError(e instanceof Error ? e.message : String(e))
+    }
     void refresh(tab)
   }
 
@@ -233,6 +247,9 @@ export default function App() {
       {/* LLM 设置区块 - 生效回显行 + 保存/测试连接/清除 */}
       <LlmSettings />
 
+      {/* 判定设置区块 - 模式 + agent 预算 */}
+      <JudgeSettings />
+
       {error ? (
         <div
           style={{
@@ -254,11 +271,28 @@ export default function App() {
       ) : tab === 'candidate' ? (
         <>
           <p>{memItems.length} 条候选记忆待审</p>
-          {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
-            <button onClick={() => bulkRejectUnevaluated()} style={{ marginBottom: 12 }}>
-              批量拒绝未评估
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
+              <button onClick={() => bulkRejectUnevaluated()}>
+                批量拒绝未评估
+              </button>
+            ) : null}
+            <button onClick={() => rescan()} disabled={status?.rescan?.running === true}>
+              回扫存量
             </button>
-          ) : null}
+            {status?.rescan?.running ? (
+              <span style={{ fontSize: 13, color: '#666' }}>
+                回扫中 {status.rescan.done}/{status.rescan.total}
+              </span>
+            ) : status?.rescan?.report ? (
+              <span style={{ fontSize: 13, color: '#666' }}>
+                回扫完成: 处理 {status.rescan.report.processed} / 判丢 {status.rescan.report.discarded} / 跳过 {status.rescan.report.skipped}
+              </span>
+            ) : null}
+            {rescanError ? (
+              <span style={{ fontSize: 13, color: '#c00' }}>回扫失败: {rescanError}</span>
+            ) : null}
+          </div>
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}
@@ -445,6 +479,86 @@ function LlmSettings() {
         <button disabled={busy} onClick={() => void onClear()}>清除</button>
         {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
         {msg ? <span style={{ color: msg.startsWith('连接失败') || msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * 判定设置区块（agentic value judge Task 6）。
+ * 模式下拉（质量=agent 终审 / 经济=单发判定）+ 轮次上限(1-200) + 时间预算(30-3600 秒)。
+ * 保存后回显当前生效值;fetch/保存失败显错误,不静默。scheduler 每 tick 现读,
+ * UI 改动即时生效不重启 daemon。
+ */
+function JudgeSettings() {
+  const [cfg, setCfg] = useState<JudgeConfigDto | null>(null)
+  const [mode, setMode] = useState<'quality' | 'economy'>('quality')
+  const [maxRounds, setMaxRounds] = useState('30')
+  const [timeBudgetS, setTimeBudgetS] = useState('300')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = async () => {
+    try {
+      const c = await fetchJudgeConfig()
+      setCfg(c)
+      setMode(c.mode)
+      setMaxRounds(String(c.maxRounds))
+      setTimeBudgetS(String(c.timeBudgetS))
+      setError(null)
+    }
+    catch (e) { setError(String(e)) } // fetch 失败显错误（不静默）
+  }
+  useEffect(() => { void refresh() }, [])
+
+  const onSave = async () => {
+    setBusy(true); setMsg(null)
+    try {
+      const c = await saveJudgeConfig({
+        mode,
+        maxRounds: Number(maxRounds),
+        timeBudgetS: Number(timeBudgetS),
+      })
+      setCfg(c)
+      setMode(c.mode)
+      setMaxRounds(String(c.maxRounds))
+      setTimeBudgetS(String(c.timeBudgetS))
+      setMsg('已保存')
+    } catch (e) { setMsg(`保存失败: ${e}`) }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <section style={{ margin: '12px 0', padding: 12, border: '1px solid #ddd', borderRadius: 8 }}>
+      <h3 style={{ margin: '0 0 8px' }}>判定</h3>
+      {/* 生效回显行：保存后/加载后回显当前生效配置 */}
+      <div style={{ marginBottom: 8, fontSize: 13 }}>
+        当前生效：{cfg
+          ? <><b>{cfg.mode === 'quality' ? '质量(agent 终审)' : '经济(单发判定)'}</b>{' · '}轮次上限 {cfg.maxRounds}{' · '}时间预算 {cfg.timeBudgetS} 秒</>
+          : <b>读取中…</b>}
+      </div>
+      {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <label style={{ fontSize: 13 }}>模式</label>
+        <select value={mode} onChange={(e) => setMode(e.target.value as 'quality' | 'economy')}
+          style={{ flex: '0 0 auto' }}>
+          <option value="quality">质量(agent 终审)</option>
+          <option value="economy">经济(单发判定)</option>
+        </select>
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <input style={{ flex: '1 1 160px' }} type="number" min={1} max={200}
+          placeholder="轮次上限(1-200)"
+          value={maxRounds} onChange={(e) => setMaxRounds(e.target.value)} />
+        <input style={{ flex: '1 1 160px' }} type="number" min={30} max={3600}
+          placeholder="时间预算秒(30-3600)"
+          value={timeBudgetS} onChange={(e) => setTimeBudgetS(e.target.value)} />
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button disabled={busy} onClick={() => void onSave()}>保存</button>
+        {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
+        {msg ? <span style={{ color: msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
       </div>
     </section>
   )
@@ -778,7 +892,15 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
     }
   }
 
-  const cands = (detail?.rawOutput as { candidates?: unknown[] } | null | undefined)?.candidates
+  const raw = detail?.rawOutput as { candidates?: unknown[]; agentTrace?: unknown; judgeFallback?: unknown } | null | undefined
+  const cands = raw?.candidates
+  // spec §4.5 透明化:agent 终审的探查轨迹 + 降级标记必须可回看。
+  // 防御式渲染:旧 run 没有这两个键,agentTrace 元素形状也不假设。
+  const agentTrace: { kind?: unknown; text?: unknown; toolName?: unknown; toolResult?: unknown }[] | null =
+    Array.isArray(raw?.agentTrace) ? (raw.agentTrace as unknown[]).filter(
+      (s): s is { kind?: unknown; text?: unknown; toolName?: unknown; toolResult?: unknown } => !!s && typeof s === 'object',
+    ) : null
+  const judgeFallback = typeof raw?.judgeFallback === 'string' ? raw.judgeFallback : null
   const oc = detail ? formatOutcome(detail.outcome) : null
   return (
     <div
@@ -815,6 +937,11 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                 <span style={{ marginLeft: 8, color: '#999' }}>模型返回 {detail.rawCount} 条，{detail.rawCount - detail.acceptedCount} 条格式不合格被丢弃</span>
               )}
             </div>
+            {judgeFallback ? (
+              <div style={{ background: '#fff8e6', borderLeft: '3px solid #d90', color: '#775500', padding: 8, marginBottom: 12, fontSize: 13 }}>
+                价值判定降级: {judgeFallback}(该批走了经济模式单发判定,未跑 agent 终审)
+              </div>
+            ) : null}
             <div style={{ marginBottom: 12 }}>
               <strong>产出：</strong>
               {detail.outcome === 'empty_output' ? <span>LLM 返回 0 候选</span>
@@ -831,6 +958,27 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                     <pre key={i} style={{ background: '#f7f7f7', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap' }}>{JSON.stringify(c, null, 2)}</pre>
                   )) : <span>（无产出解析）</span>}
             </div>
+            {agentTrace && agentTrace.length > 0 ? (
+              <div style={{ marginBottom: 12 }}>
+                <strong>agent 探查轨迹（{agentTrace.length} 步）：</strong>
+                {agentTrace.map((s, i) => (
+                  <div key={i} style={{ marginBottom: 8, border: '1px solid #eee', borderRadius: 4, padding: 8 }}>
+                    <span style={{
+                      color: s.kind === 'tool' ? '#06c' : s.kind === 'final' ? '#080' : '#c60',
+                      fontWeight: 600, fontSize: 12,
+                    }}>
+                      [{typeof s.kind === 'string' ? s.kind : '?'}]{typeof s.toolName === 'string' ? ` ${s.toolName}` : ''}
+                    </span>
+                    {typeof s.text === 'string' && s.text ? (
+                      <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{s.text}</pre>
+                    ) : null}
+                    {typeof s.toolResult === 'string' && s.toolResult ? (
+                      <pre style={{ background: '#f7f7f7', margin: '4px 0 0', padding: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{s.toolResult}</pre>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div>
               <button onClick={loadSource} disabled={sourceLoading}>{sourceLoading ? '加载中…' : '查看原始输入'}</button>
               {sourceError ? (

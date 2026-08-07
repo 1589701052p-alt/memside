@@ -109,6 +109,20 @@ test('DistillRunRow renders truncated errorMessage for llm_error', () => {
   expect(src).toContain('textOverflow')
 })
 
+// agentic-value-judge 终审修复（2026-08-06 final fix wave）:spec §4.5 透明化要求
+// 蒸馏记录详情可回看「它查了哪些词、读了哪些文件、为什么这么判」。此前
+// GET /api/distill-runs/:jobId 已返回 rawOutput.agentTrace / judgeFallback,
+// 但 DistillRunModal 只渲染 .candidates,两者在 UI 不可见。
+// React 组件不单测,源码文本断言锁住渲染锚点,refactor 删除即变红。
+test('DistillRunModal renders agentTrace + judgeFallback (source text)', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(src).toContain('agentTrace')          // 探查轨迹读取 + 渲染
+  expect(src).toContain('agent 探查轨迹')      // 轨迹区块标题
+  expect(src).toContain('toolResult')          // 每步工具结果展示
+  expect(src).toContain('judgeFallback')       // 降级标记读取 + 渲染
+  expect(src).toContain('价值判定降级')        // 降级横幅文案
+})
+
 // LLM 凭证 UI 配置（2026-07-30）：设置区块常驻生效回显行 + 保存/测试连接/清除。
 // 兜底回归（CLAUDE.md 最低限度）：生效回显行与三按钮必须存在于 App.tsx 源码，
 // refactor 删除即变红。
@@ -184,4 +198,33 @@ test('App.tsx stale-while-revalidate：用 memCache + shouldShowLoading，不再
   expect(src).not.toContain('setItems([])')
   expect(src).not.toContain('setDiscards([])')
   expect(src).not.toContain('setRuns([])')
+})
+
+// agentic value judge 配置面（2026-08-06 Task 6）：设置区「判定」小节存在且走
+// /api/settings/judge，含模式下拉（质量/经济）与两个预算输入；保存失败显错误不静默。
+// 源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx 含「判定」设置小节：模式下拉 + 预算输入 + /api/settings/judge', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  const api = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
+  expect(src).toContain('判定')
+  expect(api).toContain('/api/settings/judge') // URL 在 api.ts wrapper 层
+  expect(src).toContain('JudgeSettings')
+  expect(src).toContain('fetchJudgeConfig')
+  expect(src).toContain('saveJudgeConfig')
+  expect(src).toContain('质量(agent 终审)')
+  expect(src).toContain('经济(单发判定)')
+  expect(src).toContain('保存失败')
+})
+
+// 存量回扫（2026-08-06 Task 7）：候选 tab 有「回扫存量」按钮 + 进度/报告行 + 错误行，
+// 端点走 /api/rescan（api.ts wrapper）。源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx 候选 tab 含「回扫存量」按钮 + 进度行 + /api/rescan', () => {
+  const appSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  const apiSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
+  expect(appSrc).toContain('回扫存量')
+  expect(appSrc).toContain('/api/rescan')  // 按钮注释锚定端点
+  expect(appSrc).toContain('startRescan')
+  expect(appSrc).toContain('回扫中')
+  expect(appSrc).toContain('回扫失败')
+  expect(apiSrc).toContain('/api/rescan')
 })

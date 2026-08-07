@@ -746,3 +746,56 @@ test('GET /api/distill-runs list items include errorMessage', async () => {
   const row = (data.items as any[]).find((r: any) => r.distillJobId === 'job-em2')
   expect(row?.errorMessage).toBe('timeout')
 })
+
+// --- Task 7: 存量回扫端点 --------------------------------------------------
+// 回归防护:POST /api/rescan 是 fire-and-forget(202 立即返回),并发重按 409
+// (不得起两个回扫);进度/报告经 GET /api/status 的 rescan 字段暴露。
+// spec: docs/superpowers/specs/2026-08-06-agentic-value-judge-design.md §4.7
+test('POST /api/rescan 202 fire-and-forget + status 暴露 rescan 字段', async () => {
+  app = createApp({
+    db, adapter, opencodeAdapter,
+    enqueueDistillJob: async () => ({ jobId: 'j', nextRunAt: 0 }),
+    broadcast: () => {},
+    callLLM: async () => '{"verdicts": []}',
+  })
+  const r = await req('/api/rescan', { method: 'POST' })
+  expect(r.status).toBe(202)
+  expect(r.body.started).toBe(true)
+  // 空候选池:回扫很快完成;轮询 status 直到 running=false,报告存在。
+  let st = (await req('/api/status')).body
+  for (let i = 0; i < 50 && st.rescan.running; i++) {
+    await new Promise((r2) => setTimeout(r2, 10))
+    st = (await req('/api/status')).body
+  }
+  expect(st.rescan.running).toBe(false)
+  expect(st.rescan.report).toEqual({ processed: 0, discarded: 0, skipped: 0, keptUpdated: 0 })
+})
+
+test('POST /api/rescan 运行中重按 -> 409(并发防护)', async () => {
+  // 挂起的 callLLM 让回扫停在判定中,第二次 POST 必见 running=true。
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: dir, title: '[category:a] 一条', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  let release: (s: string) => void = () => {}
+  const gate = new Promise<string>((res) => { release = res })
+  app = createApp({
+    db, adapter, opencodeAdapter,
+    enqueueDistillJob: async () => ({ jobId: 'j', nextRunAt: 0 }),
+    broadcast: () => {},
+    callLLM: () => gate,
+  })
+  const r1 = await req('/api/rescan', { method: 'POST' })
+  expect(r1.status).toBe(202)
+  const r2 = await req('/api/rescan', { method: 'POST' })
+  expect(r2.status).toBe(409)
+  expect(r2.body.error).toBe('rescan already running')
+  release('not json')  // 放行:agent 判定失败倒向保留,回扫收尾
+  let st = (await req('/api/status')).body
+  for (let i = 0; i < 100 && st.rescan.running; i++) {
+    await new Promise((r3) => setTimeout(r3, 10))
+    st = (await req('/api/status')).body
+  }
+  expect(st.rescan.running).toBe(false)
+  expect(st.rescan.report.processed).toBe(1)
+})

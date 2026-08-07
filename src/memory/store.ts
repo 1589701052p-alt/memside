@@ -468,6 +468,26 @@ export async function promoteDiscard(db: DbClient, id: string): Promise<Memory> 
   return mem
 }
 
+/** 回扫用:全部候选(createdAt 升序,先老后新)。 */
+export async function listAllCandidatesForRescan(db: DbClient): Promise<Memory[]> {
+  const rows = await db.select().from(memories).where(eq(memories.status, 'candidate'))
+    .orderBy(asc(memories.createdAt)).all()
+  return rows.map(rowToMemory)
+}
+
+/** 回扫判留回填:只填 NULL 字段(value_class/origin),不覆盖已有值。 */
+export async function updateJudgedFields(
+  db: DbClient, id: string, patch: { valueClass?: ValueClass | null; origin?: string | null },
+): Promise<void> {
+  const rows = await db.select().from(memories).where(eq(memories.id, id)).limit(1).all()
+  const m = rows[0]
+  if (!m) return
+  const set: Record<string, unknown> = {}
+  if (m.valueClass === null && patch.valueClass !== undefined) set.valueClass = patch.valueClass
+  if (m.origin === null && patch.origin) set.origin = patch.origin
+  if (Object.keys(set).length > 0) await db.update(memories).set(set).where(eq(memories.id, id)).run()
+}
+
 export const DISCARDS_LIST_LIMIT = 200
 
 export interface DiscardRow {

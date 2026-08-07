@@ -393,3 +393,43 @@ test('POST test-effective 存储读异常 -> no credentials 不 500', async () =
   expect(r.status).toBe(200)
   expect(r.body).toEqual({ ok: false, error: 'no credentials' })
 })
+
+// --- /api/settings/judge（agentic value judge Task 6）-------------------------
+// 判定配置端点用真实 db（judge 端点不走 LLM 注入点，直接读写 app_settings）：
+// GET 默认 -> PUT 部分字段 -> GET 读回;非法输入 400 且不落存储。
+
+test('GET /api/settings/judge 未配置 -> 全默认(quality/30/300)', async () => {
+  const app = makeApp()
+  const r = await req(app, '/api/settings/judge')
+  expect(r.status).toBe(200)
+  expect(r.body).toEqual({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 })
+})
+
+test('PUT /api/settings/judge 部分字段保存 -> GET 读回(其余回默认)', async () => {
+  const app = makeApp()
+  const put = await req(app, '/api/settings/judge', putJson({ mode: 'economy', maxRounds: 10 }))
+  expect(put.status).toBe(200)
+  expect(put.body).toEqual({ mode: 'economy', maxRounds: 10, timeBudgetS: 300 })
+
+  const get = await req(app, '/api/settings/judge')
+  expect(get.status).toBe(200)
+  expect(get.body).toEqual({ mode: 'economy', maxRounds: 10, timeBudgetS: 300 })
+})
+
+test('PUT /api/settings/judge 非法 mode -> 400 不落存储', async () => {
+  const app = makeApp()
+  const r = await req(app, '/api/settings/judge', putJson({ mode: 'banana' }))
+  expect(r.status).toBe(400)
+  const get = await req(app, '/api/settings/judge')
+  expect(get.body).toEqual({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 })
+})
+
+test('PUT /api/settings/judge 非法 maxRounds/timeBudgetS -> 400 不落存储', async () => {
+  const app = makeApp()
+  const r1 = await req(app, '/api/settings/judge', putJson({ maxRounds: 'ten' }))
+  expect(r1.status).toBe(400)
+  const r2 = await req(app, '/api/settings/judge', putJson({ timeBudgetS: Number.NaN }))
+  expect(r2.status).toBe(400)
+  const get = await req(app, '/api/settings/judge')
+  expect(get.body).toEqual({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 })
+})
