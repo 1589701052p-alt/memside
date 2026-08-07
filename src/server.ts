@@ -332,9 +332,13 @@ export function createApp(deps: AppDeps) {
 
   // --- Memory API ---------------------------------------------------------
   // 回扫状态(单实例,随 createApp 闭包;fire-and-forget 与 distill loop 同款)。
-  // running 期间重按 -> 409;进度(done/total)与完成报告经 GET /api/status 暴露。
-  let rescanState: { running: boolean; done: number; total: number; report: RescanReport | null } =
-    { running: false, done: 0, total: 0, report: null }
+  // running 期间重按 -> 409;进度(done/total/discarded)、停止标记(stopping/
+  // cancelRequested)、完成报告与运行级崩溃 error 经 GET /api/status 暴露。
+  let rescanState: {
+    running: boolean; done: number; total: number; discarded: number
+    stopping: boolean; cancelRequested: boolean
+    report: RescanReport | null; error: string | null
+  } = { running: false, done: 0, total: 0, discarded: 0, stopping: false, cancelRequested: false, report: null, error: null }
 
   // Status (background visibility): lets the web UI show capture / distill
   // activity so the user isn't staring at an empty queue with no clue whether
@@ -367,29 +371,49 @@ export function createApp(deps: AppDeps) {
   })
 
   // 存量回扫(Task 7,spec §4.7):fire-and-forget——202 立即返回,后台按当前判定
-  // 模式重判全部候选;进度(done/total)与完成报告在 GET /api/status 的 rescan 字段。
+  // 模式重判全部候选;进度(done/total/discarded)、停止标记与完成报告在 GET
+  // /api/status 的 rescan 字段。
   // 并发重按防护:running 期间 409。中断后直接重按,无脏状态(判丢离开候选池天然
   // 不重判,判留重判幂等)。
   app.post('/api/rescan', (c) => {
     if (rescanState.running) return c.json({ error: 'rescan already running' }, 409)
     if (!deps.callLLM) return c.json({ error: 'rescan unavailable: no LLM configured' }, 503)
     const callLLM = deps.callLLM
-    rescanState = { running: true, done: 0, total: 0, report: null }
+    rescanState = {
+      running: true, done: 0, total: 0, discarded: 0,
+      stopping: false, cancelRequested: false, report: null, error: null,
+    }
     void (async () => {
       try {
         const report = await rescanCandidates(deps.db, {
           callLLM,
           loadJudgeConfig: () => loadJudgeConfig(deps.db),
-        }, (done, total) => { rescanState.done = done; rescanState.total = total })
+        },
+        (done, total, discarded) => {
+          rescanState.done = done; rescanState.total = total; rescanState.discarded = discarded
+        },
+        () => rescanState.cancelRequested)  // 批边界停止(spec §3.2)
         rescanState.report = report
       } catch (e) {
         console.warn('memside: rescan failed', e)
+        rescanState.error = String(e)  // 崩溃透传:UI 红字可见,不静默解锁
       } finally {
         rescanState.running = false
+        rescanState.stopping = false
+        rescanState.cancelRequested = false
         deps.broadcast({ type: 'rescan' })
       }
     })()
     return c.json({ started: true }, 202)
+  })
+
+  // 回扫取消(spec §3.2):只置标记,粒度=批边界——正在判的批照常判完落库,
+  // 后续批次不再开始;未在跑 409(UI 忽略,轮询自愈)。
+  app.post('/api/rescan/cancel', (c) => {
+    if (!rescanState.running) return c.json({ error: 'no rescan running' }, 409)
+    rescanState.cancelRequested = true
+    rescanState.stopping = true
+    return c.json({ stopping: true }, 202)
   })
 
   app.get('/api/memories', async (c) => {

@@ -4,11 +4,11 @@ import {
   listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
-  fetchJudgeConfig, saveJudgeConfig, startRescan,
+  fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, type MemoryTabKey } from './tab-cache'
 
 /**
@@ -157,6 +157,10 @@ export default function App() {
     : (memCache[tab as MemoryTabKey] ?? []).length === 0
   const showLoading = shouldShowLoading(loaded, pending, tab)
 
+  // 回扫状态缩写(spec 2026-08-07 §3.2):rs 驱动进度条/停止按钮/结果卡片。
+  const rs = status?.rescan
+  const rsPct = rescanPercent(rs?.done ?? 0, rs?.total ?? 0)
+
   const tabs: ReadonlyArray<{ key: TabKey; label: string; count: number }> = [
     { key: 'candidate', label: '候选审批', count: status?.memories.candidate ?? 0 },
     { key: 'approved', label: '已审批', count: (status?.memories.approved ?? 0) + (status?.memories.archived ?? 0) + (status?.memories.superseded ?? 0) },
@@ -271,23 +275,57 @@ export default function App() {
       ) : tab === 'candidate' ? (
         <>
           <p>{memItems.length} 条候选记忆待审</p>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
-              <button onClick={() => bulkRejectUnevaluated()}>
-                批量拒绝未评估
-              </button>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {memItems.some((m) => priorityRank(m.valueClass) === 2) ? (
+                <button onClick={() => bulkRejectUnevaluated()}>
+                  批量拒绝未评估
+                </button>
+              ) : null}
+              {/* 回扫端点 /api/rescan(开始)与 /api/rescan/cancel(批边界停止) */}
+              {rs?.running ? (
+                <button onClick={() => void cancelRescan().catch(() => {})}>
+                  停止筛查
+                </button>
+              ) : (
+                <button onClick={() => rescan()}>重新筛查全部候选</button>
+              )}
+              {rs?.running && rs?.stopping ? (
+                <span style={{ fontSize: 13, color: '#b80' }}>正在停止(当前这批判完即停)…</span>
+              ) : null}
+            </div>
+            <div style={{ fontSize: 12, color: '#888', margin: '6px 0' }}>
+              把候选队列按当前判定模式全部重判一遍,判丢的进「AI自动拒绝」,可恢复。
+            </div>
+            {rs?.running ? (
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ width: 240, height: 10, background: '#eee', borderRadius: 5, overflow: 'hidden' }}>
+                  <div style={{ width: `${rsPct}%`, height: '100%', background: '#222', transition: 'width .3s' }} />
+                </div>
+                <span style={{ fontSize: 13, color: '#666' }}>
+                  已处理 {rs.done}/{rs.total}({rsPct}%) · 已判丢 {rs.discarded ?? 0} 条
+                </span>
+              </div>
             ) : null}
-            <button onClick={() => rescan()} disabled={status?.rescan?.running === true}>
-              回扫存量
-            </button>
-            {status?.rescan?.running ? (
-              <span style={{ fontSize: 13, color: '#666' }}>
-                回扫中 {status.rescan.done}/{status.rescan.total}
-              </span>
-            ) : status?.rescan?.report ? (
-              <span style={{ fontSize: 13, color: '#666' }}>
-                回扫完成: 处理 {status.rescan.report.processed} / 判丢 {status.rescan.report.discarded} / 跳过 {status.rescan.report.skipped}
-              </span>
+            {!rs?.running && rs?.report ? (
+              <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 13, background: '#fafafa' }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                  {rs.report.stopped
+                    ? `已停止(剩余 ${rs.total - rs.report.processed} 条未筛查)`
+                    : '筛查完成'}
+                </div>
+                <div>
+                  处理 {rs.report.processed} · 判丢 {rs.report.discarded} · 保留 {rs.report.keptUpdated} · 跳过 {rs.report.skipped}(目录已删除的项目)
+                </div>
+                {rs.report.discarded > 0 ? (
+                  <button style={{ marginTop: 6, fontSize: 13 }} onClick={() => setTab('discards')}>
+                    查看判丢的 {rs.report.discarded} 条 →
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {rs?.error ? (
+              <div style={{ fontSize: 13, color: '#c00' }}>回扫失败: {rs.error}</div>
             ) : null}
             {rescanError ? (
               <span style={{ fontSize: 13, color: '#c00' }}>回扫失败: {rescanError}</span>
@@ -485,9 +523,9 @@ function LlmSettings() {
 }
 
 /**
- * 判定设置区块（agentic value judge Task 6）。
- * 模式下拉（质量=agent 终审 / 经济=单发判定）+ 轮次上限(1-200) + 时间预算(30-3600 秒)。
- * 保存后回显当前生效值;fetch/保存失败显错误,不静默。scheduler 每 tick 现读,
+ * 判定设置区块(spec 2026-08-07 §3.1)。模式卡片(radio 语义,带后果说明)+
+ * 预算段(仅质量模式显示,完整中文 label)+ 保存行聚合(输入框初值=生效值,
+ * 改动显「有未保存修改」)。fetch/保存失败显错误,不静默。scheduler 每 tick 现读,
  * UI 改动即时生效不重启 daemon。
  */
 function JudgeSettings() {
@@ -524,40 +562,84 @@ function JudgeSettings() {
       setMode(c.mode)
       setMaxRounds(String(c.maxRounds))
       setTimeBudgetS(String(c.timeBudgetS))
-      setMsg('已保存')
+      setMsg('已保存,立即生效')
     } catch (e) { setMsg(`保存失败: ${e}`) }
     finally { setBusy(false) }
   }
 
+  const dirty = cfg !== null && (
+    mode !== cfg.mode
+    || Number(maxRounds) !== cfg.maxRounds
+    || Number(timeBudgetS) !== cfg.timeBudgetS)
+
   return (
     <section style={{ margin: '12px 0', padding: 12, border: '1px solid #ddd', borderRadius: 8 }}>
       <h3 style={{ margin: '0 0 8px' }}>判定</h3>
-      {/* 生效回显行：保存后/加载后回显当前生效配置 */}
-      <div style={{ marginBottom: 8, fontSize: 13 }}>
-        当前生效：{cfg
-          ? <><b>{cfg.mode === 'quality' ? '质量(agent 终审)' : '经济(单发判定)'}</b>{' · '}轮次上限 {cfg.maxRounds}{' · '}时间预算 {cfg.timeBudgetS} 秒</>
-          : <b>读取中…</b>}
-      </div>
+      <p style={{ margin: '0 0 10px', fontSize: 13, color: '#666' }}>
+        每条候选记忆进审批队列前,AI 先判一遍值不值得记;被判丢的直接进「AI自动拒绝」,可恢复。
+      </p>
       {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-        <label style={{ fontSize: 13 }}>模式</label>
-        <select value={mode} onChange={(e) => setMode(e.target.value as 'quality' | 'economy')}
-          style={{ flex: '0 0 auto' }}>
-          <option value="quality">质量(agent 终审)</option>
-          <option value="economy">经济(单发判定)</option>
-        </select>
+      {/* 模式卡片:radio 语义,选中高亮边框,带后果说明 */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+        <div onClick={() => setMode('quality')}
+          style={{
+            flex: '1 1 260px', cursor: 'pointer', padding: 10, borderRadius: 8, fontSize: 13,
+            border: mode === 'quality' ? '2px solid #222' : '1px solid #ddd',
+            background: mode === 'quality' ? '#fafafa' : '#fff',
+          }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            <input type="radio" checked={mode === 'quality'} onChange={() => setMode('quality')} style={{ marginRight: 6 }} />
+            质量模式(默认)
+          </div>
+          <div style={{ color: '#666' }}>
+            AI 会打开候选来源的项目仓库,亲手搜代码、读文件查证后再判决。判得准,但慢、费 token。
+          </div>
+        </div>
+        <div onClick={() => setMode('economy')}
+          style={{
+            flex: '1 1 260px', cursor: 'pointer', padding: 10, borderRadius: 8, fontSize: 13,
+            border: mode === 'economy' ? '2px solid #222' : '1px solid #ddd',
+            background: mode === 'economy' ? '#fafafa' : '#fff',
+          }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            <input type="radio" checked={mode === 'economy'} onChange={() => setMode('economy')} style={{ marginRight: 6 }} />
+            经济模式
+          </div>
+          <div style={{ color: '#666' }}>
+            AI 只看候选文字本身,一次出判决,不查仓库。快、省 token;拿不准时倾向把候选留下(不会误丢有用的)。
+          </div>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <input style={{ flex: '1 1 160px' }} type="number" min={1} max={200}
-          placeholder="轮次上限(1-200)"
-          value={maxRounds} onChange={(e) => setMaxRounds(e.target.value)} />
-        <input style={{ flex: '1 1 160px' }} type="number" min={30} max={3600}
-          placeholder="时间预算秒(30-3600)"
-          value={timeBudgetS} onChange={(e) => setTimeBudgetS(e.target.value)} />
-      </div>
+      {/* 预算段:仅质量模式显示(经济模式不跑 agent,预算无意义) */}
+      {mode === 'quality' ? (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 6 }}>
+            <label style={{ fontSize: 13 }}>
+              查证次数上限
+              <input type="number" min={1} max={200} value={maxRounds}
+                onChange={(e) => setMaxRounds(e.target.value)}
+                style={{ display: 'block', marginTop: 4, width: 120 }} />
+              <span style={{ display: 'block', marginTop: 4, color: '#888', fontSize: 12, maxWidth: 240 }}>
+                每批 15 条候选,AI 最多动手查多少次;查满就用已有信息直接判决。
+              </span>
+            </label>
+            <label style={{ fontSize: 13 }}>
+              查证时间上限(秒)
+              <input type="number" min={30} max={3600} value={timeBudgetS}
+                onChange={(e) => setTimeBudgetS(e.target.value)}
+                style={{ display: 'block', marginTop: 4, width: 120 }} />
+              <span style={{ display: 'block', marginTop: 4, color: '#888', fontSize: 12, maxWidth: 240 }}>
+                每批最多花多少秒,超时同上。
+              </span>
+            </label>
+          </div>
+          <div style={{ fontSize: 12, color: '#888' }}>预算耗尽或出任何故障,结果都是「保留」,不会误丢。</div>
+        </div>
+      ) : null}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <button disabled={busy} onClick={() => void onSave()}>保存</button>
         {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
+        {!busy && dirty ? <span style={{ color: '#b80', fontSize: 13 }}>有未保存修改</span> : null}
         {msg ? <span style={{ color: msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
       </div>
     </section>

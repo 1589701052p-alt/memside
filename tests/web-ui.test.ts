@@ -203,7 +203,7 @@ test('App.tsx stale-while-revalidate：用 memCache + shouldShowLoading，不再
 // agentic value judge 配置面（2026-08-06 Task 6）：设置区「判定」小节存在且走
 // /api/settings/judge，含模式下拉（质量/经济）与两个预算输入；保存失败显错误不静默。
 // 源码文本断言锁锚点，refactor 删除即变红。
-test('App.tsx 含「判定」设置小节：模式下拉 + 预算输入 + /api/settings/judge', () => {
+test('App.tsx 含「判定」设置小节：模式卡片 + 预算输入 + /api/settings/judge', () => {
   const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
   const api = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
   expect(src).toContain('判定')
@@ -211,20 +211,70 @@ test('App.tsx 含「判定」设置小节：模式下拉 + 预算输入 + /api/s
   expect(src).toContain('JudgeSettings')
   expect(src).toContain('fetchJudgeConfig')
   expect(src).toContain('saveJudgeConfig')
-  expect(src).toContain('质量(agent 终审)')
-  expect(src).toContain('经济(单发判定)')
+  expect(src).toContain('质量模式(默认)')
+  expect(src).toContain('经济模式')
+  expect(src).toContain('有未保存修改')
   expect(src).toContain('保存失败')
 })
 
-// 存量回扫（2026-08-06 Task 7）：候选 tab 有「回扫存量」按钮 + 进度/报告行 + 错误行，
-// 端点走 /api/rescan（api.ts wrapper）。源码文本断言锁锚点，refactor 删除即变红。
-test('App.tsx 候选 tab 含「回扫存量」按钮 + 进度行 + /api/rescan', () => {
+// 回归防护(spec 2026-08-07 §3.2):回扫工具栏必须让人看懂——按钮说清干什么、
+// 跑动中进度条 + 实时判丢数 + 停止按钮、结束有结果卡片且能跳 discards。
+test('App.tsx 候选 tab 回扫:按钮文案 + 说明行 + 进度条 + 停止(source text)', () => {
   const appSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
-  const apiSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
-  expect(appSrc).toContain('回扫存量')
-  expect(appSrc).toContain('/api/rescan')  // 按钮注释锚定端点
-  expect(appSrc).toContain('startRescan')
-  expect(appSrc).toContain('回扫中')
+  expect(appSrc).toContain('重新筛查全部候选')
+  expect(appSrc).toContain('停止筛查')
+  expect(appSrc).toContain('正在停止(当前这批判完即停)')
+  expect(appSrc).toContain('把候选队列按当前判定模式全部重判一遍')
+  expect(appSrc).toContain('已判丢')
+  expect(appSrc).toContain('rescanPercent(')  // 进度条走纯函数
   expect(appSrc).toContain('回扫失败')
+  expect(appSrc).toContain('/api/rescan')  // 按钮注释锚定端点
+})
+
+test('App.tsx 回扫结果卡片:计数 + 停止标题 + 跳 discards(source text)', () => {
+  const appSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(appSrc).toContain('筛查完成')
+  expect(appSrc).toContain('条未筛查')
+  expect(appSrc).toContain('保留')
+  expect(appSrc).toContain('目录已删除的项目')
+  expect(appSrc).toContain('查看判丢的')
+  expect(appSrc).toContain("setTab('discards')")
+})
+
+test('api.ts RescanState 带 discarded/stopping/error 可选字段 + /api/rescan(source text)', () => {
+  const apiSrc = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
   expect(apiSrc).toContain('/api/rescan')
+  expect(apiSrc).toContain('discarded?: number')
+  expect(apiSrc).toContain('stopping?: boolean')
+  expect(apiSrc).toContain('error?: string | null')
+})
+
+// 回归防护(spec 2026-08-07 §3.1):判定设置区必须让人看懂——模式卡片带后果说明、
+// 预算字段完整中文 label + 「不会误丢」附注、预算段仅质量模式显示、保存行有
+// 「有未保存修改」脏提示。源码文本断言,refactor 删除即变红。
+test('JudgeSettings 模式卡片 + 人话说明(source text)', () => {
+  const s = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(s).toContain('每条候选记忆进审批队列前')
+  expect(s).toContain('质量模式(默认)')
+  expect(s).toContain('经济模式')
+  expect(s).toContain('亲手搜代码、读文件查证后再判决')
+  expect(s).toContain('不会误丢有用的')
+})
+
+test('JudgeSettings 预算段:完整 label + 附注 + 仅质量模式显示(source text)', () => {
+  const s = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
+  expect(s).toContain('查证次数上限')
+  expect(s).toContain('查证时间上限(秒)')
+  expect(s).toContain('查满就用已有信息直接判决')
+  expect(s).toContain('不会误丢')
+  expect(s).toContain("mode === 'quality'")  // 预算段条件渲染
+  expect(s).toContain('有未保存修改')
+  expect(s).toContain('已保存,立即生效')
+})
+
+test('api.ts cancelRescan 走 /api/rescan/cancel + 409 静默(source text)', () => {
+  const s = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'api.ts'), 'utf8')
+  expect(s).toContain('/api/rescan/cancel')
+  expect(s).toContain('export async function cancelRescan')
+  expect(s).toContain('res.status === 409')
 })

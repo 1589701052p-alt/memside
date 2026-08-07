@@ -40,7 +40,7 @@ test('回扫:判丢进 discards + status=rejected;判留补 valueClass;目录缺
   const report = await rescanCandidates(db, {
     callLLM: economyLLM, loadJudgeConfig: economyCfg,
   })
-  expect(report).toEqual({ processed: 3, discarded: 1, skipped: 1, keptUpdated: 1 })
+  expect(report).toEqual({ processed: 3, discarded: 1, skipped: 1, keptUpdated: 1, stopped: false })
   const discards = await db.select().from(memoryDiscards)
   expect(discards).toHaveLength(1)
   expect(discards[0]!.reason).toBe('derivable')
@@ -109,8 +109,62 @@ test('回扫质量模式:sourceCwd 是文件系统根 -> 整组跳过,agent 拿�
     callLLM: async () => { judgeCalls++; return '{"final": {"verdicts": [{"index": 0, "category": "decision"}]}}' },
     loadJudgeConfig: () => ({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 }),
   })
-  expect(report).toEqual({ processed: 1, discarded: 0, skipped: 1, keptUpdated: 0 })
+  expect(report).toEqual({ processed: 1, discarded: 0, skipped: 1, keptUpdated: 0, stopped: false })
   expect(judgeCalls).toBe(0)  // 跳过在 judge 之前:agent 循环从未启动
   const row = (await db.select().from(memories))[0]!
   expect(row.status).toBe('candidate')  // 跳过不动:仍是候选,不判丢不判留
+})
+
+// 回归防护(spec 2026-08-07 §3.3):回扫停止粒度=批边界——shouldStop 只在每批判定
+// 开始前检查,批内不中断(该批结果完整落库)。stopped=true 时剩余候选仍在 candidate
+// 池,重跑可继续(幂等)。
+test('回扫取消:第 2 批前 shouldStop 为真 -> 只判第 1 批,stopped=true,剩余可重跑', async () => {
+  for (let i = 0; i < 20; i++) {
+    await createCandidate(db, {
+      scopeType: 'project', scopeId: dir, title: `[category:a] 候选${i}`, bodyMd: 'b',
+      tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+    })
+  }
+  let checks = 0
+  const report = await rescanCandidates(db, {
+    callLLM: economyLLM, loadJudgeConfig: economyCfg,
+  }, undefined, () => ++checks > 1)  // 第 1 批前放行,第 2 批前停止
+  expect(report.stopped).toBe(true)
+  expect(report.processed).toBe(15)  // RESCAN_BATCH=15:只有第 1 批判完
+  // 已处理批中 index 0 被丢,其余 14 条判留后仍是 candidate,因此用标题定位未处理的 5 条
+  const rows = await db.select().from(memories)
+  const remaining = rows.filter((r) => /候选1[5-9]$/.test(r.title))
+  expect(remaining).toHaveLength(5)  // 剩余 5 条未处理候选仍在候选池
+  expect(remaining.every((r) => r.status === 'candidate')).toBe(true)
+  // 重跑:已判留的 14 条仍在候选池,会被再次重判;原未处理 5 条也被判完;stopped=false
+  const second = await rescanCandidates(db, { callLLM: economyLLM, loadJudgeConfig: economyCfg })
+  expect(second.stopped).toBe(false)
+  expect(second.processed).toBe(19)
+})
+
+test('回扫取消:shouldStop 恒假 -> stopped=false(与未取消语义一致)', async () => {
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: dir, title: '[category:a] 一条', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  const report = await rescanCandidates(db, {
+    callLLM: economyLLM, loadJudgeConfig: economyCfg,
+  }, undefined, () => false)
+  expect(report.stopped).toBe(false)
+  expect(report.processed).toBe(1)
+})
+
+test('回扫进度回调第 3 参 = 实时累计判丢数', async () => {
+  for (let i = 0; i < 20; i++) {
+    await createCandidate(db, {
+      scopeType: 'project', scopeId: dir, title: `[category:a] 候选${i}`, bodyMd: 'b',
+      tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+    })
+  }
+  const events: Array<[number, number, number]> = []
+  await rescanCandidates(db, {
+    callLLM: economyLLM, loadJudgeConfig: economyCfg,
+  }, (done, total, discarded) => events.push([done, total, discarded]))
+  // economyLLM 每批把 index 0 判 derivable:两批各丢 1 条,末次回调 discarded=2
+  expect(events.at(-1)).toEqual([20, 20, 2])
 })

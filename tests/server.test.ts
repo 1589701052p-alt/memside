@@ -768,7 +768,11 @@ test('POST /api/rescan 202 fire-and-forget + status 暴露 rescan 字段', async
     st = (await req('/api/status')).body
   }
   expect(st.rescan.running).toBe(false)
-  expect(st.rescan.report).toEqual({ processed: 0, discarded: 0, skipped: 0, keptUpdated: 0 })
+  expect(st.rescan.report).toEqual({ processed: 0, discarded: 0, skipped: 0, keptUpdated: 0, stopped: false })
+  // 新字段随 status 下发(老 UI 忽略,新 UI 依赖)
+  expect(st.rescan.discarded).toBe(0)
+  expect(st.rescan.stopping).toBe(false)
+  expect(st.rescan.error).toBeNull()
 })
 
 test('POST /api/rescan 运行中重按 -> 409(并发防护)', async () => {
@@ -798,4 +802,83 @@ test('POST /api/rescan 运行中重按 -> 409(并发防护)', async () => {
   }
   expect(st.rescan.running).toBe(false)
   expect(st.rescan.report.processed).toBe(1)
+})
+
+// --- 回扫取消与崩溃透传(spec 2026-08-07 §3.2/§3.3) --------------------------
+// 回归防护:停止粒度=批边界——cancel 只置标记,正在判的批照常判完;运行级崩溃
+// 必须落 rescan.error(UI 红字可见),不得静默解锁按钮。
+test('POST /api/rescan/cancel 未在跑 -> 409', async () => {
+  app = createApp({
+    db, adapter, opencodeAdapter,
+    enqueueDistillJob: async () => ({ jobId: 'j', nextRunAt: 0 }),
+    broadcast: () => {},
+    callLLM: async () => '{"verdicts": []}',
+  })
+  const r = await req('/api/rescan/cancel', { method: 'POST' })
+  expect(r.status).toBe(409)
+  expect(r.body.error).toBe('no rescan running')
+})
+
+test('POST /api/rescan/cancel 批边界停止:第 2 批前停,stopped=true,stopping 可见', async () => {
+  for (let i = 0; i < 20; i++) {
+    await createCandidate(db, {
+      scopeType: 'project', scopeId: dir, title: `[category:a] 候选${i}`, bodyMd: 'b',
+      tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+    })
+  }
+  let onFirstCall: () => void = () => {}
+  const firstCall = new Promise<void>((res) => { onFirstCall = res })
+  let release: (s: string) => void = () => {}
+  const gate = new Promise<string>((res) => { release = res })
+  let called = false
+  app = createApp({
+    db, adapter, opencodeAdapter,
+    enqueueDistillJob: async () => ({ jobId: 'j', nextRunAt: 0 }),
+    broadcast: () => {},
+    callLLM: () => { if (!called) { called = true; onFirstCall() } return gate },
+  })
+  const r1 = await req('/api/rescan', { method: 'POST' })
+  expect(r1.status).toBe(202)
+  await firstCall  // 第 1 批判定已开始(默认质量模式,agent 循环首轮 LLM)
+  const rc = await req('/api/rescan/cancel', { method: 'POST' })
+  expect(rc.status).toBe(202)
+  expect(rc.body.stopping).toBe(true)
+  expect((await req('/api/status')).body.rescan.stopping).toBe(true)
+  release('{"final": {"verdicts": []}}')  // 放行:第 1 批判完(全留),随后批边界停止
+  let st = (await req('/api/status')).body
+  for (let i = 0; i < 200 && st.rescan.running; i++) {
+    await new Promise((r2) => setTimeout(r2, 10))
+    st = (await req('/api/status')).body
+  }
+  expect(st.rescan.running).toBe(false)
+  expect(st.rescan.report.stopped).toBe(true)
+  expect(st.rescan.report.processed).toBe(15)
+})
+
+test('POST /api/rescan 运行级崩溃 -> status.rescan.error 可见(不静默解锁)', async () => {
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: dir, title: '[category:a] 一条', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  // 只让 insert 抛错(合成 job 落库即崩,/api/status 只 select 不受影响)
+  const brokenDb = new Proxy(db, {
+    get: (t, p, r) => (p === 'insert'
+      ? () => { throw new Error('boom-insert') }
+      : Reflect.get(t, p, r)),
+  })
+  app = createApp({
+    db: brokenDb as typeof db, adapter, opencodeAdapter,
+    enqueueDistillJob: async () => ({ jobId: 'j', nextRunAt: 0 }),
+    broadcast: () => {},
+    callLLM: async () => '{"verdicts": []}',
+  })
+  const r = await req('/api/rescan', { method: 'POST' })
+  expect(r.status).toBe(202)
+  let st = (await req('/api/status')).body
+  for (let i = 0; i < 100 && st.rescan.running; i++) {
+    await new Promise((r2) => setTimeout(r2, 10))
+    st = (await req('/api/status')).body
+  }
+  expect(st.rescan.running).toBe(false)
+  expect(st.rescan.error).toContain('boom-insert')
 })

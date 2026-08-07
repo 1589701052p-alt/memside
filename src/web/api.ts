@@ -73,13 +73,20 @@ export async function patchMemory(
   return data.memory as MemoryItem
 }
 
-export interface RescanReportDto { processed: number; discarded: number; skipped: number; keptUpdated: number }
+export interface RescanReportDto { processed: number; discarded: number; skipped: number; keptUpdated: number; stopped: boolean }
 
 export interface RescanState {
   running: boolean
   done: number
   total: number
+  /** 实时累计判丢数;老 daemon 无此字段。 */
+  discarded?: number
+  /** 已请求停止(批边界停);老 daemon 无此字段。 */
+  stopping?: boolean
+  cancelRequested?: boolean
   report: RescanReportDto | null
+  /** 运行级崩溃信息;老 daemon 无此字段。 */
+  error?: string | null
 }
 
 export interface MemsideStatus {
@@ -301,6 +308,17 @@ export async function startRescan(fetchFn: FetchLike = fetch): Promise<void> {
   if (!res.ok) {
     const data = await res.json().catch(() => ({})) as { error?: string }
     throw new Error(data.error ?? `rescan failed (${res.status})`)
+  }
+}
+
+/** POST /api/rescan/cancel — 批边界停止(spec 2026-08-07 §3.2):只置标记,
+ * 正在判的批照常判完。409(未在跑)静默返回——轮询自愈,不算错误。 */
+export async function cancelRescan(fetchFn: FetchLike = fetch): Promise<void> {
+  const res = await fetchFn('/api/rescan/cancel', { method: 'POST' })
+  if (res.status === 409) return
+  if (!res.ok) {
+    const data = (await res.json()) as { error?: string }
+    throw new Error(data.error ?? `cancel failed (${res.status})`)
   }
 }
 
