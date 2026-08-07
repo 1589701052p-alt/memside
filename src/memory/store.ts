@@ -742,7 +742,7 @@ export async function listRecentDistillRuns(
 export interface PageCursor { ts: number; id: string }
 export interface Page<T> { items: T[]; hasMore: boolean; nextCursor: PageCursor | null }
 
-export const MEMORY_PAGE_DEFAULT_LIMIT = 50
+export const MEMORY_PAGE_DEFAULT_LIMIT = 20
 export const MEMORY_PAGE_MAX_LIMIT = 200
 
 /** limit clamp 到 [1, 200]；undefined/NaN -> 默认 50。 */

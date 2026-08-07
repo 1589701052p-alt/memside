@@ -41,12 +41,12 @@ async function seedMemory(createdAt: number, status: MemoryStatus = 'candidate',
   return m.id
 }
 
-test('clampPageLimit: undefined/NaN -> 50, 0 -> 1, 9999 -> 200', () => {
+test('clampPageLimit: undefined/NaN -> 20（默认页大小）, 0 -> 1, 9999 -> 200', () => {
   expect(clampPageLimit(undefined)).toBe(MEMORY_PAGE_DEFAULT_LIMIT)
   expect(clampPageLimit(NaN)).toBe(MEMORY_PAGE_DEFAULT_LIMIT)
   expect(clampPageLimit(0)).toBe(1)
   expect(clampPageLimit(9999)).toBe(MEMORY_PAGE_MAX_LIMIT)
-  expect(MEMORY_PAGE_DEFAULT_LIMIT).toBe(50)
+  expect(MEMORY_PAGE_DEFAULT_LIMIT).toBe(20)
   expect(MEMORY_PAGE_MAX_LIMIT).toBe(200)
 })
 

@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test'
 import {
   listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection, type MemoryItem,
-  listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated,
+  listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, WEB_PAGE_SIZE,
 } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
@@ -280,6 +280,18 @@ test('listDiscardsPage / listDistillRunsPage: URL 与形状', async () => {
   expect(urls[0]).toBe('/api/discards?limit=50&before=1&beforeId=a')
   await listDistillRunsPage(fetchFn, { limit: 50 })
   expect(urls[1]).toBe('/api/distill-runs?limit=50')
+})
+
+// 页大小契约（2026-08-07 用户拍板）：一页 20 条，不显式传 limit 时 URL 用默认值。
+test('WEB_PAGE_SIZE = 20，缺省 limit 走默认值', async () => {
+  expect(WEB_PAGE_SIZE).toBe(20)
+  let called = ''
+  const fetchFn = (async (url: string) => {
+    called = url
+    return new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null }), { status: 200 })
+  }) as any
+  await listDiscardsPage(fetchFn)
+  expect(called).toBe('/api/discards?limit=20')
 })
 
 test('bulkRejectUnevaluated: POST 到按条件批量端点', async () => {
