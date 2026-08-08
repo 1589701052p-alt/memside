@@ -53,7 +53,7 @@ test('门禁：user-confirmed 候选被 judge 误判 derivable -> 仍入库 valu
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: '凭证链优先级 UI>settings>env，因为 env 残留曾致 401' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: '凭证链优先级 UI>settings>env，因为 env 残留曾致 401' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (sys) => {
       callCount++
       if (sys.includes('memside-distiller')) {
@@ -106,7 +106,7 @@ test('门禁：agent-observed 琐事被判 fleeting -> 进 memory_discards，pro
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: '今天先到这吧，收工' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: '今天先到这吧，收工' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (sys) => {
       callCount++
       if (sys.includes('memside-distiller')) {

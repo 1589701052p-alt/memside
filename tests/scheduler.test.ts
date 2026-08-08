@@ -59,7 +59,7 @@ test('tick runs a due job and marks done, produces candidates', async () => {
   // force due
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   const processed = await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'we only refund within 14 days' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'we only refund within 14 days' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({
       candidates: [{ title: '[category:invariant] refund window 14d', bodyMd: '14 days', scope: 'project', runtime: null, distillAction: 'new' }],
     }),
@@ -77,7 +77,7 @@ test('tick passes sourceCwd from job.cwd into createCandidate', async () => {
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'something' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'something' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({
       candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'global', runtime: null, distillAction: 'new' }],
     }),
@@ -110,7 +110,7 @@ test('tick filters duplicate candidates (dedup marks duplicate, not persisted)',
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund 14 days' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund 14 days' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:process] 14天退款', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -130,7 +130,7 @@ test('tick keeps all candidates when dedup LLM throws (conservative, job still d
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -150,7 +150,7 @@ test('tick skips dedup LLM when no existing memories in scope', async () => {
   let callCount = 0
   let createCalls = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -171,7 +171,7 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -257,7 +257,7 @@ test('tick discards value-filter public-knowledge, logs to memory_discards, no c
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] js array map', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -281,7 +281,7 @@ test('tick passes valueClass into createCandidate for kept candidates', async ()
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] chose A not B because', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -306,7 +306,7 @@ test('tick 入库候选携带 origin/evidence（用户陈述类端到端入库�
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: '任何改动必须走分支+PR' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: '任何改动必须走分支+PR' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:convention] 任何改动必须走分支+PR', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: '任何改动必须走分支+PR' }] })
@@ -329,7 +329,7 @@ test('tick keeps all as valueClass=null when judgeValue LLM throws, job still do
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -355,7 +355,7 @@ test('tick runs dedup before judgeValue (3-phase call order)', async () => {
   const phases: string[] = []
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) { phases.push('distill'); return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) }
@@ -374,7 +374,7 @@ test('tick: protected invariant candidate survives with valueClass=decision (e2e
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refunds only within 14 days' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refunds only within 14 days' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款须在发货后14天内', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: '退款须在发货后14天内' }] })
@@ -401,7 +401,7 @@ test('tick: codebase invariant candidate is discarded when LLM says derivable (e
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'valueFilter must force-keep invariant' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'valueFilter must force-keep invariant' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] valueFilter 必须强制保留 invariant', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }] })
@@ -428,7 +428,7 @@ test('tick: dedup existing bodyMd flows into cross-batch comparison (e2e)', asyn
   let captured = ''
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund rule' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund rule' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款规则14天期限', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain' }] })
@@ -451,7 +451,7 @@ test('tick: codebase-ruleObject design-decision candidate is derivable-discarded
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'token budget widened to 64k' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'token budget widened to 64k' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:architecture] token 预算从 12k 扩到 64k', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'codebase' }] })
@@ -486,7 +486,7 @@ test('tick skips distill when newTurns empty (marks done, no createCandidate, no
   let createCalls = 0
   let llmCalls = 0
   const processed = await tick(db, {
-    loadTranscript: async () => ({ turns: [], fullLength: 120 }),
+    loadTranscript: async () => ({ turns: [], fullLength: 120, prefixTurns: [] }),
     callLLM: async () => { llmCalls++; return '[]' },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
@@ -508,7 +508,7 @@ test('tick updates session offset after successful distill (job has sessionId)',
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'new turn' }], fullLength: 42 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'new turn' }], fullLength: 42, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
   })
@@ -525,7 +525,7 @@ test('tick does NOT setSessionOffset when job has no sessionId (backward compat)
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 5 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 5, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
   })
@@ -557,7 +557,7 @@ test('tick still marks done when setSessionOffset throws (warn, non-blocking)', 
   try {
     sessionOffsetsThrows = true
     await tick(db, {
-      loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 3 }),
+      loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 3, prefixTurns: [] }),
       callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
       createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
     })
@@ -760,7 +760,7 @@ test('tick discards taming candidate to logDiscards (reason=taming), no createCa
   let createCalls = 0
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'always agree with me' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'always agree with me' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [
@@ -797,7 +797,7 @@ test('tick writes source-input snapshot when candidates are kept', async () => {
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'we refund within 14 days' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'we refund within 14 days' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] refund 14d', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] }),
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
   })
@@ -815,7 +815,7 @@ test('tick writes source-input snapshot even when 0 candidates kept (all discard
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] js array map', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
@@ -847,7 +847,7 @@ test('tick still marks done when saveSourceInput throws (warn, non-blocking)', a
   try {
     inputsThrows = true
     await tick(db, {
-      loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+      loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
       callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
       createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
     })
@@ -882,7 +882,7 @@ test('tick: existing slugs (project + global union) reach the distiller prompt; 
   let distillUserPrompt = ''
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user' as const, content: 'refund rule' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user' as const, content: 'refund rule' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) {
@@ -914,7 +914,9 @@ test('tick: subagent job (sourceAgentId set) -> sourceKind=subagent in createCan
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'subagent did X' }], fullLength: 1 }),
+    // Task 8 起 subagent job 有琐碎下限（<1000 字 -> skipped_trivial 不调 LLM）；
+    // 本用例锁 sourceKind 传播，需越过琐碎下限。
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: `subagent did X ${'y'.repeat(1200)}` }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:architecture] subagent rationale', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
@@ -929,7 +931,7 @@ test('tick: subagent job does NOT update session offset (even if sessionId prese
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
   })
@@ -948,7 +950,7 @@ test('tick: main-session job (no sourceAgentId) still uses sourceKind=conversati
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 7 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 7, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
@@ -971,7 +973,7 @@ test('tick writes run record outcome=skipped_no_new_turns when newTurns empty', 
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's1' })
   await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: '[]' })
   await forceDue(jobId)
-  const n = await tick(db, { loadTranscript: async () => ({ turns: [], fullLength: 0 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  const n = await tick(db, { loadTranscript: async () => ({ turns: [], fullLength: 0, prefixTurns: [] }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
   expect(n).toBe(1)
   const runs = db.select().from(memoryDistillRuns).all()
   expect(runs.length).toBe(1)
@@ -983,7 +985,7 @@ test('tick writes run record outcome=empty_output when LLM returns 0 candidates'
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's2' })
   await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
   await forceDue(jobId)
-  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1, prefixTurns: [] }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
   const runs = db.select().from(memoryDistillRuns).all()
   expect(runs[0]!.outcome).toBe('empty_output')
   expect(runs[0]!.distilledCount).toBe(0)
@@ -993,7 +995,7 @@ test('tick writes run record outcome=llm_error when callLLM throws', async () =>
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's3' })
   await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
   await forceDue(jobId)
-  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => { throw new Error('api down') }, createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1, prefixTurns: [] }), callLLM: async () => { throw new Error('api down') }, createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
   const runs = db.select().from(memoryDistillRuns).all()
   expect(runs[0]!.outcome).toBe('llm_error')
 })
@@ -1010,7 +1012,7 @@ test('tick writes run record outcome=produced when distill retry succeeds (callT
   await forceDue(jobId)
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) throw new Error('transient api down')   // distill attempt 0
@@ -1031,7 +1033,7 @@ test('tick writes run record outcome=produced with correct count chain', async (
   // distill 返回 2 候选 -> dedup 全留 2 -> valueFilter 全留 2（decision）-> 入库 2
   let phase = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       phase++
       if (phase === 1) return JSON.stringify({ candidates: [
@@ -1057,7 +1059,7 @@ test('tick writes source-input snapshot even when 0 candidates kept (去门)', a
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e', runtime: 'claude-code', cwd: '/r', debounceKey: 'k', debounceMs: 0, sessionId: 's5' })
   await db.insert(memoryDistillEvents).values({ distillJobId: jobId, attemptIndex: 0, ts: Date.now(), kind: 'conversation', payload: JSON.stringify([{ role: 'user', content: 'hi' }]) })
   await forceDue(jobId)
-  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+  await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1, prefixTurns: [] }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
   const snaps = db.select().from(memoryDistillInputs).all()
   expect(snaps.length).toBe(1)  // 去门后 0 候选也写
 })
@@ -1069,7 +1071,7 @@ test('tick still marks done when saveDistillRun throws', async () => {
   const origInsert = db.insert.bind(db)
   ;(db as any).insert = (table: unknown) => { if (table === memoryDistillRuns) throw new Error('write fail'); return origInsert(table as any) }
   try {
-    await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1 }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
+    await tick(db, { loadTranscript: async () => ({ turns: [{ role: 'user', content: 'hi' }] as any, fullLength: 1, prefixTurns: [] }), callLLM: async () => JSON.stringify({ candidates: [] }), createCandidate: async (_d: any, input: any) => ({ id: 'c', status: 'candidate', version: 1 } as any) })
   } finally { (db as any).insert = origInsert }
   const job = db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).all()[0]!
   expect(job.status).toBe('done')
@@ -1088,7 +1090,7 @@ test('llm_error: scheduler writes errorMessage to distill run + job.last_error',
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId)).run()
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => { throw new Error('500 Internal Server Error') },
     createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
   })
@@ -1108,7 +1110,7 @@ test('produced: scheduler does NOT write job.last_error', async () => {
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId)).run()
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund 14 days' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'refund 14 days' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:invariant] 14d', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
     createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
   })
@@ -1130,7 +1132,9 @@ test('tick 对 subagent job 的候选强制降级 origin 为 agent-observed', as
   let captured: any = null
   let callCount = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'You are implementing Task 1' }], fullLength: 1 }),
+    // Task 8 起 subagent job 有琐碎下限（<1000 字 -> skipped_trivial 不调 LLM）；
+    // 本用例锁 origin 降级，需越过琐碎下限。
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: `You are implementing Task 1 ${'y'.repeat(1200)}` }], fullLength: 1, prefixTurns: [] }),
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:convention] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: 'Do not change anything outside this task scope' }] })

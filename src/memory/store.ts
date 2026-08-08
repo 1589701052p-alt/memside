@@ -584,7 +584,7 @@ export async function getSourceInput(
 // listRecentDistillRuns 不含 rawOutput（走专用详情端点），JOIN job 元数据。
 // ---------------------------------------------------------------------------
 
-export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced'
+export type DistillOutcome = 'skipped_no_new_turns' | 'skipped_trivial' | 'empty_output' | 'llm_error' | 'produced'
 
 export interface DistillRunRecord {
   outcome: DistillOutcome
