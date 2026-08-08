@@ -104,6 +104,10 @@ export interface DistillInput {
   callLLM: LLMCall
   /** 来源类型。subagent -> 候选 origin 强制降级 agent-observed；可选，默认 'conversation'（spec §3.1）。 */
   sourceKind?: 'subagent' | 'conversation'
+  /** 前文 digest（spec §4.6）。null/空串 = 无背景节（向后兼容）。 */
+  priorContext?: string | null
+  /** 已审批记忆标题清单（上限 100 条由调用方保证）。空数组 = 无该节。 */
+  approvedTitles?: string[]
 }
 
 export interface DistillResult {
@@ -127,10 +131,20 @@ function renderUserPrompt(
   signals: ReturnType<typeof detectErrorSignals>,
   existingSlugs: string[],
   sourceKind?: 'subagent' | 'conversation',
+  priorContext?: string | null,
+  approvedTitles?: string[],
 ): string {
   const transcript = turns.map((t) => `[${t.role}] ${t.content}`).join('\n')
   const slugs = existingSlugs.length > 0 ? existingSlugs.join(', ') : '(none)'
-  const base = `Runtime: ${runtime}\nCwd: ${cwd}\nError signals detected: ${JSON.stringify(signals)}\nExisting subject slugs (reuse these when a candidate matches an existing subject): ${slugs}\n\nTranscript:\n${transcript}\n\nExtract candidate memories as JSON per the system instructions.`
+  const sections: string[] = []
+  // 空节整节省略：两字段均空时输出与旧 prompt 逐字节一致（spec §4.6 向后兼容锁）。
+  if (priorContext && priorContext.trim()) {
+    sections.push(`## 背景（仅供理解上下文，禁止从中提炼）\n${priorContext}\n\n`)
+  }
+  if (approvedTitles && approvedTitles.length > 0) {
+    sections.push(`## 已记录的记忆标题（禁止重复提炼）\n${approvedTitles.map((s) => `- ${s}`).join('\n')}\n\n`)
+  }
+  const base = `${sections.join('')}Runtime: ${runtime}\nCwd: ${cwd}\nError signals detected: ${JSON.stringify(signals)}\nExisting subject slugs (reuse these when a candidate matches an existing subject): ${slugs}\n\nTranscript:\n${transcript}\n\nExtract candidate memories as JSON per the system instructions.`
   return sourceKind === 'subagent' ? base + SUBAGENT_BRIEF_NOTE : base
 }
 
@@ -169,7 +183,7 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
   try {
     const signals = detectErrorSignals(input.turns)
     const filtered = filterTranscriptForDistill(input.turns)
-    const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals, input.existingSlugs, input.sourceKind)
+    const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals, input.existingSlugs, input.sourceKind, input.priorContext, input.approvedTitles)
     // callWithRetry swallows callLLM throws (returns undefined after exhausting
     // retries). callThrew tracks whether the underlying call threw, for two uses:
     // (a) errorMessage 取值（callThrew ? lastErrorMessage : null）,
