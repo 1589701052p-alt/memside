@@ -44,6 +44,23 @@ export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
   return { jobId: id, nextRunAt }
 }
 
+/**
+ * 累加 job（spec §4.8）：与 enqueueDistillJob 同字段，status='waiting'，
+ * lastCaptureAt=now。waiting 不进 tick 的 pending 选择；放行由
+ * releaseWaitingJob（capture 阈值）或 sweep（flush/TTL）做。
+ */
+export async function enqueueWaitingJob(db: DbClient, input: EnqueueInput) {
+  const id = ulid()
+  const now = Date.now()
+  await db.insert(memoryDistillJobs).values({
+    id, debounceKey: input.debounceKey, sourceEventId: input.sourceEventId,
+    runtime: input.runtime, cwd: input.cwd, sessionId: input.sessionId ?? null,
+    sourceAgentId: input.sourceAgentId ?? null, status: 'waiting', attempts: 0,
+    nextRunAt: now, createdAt: now, finishedAt: null, lastCaptureAt: now,
+  })
+  return { jobId: id, nextRunAt: now }
+}
+
 export interface TickDeps {
   loadTranscript: (job: {
     id: string; cwd: string | null; sourceEventId: string; sessionId: string | null

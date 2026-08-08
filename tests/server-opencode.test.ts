@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { openDb } from '@/db/client'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { createApp } from '@/server'
-import { memoryDistillEvents } from '@/db/schema'
+import { memoryDistillEvents, memoryDistillJobs } from '@/db/schema'
 import type { RuntimeAdapter } from '@/adapter/types'
 
 // Task 4 回归锁：daemon 接收双 adapter（claude + opencode）。
@@ -64,26 +64,28 @@ test('GET /hooks/opencode/inject 返回 opencode adapter 块', async () => {
   expect(body.block).toContain('--- BEGIN INJECTED MEMORY ---')
 })
 
-test('POST /hooks/opencode/capture -> enqueueDistillJob(runtime:opencode) + events 行 + 202', async () => {
+test('POST /hooks/opencode/capture -> 会话级 waiting job + events 行 + 202', async () => {
   // Task 5 回归锁：opencode 侧会话捕获路由。opencode idle hook POST 全量 messages ->
-  // parseOpencodeMessages 转 TranscriptTurn[] -> enqueueDistillJob(runtime:'opencode') +
-  // memory_distill_events 行（kind:'conversation'）-> 202 同步 ack。
-  // 镜像 claude code Stop 路由的 fire-and-forget IIFE + broadcast + 202 模式（server.ts:222-238）。
+  // parseOpencodeMessages 转 TranscriptTurn[] -> 落库 + 202 同步 ack。
+  // 镜像 claude code Stop 路由的 fire-and-forget IIFE + broadcast + 202 模式。
   // 错误信号不走单独路由：由 capture 全量 transcript 经 distiller 的 detectErrorSignals 提取
   // （对齐 claude code PostToolUse 跳过决策，server.ts:154-157）。
+  // 攒量批处理（Task 7，spec §4.8 决策 1）后：带 sessionId 的 opencode capture 与 claude
+  // Stop 统一走会话级累加——不再经 deps.enqueueDistillJob（那是 legacy 无 sessionId 的
+  // seam），而是建/复用该 session 唯一的 waiting job（不变量 A）。本测试改为锁新契约：
+  // waiting job 以 sessionId 为键、恰一行 events（不变量 D）、payload 含 user 文本。
   const BLOCK = '--- BEGIN INJECTED MEMORY ---\nopencode wired\n--- END INJECTED MEMORY ---'
   const opencodeFake: RuntimeAdapter = {
     kind: 'opencode',
     capture: async () => [],
     inject: async () => BLOCK,
   }
-  const enqueueCalls: { runtime: string; cwd: string; debounceKey: string; sessionId?: string }[] = []
   const bc: unknown[] = []
   const app = createApp({
     db,
     adapter: new ClaudeCodeAdapter(db),
     opencodeAdapter: opencodeFake,
-    enqueueDistillJob: async (_d, input) => { enqueueCalls.push(input); return { jobId: 'j1', nextRunAt: 0 } },
+    enqueueDistillJob: async (_d, input) => { throw new Error(`legacy seam must not be called: ${JSON.stringify(input)}`) },
     broadcast: (m: unknown) => { bc.push(m) },
   })
   const res = await app.request('/hooks/opencode/capture', {
@@ -96,12 +98,12 @@ test('POST /hooks/opencode/capture -> enqueueDistillJob(runtime:opencode) + even
     headers: { 'content-type': 'application/json' },
   })
   expect(res.status).toBe(202)
-  // enqueueDistillJob 在 IIFE 内异步调用，但 fake 在调用时同步记录入参（参考 server.test.ts
-  // 的 enqueueCalls 模式），fire-and-forget 不 await 也能确定性断言。
-  expect(enqueueCalls.length).toBe(1)
-  expect(enqueueCalls[0]).toMatchObject({ runtime: 'opencode', cwd: '/p', debounceKey: 's1', sessionId: 's1' })
-  // memory_distill_events 行写入（IIFE 内异步落库，等 50ms 让 DB write 完成）
+  // IIFE 内异步落库，等 50ms 让 DB write 完成（对齐 server.test.ts 等待模式）。
   await new Promise((r) => setTimeout(r, 50))
+  const jobs = await db.select().from(memoryDistillJobs)
+  expect(jobs.length).toBe(1)
+  expect(jobs[0]).toMatchObject({ runtime: 'opencode', cwd: '/p', debounceKey: 's1', sessionId: 's1', status: 'waiting' })
+  // memory_distill_events 恰一行（upsertSessionEvent，kind:'conversation'）
   const events = await db.select().from(memoryDistillEvents)
   expect(events.length).toBe(1)
   expect(events[0]!.kind).toBe('conversation')
