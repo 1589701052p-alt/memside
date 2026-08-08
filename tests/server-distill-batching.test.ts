@@ -8,19 +8,39 @@
 //   legacy 无 sessionId / subagent -> 旧行为不变（一次 capture 一个立即 pending job）；
 //   解析失败 -> 不炸路由、job 状态可解释（降级可见化，spec §5）。
 // 测试基建对齐 tests/server.test.ts：createApp + fake adapter + app.fetch + tmp 文件库。
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
+import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
 import { openDb, type DbClient } from '@/db/client'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memorySessionFlushes } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memorySessionFlushes, memoryDegradations } from '@/db/schema'
 import { eq } from 'drizzle-orm'
 import { writeFileSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { enqueueDistillJob } from '@/scheduler'
+import * as realThreshold from '@/memory/threshold'
+import { computeSliceSignal } from '@/memory/threshold'
+import type { TranscriptTurn } from '@/memory/pure'
+
+// threshold 段 sabotage 开关（threshold_compute_error 用例专用）：
+// bun 的 mock.module 对已静态 import 的依赖方同样生效（1.3.14 实测），但
+// mock.restore() 不会还原 module mock（实测命名绑定仍指向 mock）。因此用
+// 「常驻包装 + 开关」模式：flag 关时原样委托真实实现，对其他用例/测试文件
+// 行为零影响；真实函数引用在 mock 安装前捕获（mock.module 会原地改写模块
+// namespace，事后经 realThreshold.computeSliceSignal 取到的已是包装，会无限递归）。
+let sabotageThreshold = false
+const realComputeSliceSignal = computeSliceSignal
+mock.module('@/memory/threshold', () => ({
+  ...realThreshold,
+  computeSliceSignal: (turns: readonly TranscriptTurn[], offset: number) => {
+    if (sabotageThreshold) throw new Error('threshold sabotage (test)')
+    return realComputeSliceSignal(turns, offset)
+  },
+}))
 
 let db: DbClient
 let app: ReturnType<typeof createApp>
 const enqueueResults: { jobId: string }[] = []
+const broadcasts: unknown[] = []
 
 // 注：brief 原文用 openDb(':memory:')，但 client.ts 的 mkdirSync(dirname(path))
 // 对 ':memory:' 会在 bun 下抛 EEXIST(mkdir '.')，改用每次 fresh 的临时文件库
@@ -28,13 +48,14 @@ const enqueueResults: { jobId: string }[] = []
 beforeEach(() => {
   db = openDb(join(mkdtempSync(join(tmpdir(), 'memside-batch-server-')), 'test.db'))
   enqueueResults.length = 0
+  broadcasts.length = 0
   app = createApp({
     db,
     adapter: { inject: async () => null } as never,
     opencodeAdapter: { inject: async () => null } as never,
     // 走真实 enqueueDistillJob（legacy 路径要在 DB 里落 pending job），仅记录结果。
     enqueueDistillJob: (d, input) => enqueueDistillJob(d, input).then((r) => { enqueueResults.push(r); return r }),
-    broadcast: () => {},
+    broadcast: (m) => { broadcasts.push(m) },
   })
 })
 
@@ -171,6 +192,81 @@ describe('降级可见化（spec §5）', () => {
     const jobs = await db.select().from(memoryDistillJobs)
     expect(jobs.length).toBe(1)
     expect(jobs[0]!.status).toBe('waiting') // 空切片信号 {0,0}，shouldRelease=false
+  })
+})
+
+describe('降级错误路径（spec §5 #1/#2/#3：降级不得静默，必须落表）', () => {
+  // 本组三用例锁 spec §5 的三条 catch 路径（server.ts accumulateCapture 双 try +
+  // SessionEnd try）。存在理由：review 指出三条降级路径此前零行为覆盖——未来
+  // refactor 若把 catch 删成静默吞错、改错 kind、或漏放行，这里必须变红。
+  // sabotage 选型：DROP TABLE / mock.module 只让目标函数失效，logDegradation
+  // 写的是另一张表（memory_degradations）不受影响，因此能断言「落表」本身；
+  // 不用 db.$client.close()——它会让 logDegradation 一并失败，只剩 console-only
+  // 兜底，无法断言行存在。
+
+  test('存储段异常 -> 不放行（job 留 waiting）+ capture_persist_failed 落表 + memory.enqueue.failed broadcast', async () => {
+    // 锁 spec §5 #2（server.ts 存储段 catch）。DROP memory_distill_events 使
+    // upsertSessionEvent 抛（findWaitingJob/enqueueWaitingJob 已先成功 -> jobId 已知，
+    // 降级行应带 distillJobId 关联）；touchLastCapture 不会被执行到。
+    db.$client.exec('DROP TABLE memory_distill_events')
+    const tp = makeTranscript([{ role: 'user', content: 'x' }])
+    const r = await stop('sess-persist', tp)
+    expect(r.status).toBe(202) // 降级不炸路由
+    await waitIife()
+    const jobs = await db.select().from(memoryDistillJobs)
+    expect(jobs.length).toBe(1)
+    expect(jobs[0]!.status).toBe('waiting') // 存储段 catch 不做任何 release
+    const rows = await db.select().from(memoryDegradations)
+    expect(rows.length).toBe(1)
+    expect(rows[0]!.kind).toBe('capture_persist_failed')
+    expect(rows[0]!.sessionId).toBe('sess-persist')
+    expect(rows[0]!.distillJobId).toBe(jobs[0]!.id) // jobId 关联（失败前已建 job）
+    expect(broadcasts.some((m) => (m as { type?: string }).type === 'memory.enqueue.failed')).toBe(true)
+  })
+
+  test('阈值段异常 -> fail-open 立即放行（job -> pending）+ threshold_compute_error 落表', async () => {
+    // 锁 spec §5 #1 + §6.3 测试策略「threshold 抛错 -> 立即放行 + 落表」
+    // （server.ts 阈值段 catch）。sabotage 经文件顶部开关式 mock.module 让
+    // computeSliceSignal 抛；存储段不受影响（job 正常建成 waiting），
+    // catch 内 releaseWaitingJob 真实执行 -> pending。
+    sabotageThreshold = true
+    try {
+      const tp = makeTranscript([{ role: 'user', content: 'x' }])
+      const r = await stop('sess-threshold', tp)
+      expect(r.status).toBe(202)
+      await waitIife()
+    } finally {
+      sabotageThreshold = false
+    }
+    const jobs = await db.select().from(memoryDistillJobs)
+    expect(jobs.length).toBe(1)
+    expect(jobs[0]!.status).toBe('pending') // fail-open：阈值是优化非正确性依赖
+    const rows = await db.select().from(memoryDegradations)
+    expect(rows.length).toBe(1)
+    expect(rows[0]!.kind).toBe('threshold_compute_error')
+    expect(rows[0]!.sessionId).toBe('sess-threshold')
+    expect(rows[0]!.distillJobId).toBe(jobs[0]!.id)
+    // 阈值路径不走 enqueue.failed broadcast（那是存储段 / legacy 段的信号）
+    expect(broadcasts.some((m) => (m as { type?: string }).type === 'memory.enqueue.failed')).toBe(false)
+  })
+
+  test('SessionEnd markFlush 异常 -> flush_mark_failed 落表（detail 注明 TTL 兜底），恒 202', async () => {
+    // 锁 spec §5 #3（server.ts SessionEnd catch）。DROP memory_session_flushes
+    // 精准让 markFlush 抛而不波及 logDegradation（审计写 memory_degradations）。
+    db.$client.exec('DROP TABLE memory_session_flushes')
+    const r = await req('/hooks/claude/SessionEnd', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'sess-flush', cwd: '/proj', reason: 'prompt_input_exit' }),
+    })
+    expect(r.status).toBe(202) // 绝不阻塞 claude code 退出路径
+    await waitIife()
+    const rows = await db.select().from(memoryDegradations)
+    expect(rows.length).toBe(1)
+    expect(rows[0]!.kind).toBe('flush_mark_failed')
+    expect(rows[0]!.sessionId).toBe('sess-flush')
+    expect(rows[0]!.distillJobId).toBeNull() // SessionEnd 不关联具体 job
+    expect(rows[0]!.detail).toContain('TTL 兜底') // spec：崩溃时 TTL 扫描兜底仍生效
+    expect(broadcasts.some((m) => (m as { type?: string }).type === 'memory.enqueue.failed')).toBe(false)
   })
 })
 
