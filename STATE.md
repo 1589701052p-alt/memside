@@ -718,3 +718,30 @@ deferred minor 见 sdd ledger）。`bun run typecheck && bun test` 582/582 全�
 2. 杀 daemon -> `opencode run` 毫秒级跳过（ECONNREFUSED 日志），无挂死。
 3. 用户 TUI 验收：正常使用一轮不卡 + capture ok + daemon 新 opencode job。
 4. 大会话抽查：长会话 idle 捕获不被 30s 预算误杀。
+
+## 设置 tab 统一收拢 LLM/判定配置（2026-08-07）
+
+Web UI 新增第 6 个「设置」tab：把原本常驻状态栏下方的 LLM 设置（生效回显 +
+保存/测试/清除）与判定设置（质量/经济模式 + agent 预算）两个区块收拢进去，
+为后续更多设置项留扩展位。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-08-07-settings-tab*`。
+
+1. `tab-cache.ts` 纯函数 `isListTab`：settings 无列表数据流的唯一判据。
+2. `App.tsx`：TabKey 加 'settings'（无计数徽标）；refresh/loadMore/轮询/
+   observer/列表尾部五处入口经 isListTab 短路；列表尾部整块门控
+   （tabPageOf 对 settings 索引 undefined 会抛 TypeError，必现 crash 防护）；
+   两区块从常驻位置移入 settings 分支（组件本体逐字不动，切走卸载/切回重挂载
+   每次重 fetch 生效配置）。
+3. 进入设置 tab 一次性 getStatus()（不轮询不拉列表）：daemon 断连时全局错误
+   banner + 区块内错误行均可见。
+
+执行：subagent-driven（2 实现 task 各 implementer + reviewer，全部 Approved；
+终审 opus whole-branch review verdict=Ready to merge=Yes，0 Critical /
+0 Important）。`bun run typecheck && bun test` 718/718 全绿。
+
+### 终审 deferred minor（非阻塞）
+
+1. `isListTab` 为 `(tab: string) => boolean` 非 type guard，App.tsx 6 处
+   `as MemoryTabKey` cast（守卫后运行时恒真；升级 type guard 可消 cast，留 follow-up）。
+2. `isListTab('foo')` 未断言（spec §5 限定测试集；调用点均传编译期 TabKey）。
+3. tab-cache.ts / tab-cache.test.ts 结尾无换行符（pre-existing 风格延续）。
