@@ -1,7 +1,7 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs } from '@/db/schema'
+import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations } from '@/db/schema'
 import {
   canTransition,
   normalizeSubjectSlug,
@@ -854,4 +854,144 @@ export async function bulkRejectUnevaluated(db: DbClient): Promise<{ rejected: n
     }
   }
   return { rejected }
+}
+
+// ---------------------------------------------------------------------------
+// 攒量批处理（spec §4.4）：waiting job / event upsert / flush / digest / degradations。
+// ---------------------------------------------------------------------------
+
+export interface DistillJobRow {
+  id: string
+  runtime: string
+  sessionId: string | null
+  status: string
+  lastCaptureAt: number | null
+  cwd: string | null
+  sourceAgentId: string | null
+}
+
+export interface DegradationRow {
+  id: string
+  ts: number
+  kind: string
+  detail: string | null
+  distillJobId: string | null
+  sessionId: string | null
+}
+
+const JOB_COLS = {
+  id: memoryDistillJobs.id,
+  runtime: memoryDistillJobs.runtime,
+  sessionId: memoryDistillJobs.sessionId,
+  status: memoryDistillJobs.status,
+  lastCaptureAt: memoryDistillJobs.lastCaptureAt,
+  cwd: memoryDistillJobs.cwd,
+  sourceAgentId: memoryDistillJobs.sourceAgentId,
+} as const
+
+/** 累加中的 job（不变量 A：同 session 最多一个）。排除 subagent（一次性语义）。 */
+export async function findWaitingJob(
+  db: DbClient, runtime: 'claude-code' | 'opencode', sessionId: string,
+): Promise<DistillJobRow | null> {
+  const rows = await db.select(JOB_COLS).from(memoryDistillJobs)
+    .where(and(
+      eq(memoryDistillJobs.status, 'waiting'),
+      eq(memoryDistillJobs.runtime, runtime),
+      eq(memoryDistillJobs.sessionId, sessionId),
+      isNull(memoryDistillJobs.sourceAgentId),
+    )).limit(1)
+  return rows[0] ?? null
+}
+
+export async function listWaitingJobs(db: DbClient): Promise<DistillJobRow[]> {
+  return db.select(JOB_COLS).from(memoryDistillJobs)
+    .where(and(eq(memoryDistillJobs.status, 'waiting'), isNull(memoryDistillJobs.sourceAgentId)))
+}
+
+/** 不变量 D：一 job 一行 event（最新全量快照）。同事务 delete+insert。 */
+export async function upsertSessionEvent(db: DbClient, jobId: string, payloadJson: string): Promise<void> {
+  db.$client.exec('BEGIN')
+  try {
+    db.$client.prepare('DELETE FROM memory_distill_events WHERE distill_job_id = ?').run(jobId)
+    db.$client.prepare(
+      "INSERT INTO memory_distill_events (distill_job_id, attempt_index, ts, kind, payload) VALUES (?, 0, ?, 'conversation', ?)",
+    ).run(jobId, Date.now(), payloadJson)
+    db.$client.exec('COMMIT')
+  } catch (e) {
+    db.$client.exec('ROLLBACK')
+    throw e
+  }
+}
+
+/** 不变量 B：waiting -> pending 单向放行，nextRunAt=now 立即参与 tick 选择。 */
+export async function releaseWaitingJob(db: DbClient, jobId: string): Promise<void> {
+  await db.update(memoryDistillJobs)
+    .set({ status: 'pending', nextRunAt: Date.now() })
+    .where(and(eq(memoryDistillJobs.id, jobId), eq(memoryDistillJobs.status, 'waiting'))).run()
+}
+
+export async function touchLastCapture(db: DbClient, jobId: string, ts: number): Promise<void> {
+  await db.update(memoryDistillJobs).set({ lastCaptureAt: ts })
+    .where(eq(memoryDistillJobs.id, jobId)).run()
+}
+
+export async function markFlush(db: DbClient, sessionId: string): Promise<void> {
+  const now = Date.now()
+  await db.insert(memorySessionFlushes).values({ sessionId, ts: now })
+    .onConflictDoUpdate({ target: memorySessionFlushes.sessionId, set: { ts: now } }).run()
+}
+
+/** 一次性消费：有则删并返 true。 */
+export async function consumeFlush(db: DbClient, sessionId: string): Promise<boolean> {
+  const rows = await db.delete(memorySessionFlushes)
+    .where(eq(memorySessionFlushes.sessionId, sessionId))
+    .returning({ sessionId: memorySessionFlushes.sessionId })
+  return rows.length > 0
+}
+
+export async function getSessionDigest(
+  db: DbClient, sessionId: string,
+): Promise<{ digest: string; mode: string } | null> {
+  const rows = await db.select().from(memorySessionDigests)
+    .where(eq(memorySessionDigests.sessionId, sessionId)).limit(1)
+  return rows[0] ? { digest: rows[0].digest, mode: rows[0].mode } : null
+}
+
+export async function upsertSessionDigest(
+  db: DbClient, sessionId: string, digest: string, mode: 'llm' | 'deterministic-fallback',
+): Promise<void> {
+  const now = Date.now()
+  await db.insert(memorySessionDigests).values({ sessionId, digest, mode, updatedAt: now })
+    .onConflictDoUpdate({ target: memorySessionDigests.sessionId, set: { digest, mode, updatedAt: now } }).run()
+}
+
+/**
+ * 降级可见化（spec §5）：所有降级必须落表，UI 经 /api/status + 蒸馏记录呈现。
+ * 本函数自身写表失败是唯一允许的 console-only 路径（审计系统自身故障）。
+ */
+export async function logDegradation(
+  db: DbClient,
+  entry: { kind: string; detail?: string; distillJobId?: string; sessionId?: string },
+): Promise<void> {
+  try {
+    await db.insert(memoryDegradations).values({
+      id: ulid(), ts: Date.now(), kind: entry.kind,
+      detail: entry.detail ?? null, distillJobId: entry.distillJobId ?? null,
+      sessionId: entry.sessionId ?? null,
+    })
+  } catch (e) {
+    console.warn('memside: logDegradation failed (audit self-failure, console-only by design)', e)
+  }
+}
+
+export async function listRecentDegradations(db: DbClient, sinceTs: number): Promise<DegradationRow[]> {
+  return db.select().from(memoryDegradations)
+    .where(gt(memoryDegradations.ts, sinceTs))
+    .orderBy(desc(memoryDegradations.ts)).limit(100)
+}
+
+export async function listDegradationsForJob(db: DbClient, jobId: string): Promise<DegradationRow[]> {
+  return db.select().from(memoryDegradations)
+    .where(eq(memoryDegradations.distillJobId, jobId))
+    .orderBy(desc(memoryDegradations.ts)).limit(50)
 }
