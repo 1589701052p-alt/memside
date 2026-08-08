@@ -187,6 +187,72 @@ describe('subagent trivial 判定（spec §4.8）', () => {
   })
 })
 
+describe('降级错误路径（spec §5：digest_read_failed / titles_query_failed 落表）', () => {
+  // 本组两用例锁 spec §5「降级不得静默」在 tick 内的两条 catch 路径（scheduler.ts
+  // getSessionDigest catch -> digest_read_failed；listApprovedByScope catch ->
+  // titles_query_failed）。存在理由：Task 8 review 指出这两条此前零行为覆盖——
+  // 未来 refactor 若删掉 catch、改错 kind、或让异常上抛炸 job，这里必须变红。
+  // sabotage 选型对齐 tests/server-distill-batching.test.ts「降级错误路径」组：
+  // DROP TABLE 只让目标查询失效，logDegradation 写的 memory_degradations 不受影响，
+  // 因此能断言「落表」本身。
+
+  test('getSessionDigest 抛错 -> digest_read_failed 落表 + 降级为无 priorContext + job 仍 done', async () => {
+    // 构造：质量模式 + sessionId + offset>0（fullLength 2 - newTurns 1），tick 才走
+    // getSessionDigest 分支；DROP memory_session_digests 让它抛。后续 distill 照常
+    // （priorContext=null），滚动摘要阶段再读 digest 亦抛 -> digest_llm_failed 共现。
+    let seen = ''
+    const spyLLM: LLMCall = async (_s, user) => { seen = user; return JSON.stringify({ candidates: [] }) }
+    await db.insert(memoryDistillJobs).values({
+      id: 'j1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/proj',
+      sessionId: 's1', status: 'pending', attempts: 0, nextRunAt: 0, createdAt: 1, finishedAt: null,
+    })
+    const deps = tickDeps(spyLLM)
+    deps.loadJudgeConfig = () => QUALITY
+    deps.loadTranscript = async () => ({
+      turns: [{ role: 'user', content: '新增内容' }], fullLength: 2,
+      prefixTurns: [{ role: 'user', content: '旧讨论' }],
+    })
+    db.$client.exec('DROP TABLE memory_session_digests')
+    await tick(db, deps)
+    const [j] = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'j1'))
+    expect(j!.status).toBe('done') // 降级不阻塞 distill
+    expect(seen).not.toContain('旧讨论') // priorContext=null：未注入前文 digest
+    const degs = await db.query.memoryDegradations.findMany()
+    const readFail = degs.find((d) => d.kind === 'digest_read_failed')
+    expect(readFail).toBeDefined()
+    expect(readFail!.distillJobId).toBe('j1')
+    expect(readFail!.sessionId).toBe('s1')
+    // 滚动摘要阶段同表已 DROP -> digest_llm_failed 共现（spec §5 两条独立降级）
+    expect(degs.some((d) => d.kind === 'digest_llm_failed')).toBe(true)
+  })
+
+  test('listApprovedByScope 抛错 -> titles_query_failed 落表 + distill 照常 + job 仍 done', async () => {
+    // 构造：DROP memories 让 listApprovedByScope 抛；candidates 为空时
+    // exactDedupCandidates（src/memory/exactDedup.ts:61）与 judgeValue
+    // （src/memory/valueFilter.ts:248）均短路不触库，listSubjectSlugs 失败本属
+    // catch+warn 设计——全链路只剩 titles_query_failed 一条降级落表。
+    let calls = 0
+    const spyLLM: LLMCall = async () => { calls += 1; return JSON.stringify({ candidates: [] }) }
+    await db.insert(memoryDistillJobs).values({
+      id: 'j1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/proj',
+      sessionId: 's1', status: 'pending', attempts: 0, nextRunAt: 0, createdAt: 1, finishedAt: null,
+    })
+    const deps = tickDeps(spyLLM)
+    deps.loadJudgeConfig = () => ECONOMY // 钉经济模式：不追加滚动摘要 LLM 调用，calls 只锁 distill
+    deps.loadTranscript = async () => ({ turns: [{ role: 'user', content: '内容' }], fullLength: 1, prefixTurns: [] })
+    db.$client.exec('DROP TABLE memories')
+    await tick(db, deps)
+    expect(calls).toBe(1) // distill 照常调用（标题清单降级为空数组）
+    const [j] = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'j1'))
+    expect(j!.status).toBe('done')
+    const degs = await db.query.memoryDegradations.findMany()
+    expect(degs.length).toBe(1)
+    expect(degs[0]!.kind).toBe('titles_query_failed')
+    expect(degs[0]!.distillJobId).toBe('j1')
+    expect(degs[0]!.sessionId).toBe('s1')
+  })
+})
+
 describe('tick 对 sweep 异常的韧性（spec §5 #9）', () => {
   test('sweep 抛错 -> sweep_error 落表 + pending job 仍被处理', async () => {
     // listWaitingJobs 本身走 db；注入会让 consumeFlush 抛错的数据困难，
