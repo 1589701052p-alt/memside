@@ -3,6 +3,7 @@ import {
   filterTranscriptForDistill,
   DEFAULT_DISTILL_INPUT_BUDGET_TOKENS,
   type TranscriptTurn,
+  TOOL_INPUT_CAP_CHARS,
 } from '@/memory/pure'
 
 const tool = (over: Partial<TranscriptTurn> & Pick<TranscriptTurn, 'content'>): TranscriptTurn =>
@@ -147,4 +148,24 @@ test('预算裁剪区分场景：p=3 普通 tool 先于 thinking 被丢（锁 th
   expect(out.some((t) => t.role === 'thinking')).toBe(true)
   expect(out.some((t) => t.role === 'tool')).toBe(false)
   expect(out.some((t) => t.role === 'user')).toBe(true)
+})
+
+// --- 工具调用信息捕获（spec 2026-08-09 §4.1）---
+
+test('TOOL_INPUT_CAP_CHARS 常量锁定 300', () => {
+  expect(TOOL_INPUT_CAP_CHARS).toBe(300)
+})
+
+test('预算计量含 toolCall：大 toolCall 计入预算，触发裁剪', () => {
+  // 每条 toolCall 约 400 字符 = 100 token；content 极小
+  const bigCall = 'y'.repeat(400)
+  const turns: TranscriptTurn[] = Array.from({ length: 10 }, (_, i) => ({
+    role: 'tool' as const,
+    content: `out${i}`,
+    toolName: 'Bash',
+    toolCall: bigCall,
+  }))
+  // 10 条 × (content ~3 token + toolCall ~100 token) ≈ 1030 token；预算 500 -> 必须裁
+  const out = filterTranscriptForDistill(turns, 500)
+  expect(out.length).toBeLessThan(10)
 })

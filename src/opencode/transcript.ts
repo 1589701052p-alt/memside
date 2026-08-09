@@ -1,4 +1,5 @@
 import type { TranscriptTurn } from '@/memory/pure'
+import { captureToolCall } from '@/memory/pure'
 
 /** opencode message（PluginInput.client.session.messages 返回项的子集）。 */
 export interface OpencodeMessage {
@@ -17,6 +18,7 @@ export type OpencodePart =
  * 把 opencode session 消息转成 memside TranscriptTurn[]。
  * - user/assistant TextPart -> {role, content}
  * - ToolPart 按 callID 配对，tool result error -> isError；output 作为 tool turn content
+ * - tool_use.input 经序列化截断作 toolCall 落 tool turn（spec §4.1）
  * - reasoning -> thinking turn（spec 2026-08-09 §4.1）；subtask/step/patch/snapshot/... 一律过滤
  * 纯函数，malformed part 跳过不抛。入参非数组或单条 message 缺 parts 也跳过不抛（final-review Important #1）：
  * 真实 opencode 版本的 message 形态是文档化验证空缺，畸形 payload 不得让 capture 路由 500。
@@ -24,14 +26,15 @@ export type OpencodePart =
 export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTurn[] {
   if (!Array.isArray(messages)) return []
   const turns: TranscriptTurn[] = []
-  // 第一遍：收集 tool_use（assistant 发起），按 callID 记 toolName
-  const toolNames = new Map<string, string>()
+  // 第一遍：收集 tool_use（assistant 发起），按 callID 记 toolName + toolCall
+  const toolMeta = new Map<string, { name: string; call?: string }>()
   for (const m of messages) {
     if (!Array.isArray(m.parts)) continue
     for (const p of m.parts) {
       const tp = p as any
       if (tp.type === 'tool' && tp.callID && tp.input !== undefined && tp.output === undefined) {
-        toolNames.set(tp.callID, tp.tool ?? 'tool')
+        const name = tp.tool ?? 'tool'
+        toolMeta.set(tp.callID, { name, call: captureToolCall(tp.input) })
       }
     }
   }
@@ -47,11 +50,13 @@ export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTu
         const tp = p as any
         // tool result（有 output）-> tool turn；tool_use（有 input 无 output）不单独成 turn（input 已在配对 result）
         if (tp.output !== undefined) {
+          const meta = tp.callID ? toolMeta.get(tp.callID) : undefined
           turns.push({
             role: 'tool',
             content: typeof tp.output === 'string' ? tp.output : JSON.stringify(tp.output),
             isError: tp.error === true,
-            toolName: tp.callID ? toolNames.get(tp.callID) : undefined,
+            toolName: meta?.name,
+            ...(meta?.call ? { toolCall: meta.call } : {}),
           })
         }
       }

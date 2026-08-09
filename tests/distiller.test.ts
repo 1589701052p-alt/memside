@@ -507,3 +507,42 @@ test('DISTILLER_SYSTEM_PROMPT 含 [thinking] 说明段（spec §4.4）', () => {
   expect(DISTILLER_SYSTEM_PROMPT).toContain('内部推理')
   expect(DISTILLER_SYSTEM_PROMPT).toContain('evidence 可摘 thinking 原文')
 })
+
+// --- 工具调用信息渲染（spec 2026-08-09 §4.2）---
+
+test('renderUserPrompt: tool 带 toolCall -> 两段式 调用: + 结果:', async () => {
+  let captured = ''
+  await distillTranscript({
+    turns: [
+      { role: 'tool', content: 'all pass', toolName: 'Bash', toolCall: '{"command":"bun test"}' },
+    ],
+    runtime: 'claude-code',
+    cwd: '/repo',
+    existingSlugs: [],
+    callLLM: async (_s: string, u: string) => {
+      captured = u
+      return JSON.stringify({ candidates: [] })
+    },
+  })
+  expect(captured).toContain('[tool:Bash] 调用: {"command":"bun test"}')
+  expect(captured).toContain('结果: all pass')
+})
+
+test('renderUserPrompt: tool 无 toolCall -> 保持单行 [tool:Name] content（逐字节兼容）', async () => {
+  let captured = ''
+  await distillTranscript({
+    turns: [
+      { role: 'tool', content: 'legacy output', toolName: 'Bash' },
+    ],
+    runtime: 'claude-code',
+    cwd: '/repo',
+    existingSlugs: [],
+    callLLM: async (_s: string, u: string) => {
+      captured = u
+      return JSON.stringify({ candidates: [] })
+    },
+  })
+  expect(captured).toContain('[tool:Bash] legacy output')
+  expect(captured).not.toContain('调用:')
+  expect(captured).not.toContain('结果:')
+})

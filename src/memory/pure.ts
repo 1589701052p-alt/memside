@@ -114,6 +114,8 @@ export interface TranscriptTurn {
   toolName?: string
   /** 提取自 tool_use.input（file_path / notebook_path / path）；仅文件类工具有值。 */
   toolInputPath?: string
+  /** 工具调用信息（input 紧凑 JSON，捕获时截 TOOL_INPUT_CAP_CHARS 字）。无则缺失（老 payload/无 input）。 */
+  toolCall?: string
 }
 
 export interface ErrorSignals {
@@ -205,6 +207,28 @@ export function extractJsonObject(raw: string): string {
 
 export const DEFAULT_DISTILL_INPUT_BUDGET_TOKENS = 64000
 
+export const TOOL_INPUT_CAP_CHARS = 300
+
+/**
+ * 把 tool_use 的 input 对象序列化成紧凑 JSON 字符串，截断 TOOL_INPUT_CAP_CHARS 字。
+ * 非对象 / 缺失 / 序列化抛错 -> undefined（不设 toolCall，与既有"取不到即跳过"一致）。
+ * 一刀切：不做按工具特判（spec §4.1），新工具自动覆盖。
+ *
+ * 从 src/claude/transcript.ts 抽到 pure.ts 共享（claude + opencode 两条捕获链路
+ * 逐字相同的 guard + stringify + 截断逻辑，DRY）。纯函数、永不抛。
+ */
+export function captureToolCall(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  try {
+    const s = JSON.stringify(input)
+    if (typeof s !== 'string') return undefined
+    return s.length > TOOL_INPUT_CAP_CHARS ? s.slice(0, TOOL_INPUT_CAP_CHARS) + '…[truncated]' : s
+  } catch {
+    // 循环引用 / bigint 等 -> 不设 toolCall（永不抛契约）
+    return undefined
+  }
+}
+
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const TOOL_RESULT_CAP_CHARS = 3000
 const NON_TOOL_CAP_CHARS = 20000 // 放宽：设计 rationale 长段 assistant 文本不再腰斩
@@ -268,7 +292,10 @@ export function filterTranscriptForDistill(
     const compacted = turns.map((t) =>
       t.role === 'tool' ? compactToolTurn(t) : { ...t, content: truncate(t.content, NON_TOOL_CAP_CHARS) },
     )
-    const used = () => compacted.reduce((s, t) => s + estimateTokens(t.content), 0)
+    const used = () => compacted.reduce(
+      (s, t) => s + estimateTokens(t.content) + estimateTokens(t.toolCall ?? ''),
+      0,
+    )
     if (used() <= budgetTokens) return compacted
     const droppable = compacted
       .map((t, i) => ({ i, p: turnPriority(t) }))
@@ -279,7 +306,7 @@ export function filterTranscriptForDistill(
     for (const x of droppable) {
       if (tokens <= budgetTokens) break
       drop.add(x.i)
-      tokens -= estimateTokens(compacted[x.i]!.content)
+      tokens -= estimateTokens(compacted[x.i]!.content) + estimateTokens(compacted[x.i]!.toolCall ?? '')
     }
     return compacted.filter((_, i) => !drop.has(i))
   } catch {

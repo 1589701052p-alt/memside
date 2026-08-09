@@ -1,5 +1,6 @@
 import { readFileSync, statSync, existsSync } from 'node:fs'
 import type { TranscriptTurn } from '@/memory/pure'
+import { captureToolCall } from '@/memory/pure'
 
 /**
  * Guard against pathological inputs: a real claude code transcript JSONL is
@@ -70,6 +71,7 @@ function extractToolInputPath(input: unknown): string | undefined {
  *   `{type:'tool_use'}` is QUEUED (name + file_path extracted) and
  *   paired FIFO with the following user row's `tool_result` blocks, so the
  *   distill-time filter can compact file-source results by tool name.
+ *   tool_use.input 经 captureToolCall 序列化截断后作 toolCall 落配对 tool turn。
  *
  * Pure + deterministic (only reads the given path). Never throws: file missing
  * / unreadable / empty / too large (>50MB) / malformed lines all degrade to a
@@ -92,7 +94,7 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
     const turns: TranscriptTurn[] = []
     // Pending tool_use blocks from the most recent assistant message,
     // consumed FIFO by following user-row tool_result blocks.
-    const pendingToolUses: { name: string; inputPath?: string }[] = []
+    const pendingToolUses: { name: string; inputPath?: string; call?: string }[] = []
     // Split on '\n'; trimming each line also strips a trailing '\r' from CRLF
     // files. Newlines cannot appear inside valid JSON string values (they must
     // be escaped as \n), so a raw newline split is safe for JSONL.
@@ -131,7 +133,7 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
                   }
                   turns.push(
                     paired
-                      ? { ...base, toolName: paired.name, ...(paired.inputPath ? { toolInputPath: paired.inputPath } : {}) }
+                      ? { ...base, toolName: paired.name, ...(paired.inputPath ? { toolInputPath: paired.inputPath } : {}), ...(paired.call ? { toolCall: paired.call } : {}) }
                       : base,
                   )
                 }
@@ -151,7 +153,11 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
               } else if (it.type === 'thinking' && typeof it.thinking === 'string') {
                 turns.push({ role: 'thinking', content: it.thinking })
               } else if (it.type === 'tool_use' && typeof it.name === 'string') {
-                pendingToolUses.push({ name: it.name, inputPath: extractToolInputPath(it.input) })
+                pendingToolUses.push({
+                  name: it.name,
+                  inputPath: extractToolInputPath(it.input),
+                  call: captureToolCall(it.input),
+                })
               }
               // redacted_thinking / 缺 thinking 字段的块 -> 跳过
             }

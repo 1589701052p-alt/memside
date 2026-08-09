@@ -203,7 +203,7 @@ test('assistant tool_use + following user tool_result -> paired tool turn with t
   const turns = parseTranscriptFile(p)
   expect(turns).toEqual([
     { role: 'assistant', content: 'reading' },
-    { role: 'tool', content: 'export const x = 1', isError: false, toolName: 'Read', toolInputPath: '/a/b.ts' },
+    { role: 'tool', content: 'export const x = 1', isError: false, toolName: 'Read', toolInputPath: '/a/b.ts', toolCall: '{"file_path":"/a/b.ts"}' },
   ])
 })
 
@@ -220,8 +220,8 @@ test('multiple tool_use consumed in order across following tool_results', () => 
   )
   const turns = parseTranscriptFile(p)
   expect(turns.filter((t) => t.role === 'tool')).toEqual([
-    { role: 'tool', content: 'f1-content', isError: false, toolName: 'Read', toolInputPath: '/f1' },
-    { role: 'tool', content: 'ls-output', isError: false, toolName: 'Bash' },
+    { role: 'tool', content: 'f1-content', isError: false, toolName: 'Read', toolInputPath: '/f1', toolCall: '{"file_path":"/f1"}' },
+    { role: 'tool', content: 'ls-output', isError: false, toolName: 'Bash', toolCall: '{"command":"ls"}' },
   ])
 })
 
@@ -336,4 +336,47 @@ test('retry 检测不受 thinking 污染：重复 thinking 内容不计 retries'
   )
   const signals = detectErrorSignals(parseTranscriptFile(p))
   expect(signals.retries).toBe(0)
+})
+
+// --- 工具调用信息捕获（spec 2026-08-09 §4.1）---
+
+test('Bash tool_use input -> 配对 tool turn 带 toolCall（含 command）', () => {
+  const p = writeJsonl(
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'text', text: 'run tests' },
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'bun test', description: '跑测试' } },
+    ] } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'all pass' }] } },
+  )
+  const turns = parseTranscriptFile(p)
+  const toolTurn = turns.find((t) => t.role === 'tool')
+  expect(toolTurn?.toolCall).toBe('{"command":"bun test","description":"跑测试"}')
+})
+
+test('tool_use input 缺失/非对象 -> toolCall 不设置', () => {
+  const p = writeJsonl(
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'Bash', input: 'notobj' },
+    ] } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+  )
+  const turns = parseTranscriptFile(p)
+  const toolTurn = turns.find((t) => t.role === 'tool')
+  expect(toolTurn?.toolCall).toBeUndefined()
+})
+
+test('tool_use input 超 300 字 -> toolCall 截断带后缀', () => {
+  const longCmd = 'x'.repeat(500)
+  const p = writeJsonl(
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command: longCmd } },
+    ] } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+  )
+  const turns = parseTranscriptFile(p)
+  const toolTurn = turns.find((t) => t.role === 'tool')
+  expect(toolTurn?.toolCall).toBeDefined()
+  expect(toolTurn!.toolCall!.endsWith('…[truncated]')).toBe(true)
+  // 截断后长度 = 300 + 后缀（JSON 包装部分会超 300，截在 300 处）
+  expect(toolTurn!.toolCall!.length).toBe(300 + '…[truncated]'.length)
 })

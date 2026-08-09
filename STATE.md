@@ -802,3 +802,28 @@ Read/Bash。设计 spec / 计划见 `docs/superpowers/specs|plans/
   （origin=agent-observed 且 evidence 仅出自 thinking 的占比）。
 - skipped_trivial 占比是否因 thinking 计入 slice signal 而下降（对照攒量
   批处理基线）。
+
+## 工具调用信息捕获（2026-08-09）
+
+诊断：thinking 捕获（PR #54）让 distiller 看到 `[tool:Read]` 标签，但工具调用的
+input（Bash 命令、Grep pattern 等）仍被整体丢弃--distiller 看到工具结果却不知
+是哪条命令跑出来的。设计 spec / 计划见 `docs/superpowers/specs|plans/
+2026-08-09-tool-call-capture*`。
+
+1. `TranscriptTurn` 加 `toolCall?: string`：input 紧凑 JSON，捕获时截
+   `TOOL_INPUT_CAP_CHARS`(300) 字。一刀切，无按工具特判（新工具自动覆盖）。
+2. claude `parseTranscriptFile` 配对时从 tool_use.input 取 toolCall；
+   opencode `parseOpencodeMessages` 按 callID 取。input 缺失/畸形 -> 不设，
+   解析器永不抛契约不变。老 payload 无 toolCall -> 全链路走无调用分支（向后兼容）。
+3. 全链路呈现：distiller prompt 两段式 `调用: {...}` + `结果: ...`（无 toolCall
+   时逐字节兼容单行）；digest tool 行带截 100 字调用摘要；Web 原始输入遮罩展示。
+4. 预算诚实化：`filterTranscriptForDistill` 计量含 toolCall，避免 300 字 × N
+   个工具调用绕过 64000 token 预算。三档压缩策略逐字不动（只作用于 content）。
+5. e2e 闭环锁：fixture 加 Bash tool_use+result，断言 `调用: {"command"...`
+   抵达 distiller 输入。无 schema 迁移、无新依赖。
+
+### 上线后观测（并入既有清单）
+
+- events 表体积增速变化（toolCall 入快照，每条 tool turn 至多 +300 字）；
+- 蒸馏候选中 evidence 引自命令调用（`调用:` 行）的质量抽样；
+- distill runs 抽样：toolCall 占蒸馏输入的比例。

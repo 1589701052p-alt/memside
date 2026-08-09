@@ -134,6 +134,19 @@ export function discardReasonLabel(reason: string): string {
 }
 
 /**
+ * 把 tool_use 的 input 字符串格式化为 Web 渲染用的「调用: ...」文本。
+ * call 为 truthy 非空串时返回 `调用: ${call}`，否则返回 null（调用方据此跳过渲染）。
+ *
+ * 注意：不在 Web 层再做 slice(0,300) 截断--toolCall 在捕获时已截 TOOL_INPUT_CAP_CHARS
+ * 字 + 后缀（见 captureToolCall），Web 再 slice 会丢后缀。纯函数，可单测
+ * （CLAUDE.md「首选可断言面」）。
+ */
+export function formatToolCall(call?: string): string | null {
+  if (!call) return null
+  return `调用: ${call}`
+}
+
+/**
  * 回扫进度条百分比(0-100,整数)。total<=0 -> 0(未开始/空队列不显示 NaN);
  * 上限夹取 100(回调乱序不得撑破进度条)。纯函数,可单测。
  *

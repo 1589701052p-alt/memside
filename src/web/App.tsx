@@ -10,7 +10,7 @@ import {
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, type MemoryTabKey } from './tab-cache'
 
 /**
@@ -1061,6 +1061,9 @@ function SourceInputModal({ memoryId, onClose }: { memoryId: string; onClose: ()
                 return (
                   <div key={i} style={{ marginBottom: 8, border: '1px solid #eee', borderRadius: 4, padding: 8 }}>
                     <span style={{ color, fontWeight: 600, fontSize: 12 }}>[{label}]</span>
+                    {formatToolCall(t.toolCall) && (
+                      <div style={{ fontSize: 12, color: '#6a1b9a' }}>{formatToolCall(t.toolCall)}</div>
+                    )}
                     <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{t.content}</pre>
                   </div>
                 )
@@ -1258,7 +1261,13 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                   {source.turns.map((t, i) => {
                     const f = formatSourceTurn(t)
                     return (
-                      <pre key={i} style={{ borderLeft: `3px solid ${f.color}`, padding: '4px 8px', margin: '4px 0', whiteSpace: 'pre-wrap' }}>[{f.label}] {t.content}</pre>
+                      <div key={i} style={{ borderLeft: `3px solid ${f.color}`, padding: '4px 8px', margin: '4px 0' }}>
+                        <span style={{ color: f.color, fontWeight: 600, fontSize: 12 }}>[{f.label}]</span>
+                        {formatToolCall(t.toolCall) && (
+                          <div style={{ fontSize: 12, color: '#6a1b9a' }}>{formatToolCall(t.toolCall)}</div>
+                        )}
+                        <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{t.content}</pre>
+                      </div>
                     )
                   })}
                 </div>
