@@ -70,6 +70,10 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   writeFileSync(
     fixturePath,
     JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'refund policy rationale THINKING_SENTINEL' }] },
+    }) + '\n' +
+    JSON.stringify({
       type: 'user',
       message: { role: 'user', content: 'we only issue refunds within 14 days of shipment' },
     }) + '\n',
@@ -142,6 +146,11 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   // C1 lock: the transcript turn content ('we only issue refunds within 14 days
   // of shipment') must appear in the userPrompt that reached the distiller.
   expect(capturedUserPrompt).toContain('refunds within 14 days')
+
+  // thinking 捕获锁（spec 2026-08-09 §6 #7）：thinking 块内容必须经真实链路
+  // （JSONL -> parseTranscriptFile -> events -> makeLoadTranscript -> 渲染）
+  // 抵达 distiller 输入，并以 [thinking] 标签呈现。
+  expect(capturedUserPrompt).toContain('[thinking] refund policy rationale THINKING_SENTINEL')
 
   // 5. Candidate exists in the DB - proving the REAL loadTranscript read the
   //    turns that the REAL collector wrote.
