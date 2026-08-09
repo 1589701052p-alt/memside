@@ -26,7 +26,7 @@ test('ToolPart tool_use/tool_result paired by callID, error -> isError', () => {
   expect(turns.some(t => t.role === 'tool' && t.isError && t.toolName === 'bash')).toBe(true)
 })
 
-test('ReasoningPart / subtask / StepStart filtered out', () => {
+test('ReasoningPart -> thinking turn；subtask / StepStart 仍过滤', () => {
   const msgs: OpencodeMessage[] = [{
     info: { role: 'assistant' },
     parts: [
@@ -36,7 +36,18 @@ test('ReasoningPart / subtask / StepStart filtered out', () => {
     ],
   }]
   const turns = parseOpencodeMessages(msgs)
-  expect(turns).toEqual([{ role: 'assistant', content: 'answer' }])
+  expect(turns).toEqual([
+    { role: 'thinking', content: 'thinking' },
+    { role: 'assistant', content: 'answer' },
+  ])
+})
+
+test('reasoning part 缺 text 字段 -> 跳过不抛', () => {
+  const msgs: OpencodeMessage[] = [{
+    info: { role: 'assistant' },
+    parts: [{ type: 'reasoning' } as any, { type: 'text', text: 'a' } as any],
+  }]
+  expect(parseOpencodeMessages(msgs)).toEqual([{ role: 'assistant', content: 'a' }])
 })
 
 test('empty messages -> []', () => {
