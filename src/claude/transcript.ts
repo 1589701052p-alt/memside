@@ -1,5 +1,6 @@
 import { readFileSync, statSync, existsSync } from 'node:fs'
 import type { TranscriptTurn } from '@/memory/pure'
+import { TOOL_INPUT_CAP_CHARS } from '@/memory/pure'
 
 /**
  * Guard against pathological inputs: a real claude code transcript JSONL is
@@ -49,6 +50,23 @@ function extractToolInputPath(input: unknown): string | undefined {
 }
 
 /**
+ * 把 tool_use 的 input 对象序列化成紧凑 JSON 字符串，截断 TOOL_INPUT_CAP_CHARS 字。
+ * 非对象 / 缺失 / 序列化抛错 -> undefined（不设 toolCall，与既有"取不到即跳过"一致）。
+ * 一刀切：不做按工具特判（spec §4.1），新工具自动覆盖。
+ */
+function captureToolCall(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  try {
+    const s = JSON.stringify(input)
+    if (typeof s !== 'string') return undefined
+    return s.length > TOOL_INPUT_CAP_CHARS ? s.slice(0, TOOL_INPUT_CAP_CHARS) + '…[truncated]' : s
+  } catch {
+    // 循环引用 / bigint 等 -> 不设 toolCall（永不抛契约）
+    return undefined
+  }
+}
+
+/**
  * Parse a claude code transcript JSONL file into `TranscriptTurn[]`.
  *
  * claude code hook stdin payloads carry `transcript_path` - a path to a JSONL
@@ -70,6 +88,7 @@ function extractToolInputPath(input: unknown): string | undefined {
  *   `{type:'tool_use'}` is QUEUED (name + file_path extracted) and
  *   paired FIFO with the following user row's `tool_result` blocks, so the
  *   distill-time filter can compact file-source results by tool name.
+ *   tool_use.input 经 captureToolCall 序列化截断后作 toolCall 落配对 tool turn。
  *
  * Pure + deterministic (only reads the given path). Never throws: file missing
  * / unreadable / empty / too large (>50MB) / malformed lines all degrade to a
@@ -92,7 +111,7 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
     const turns: TranscriptTurn[] = []
     // Pending tool_use blocks from the most recent assistant message,
     // consumed FIFO by following user-row tool_result blocks.
-    const pendingToolUses: { name: string; inputPath?: string }[] = []
+    const pendingToolUses: { name: string; inputPath?: string; call?: string }[] = []
     // Split on '\n'; trimming each line also strips a trailing '\r' from CRLF
     // files. Newlines cannot appear inside valid JSON string values (they must
     // be escaped as \n), so a raw newline split is safe for JSONL.
@@ -131,7 +150,7 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
                   }
                   turns.push(
                     paired
-                      ? { ...base, toolName: paired.name, ...(paired.inputPath ? { toolInputPath: paired.inputPath } : {}) }
+                      ? { ...base, toolName: paired.name, ...(paired.inputPath ? { toolInputPath: paired.inputPath } : {}), ...(paired.call ? { toolCall: paired.call } : {}) }
                       : base,
                   )
                 }
@@ -151,7 +170,11 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
               } else if (it.type === 'thinking' && typeof it.thinking === 'string') {
                 turns.push({ role: 'thinking', content: it.thinking })
               } else if (it.type === 'tool_use' && typeof it.name === 'string') {
-                pendingToolUses.push({ name: it.name, inputPath: extractToolInputPath(it.input) })
+                pendingToolUses.push({
+                  name: it.name,
+                  inputPath: extractToolInputPath(it.input),
+                  call: captureToolCall(it.input),
+                })
               }
               // redacted_thinking / 缺 thinking 字段的块 -> 跳过
             }
