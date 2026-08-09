@@ -1,6 +1,6 @@
 import { readFileSync, statSync, existsSync } from 'node:fs'
 import type { TranscriptTurn } from '@/memory/pure'
-import { TOOL_INPUT_CAP_CHARS } from '@/memory/pure'
+import { captureToolCall } from '@/memory/pure'
 
 /**
  * Guard against pathological inputs: a real claude code transcript JSONL is
@@ -47,23 +47,6 @@ function extractToolInputPath(input: unknown): string | undefined {
     if (typeof v === 'string') return v
   }
   return undefined
-}
-
-/**
- * 把 tool_use 的 input 对象序列化成紧凑 JSON 字符串，截断 TOOL_INPUT_CAP_CHARS 字。
- * 非对象 / 缺失 / 序列化抛错 -> undefined（不设 toolCall，与既有"取不到即跳过"一致）。
- * 一刀切：不做按工具特判（spec §4.1），新工具自动覆盖。
- */
-function captureToolCall(input: unknown): string | undefined {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
-  try {
-    const s = JSON.stringify(input)
-    if (typeof s !== 'string') return undefined
-    return s.length > TOOL_INPUT_CAP_CHARS ? s.slice(0, TOOL_INPUT_CAP_CHARS) + '…[truncated]' : s
-  } catch {
-    // 循环引用 / bigint 等 -> 不设 toolCall（永不抛契约）
-    return undefined
-  }
 }
 
 /**

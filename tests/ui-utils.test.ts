@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, formatToolCall } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -185,4 +185,19 @@ test('rescanPercent: 百分比计算与夹取', () => {
   expect(rescanPercent(367, 734)).toBe(50)
   expect(rescanPercent(734, 734)).toBe(100)
   expect(rescanPercent(800, 734)).toBe(100)  // 夹取:不得超过 100
+})
+
+// --- formatToolCall ---
+// toolCall Web 渲染纯函数（spec §4.2/§4.3）。call 为 truthy 非空串 -> `调用: ${call}`；
+// 否则 null（调用方据此跳过渲染）。不在 Web 层再 slice(0,300)--捕获时已截断 + 后缀。
+test('formatToolCall: 非空串 -> 调用: ${call}', () => {
+  expect(formatToolCall('{"command":"bun test"}')).toBe('调用: {"command":"bun test"}')
+})
+
+test('formatToolCall: undefined -> null', () => {
+  expect(formatToolCall(undefined)).toBeNull()
+})
+
+test('formatToolCall: 空串 -> null', () => {
+  expect(formatToolCall('')).toBeNull()
 })

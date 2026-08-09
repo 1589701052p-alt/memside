@@ -1,5 +1,5 @@
 import type { TranscriptTurn } from '@/memory/pure'
-import { TOOL_INPUT_CAP_CHARS } from '@/memory/pure'
+import { captureToolCall } from '@/memory/pure'
 
 /** opencode message（PluginInput.client.session.messages 返回项的子集）。 */
 export interface OpencodeMessage {
@@ -34,14 +34,7 @@ export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTu
       const tp = p as any
       if (tp.type === 'tool' && tp.callID && tp.input !== undefined && tp.output === undefined) {
         const name = tp.tool ?? 'tool'
-        let call: string | undefined
-        if (tp.input && typeof tp.input === 'object' && !Array.isArray(tp.input)) {
-          try {
-            const s = JSON.stringify(tp.input)
-            if (typeof s === 'string') call = s.length > TOOL_INPUT_CAP_CHARS ? s.slice(0, TOOL_INPUT_CAP_CHARS) + '…[truncated]' : s
-          } catch { /* 循环引用等 -> 不设 */ }
-        }
-        toolMeta.set(tp.callID, { name, call })
+        toolMeta.set(tp.callID, { name, call: captureToolCall(tp.input) })
       }
     }
   }
