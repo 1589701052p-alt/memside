@@ -44,11 +44,13 @@ export function formatSourceTurn(turn: { role: string; content?: string; isError
   return { label: turn.role, color: '#666' }
 }
 
-export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced'
+export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced' | 'skipped_trivial'
 
 /**
- * 蒸馏记录 outcome 四态 -> 徽标 { label, color }。produced 绿 / empty_output 灰 /
- * llm_error 红 / skipped 浅灰。纯函数，可单测（CLAUDE.md「首选可断言面」）。
+ * 蒸馏记录 outcome -> 徽标 { label, color }。produced 绿 / empty_output 灰 /
+ * llm_error 红 / skipped 浅灰 / skipped_trivial 浅灰（琐碎跳过，spec §4.7）。
+ * 未知 outcome 兜底原样返回不得空白（spec §5 #10 降级可见化）。
+ * 纯函数，可单测（CLAUDE.md「首选可断言面」）。
  *
  * 设计依据：docs/superpowers/specs/2026-07-29-distill-work-record-design.md §7。
  */
@@ -56,7 +58,25 @@ export function formatOutcome(outcome: DistillOutcome): { label: string; color: 
   if (outcome === 'produced') return { label: '产出', color: '#2e7d32' }
   if (outcome === 'empty_output') return { label: '空产出', color: '#666' }
   if (outcome === 'llm_error') return { label: 'LLM错误', color: '#c00' }
-  return { label: '跳过', color: '#999' }
+  if (outcome === 'skipped_trivial') return { label: '琐碎跳过', color: '#999' }
+  if (outcome === 'skipped_no_new_turns') return { label: '跳过', color: '#999' }
+  // 未知 outcome 兜底：不得空白（spec §5 #10）
+  return { label: String(outcome), color: '#999' }
+}
+
+/** 降级 kind -> 人话（spec §5 枚举；未知 kind 原样返回兜底）。 */
+export function degradationKindLabel(kind: string): string {
+  const map: Record<string, string> = {
+    threshold_compute_error: '阈值计算失败',
+    capture_persist_failed: '捕获存储失败',
+    flush_mark_failed: 'flush标记失败',
+    digest_llm_failed: '滚动摘要失败',
+    digest_read_failed: '摘要读取失败',
+    titles_query_failed: '已审批查询失败',
+    sweep_error: 'sweep异常',
+    digest_truncated: '摘要超长截断',
+  }
+  return map[kind] ?? kind
 }
 
 /**

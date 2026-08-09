@@ -4,12 +4,12 @@ import { and, count, desc, eq, gt, inArray, isNull, notInArray, or } from 'drizz
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns, appSettings } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor } from '@/memory/store'
-import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset } from '@/memory/store'
+import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listRecentDegradations, listDegradationsForJob } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
@@ -437,6 +437,14 @@ export function createApp(deps: AppDeps) {
       eq(memories.status, 'candidate'),
       or(isNull(memories.valueClass), notInArray(memories.valueClass, [...PROTECTED_VALUE_CLASSES])),
     )).all()
+    // 降级可见化（spec §4.9）：24h 计数 + 最新一条 + ack 状态。
+    const degrRows = await listRecentDegradations(deps.db, cutoff)
+    const ackRow = await deps.db.select().from(appSettings)
+      .where(eq(appSettings.key, 'degradations.ack_ts')).limit(1)
+    const acknowledgedTs = ackRow[0] ? Number(ackRow[0].value) : null
+    // waiting 单列（spec §4.9）：累加中的 job 不是积压，避免 UI「pending 堆积」假象。
+    const waitingCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
+      .where(eq(memoryDistillJobs.status, 'waiting')).all()
     const jobStats: Record<string, number> = {}
     for (const j of jobs) jobStats[j.status] = (jobStats[j.status] ?? 0) + 1
     const memStats: Record<string, number> = {}
@@ -452,8 +460,29 @@ export function createApp(deps: AppDeps) {
       distillRuns: { total: runGroups.reduce((s, g) => s + g.n, 0), byOutcome: runStats, allTime: runAllTime[0]?.n ?? 0 },
       lastError: errored ? { error: errored.lastError } : null,
       unevaluatedCandidates: unevalCount[0]?.n ?? 0,
+      recentDegradations: {
+        count24h: degrRows.length,
+        latest: degrRows[0] ? { kind: degrRows[0].kind, detail: degrRows[0].detail, ts: degrRows[0].ts } : null,
+        acknowledgedTs: Number.isFinite(acknowledgedTs) ? acknowledgedTs : null,
+      },
+      waitingJobs: waitingCount[0]?.n ?? 0,
       rescan: rescanState,
     })
+  })
+
+  // 降级 ack（spec §4.9）：用户点「知道了」，ack ts = now 落 appSettings（upsert）；
+  // 横幅只在 count24h>0 且（未 ack 或最新降级晚于 ack）时出现。
+  app.post('/api/degradations/ack', async (c) => {
+    const now = Date.now()
+    await deps.db.insert(appSettings).values({ key: 'degradations.ack_ts', value: String(now), updatedAt: now })
+      .onConflictDoUpdate({ target: appSettings.key, set: { value: String(now), updatedAt: now } }).run()
+    return c.json({ ok: true })
+  })
+
+  // 单 job 降级明细（spec §4.9）：蒸馏记录 modal 懒加载。
+  app.get('/api/distill-runs/:jobId/degradations', async (c) => {
+    const rows = await listDegradationsForJob(deps.db, c.req.param('jobId'))
+    return c.json({ degradations: rows })
   })
 
   // 存量回扫(Task 7,spec §4.7):fire-and-forget——202 立即返回,后台按当前判定
