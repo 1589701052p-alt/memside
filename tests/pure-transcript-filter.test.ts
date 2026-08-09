@@ -155,3 +155,17 @@ test('预算裁剪区分场景：p=3 普通 tool 先于 thinking 被丢（锁 th
 test('TOOL_INPUT_CAP_CHARS 常量锁定 300', () => {
   expect(TOOL_INPUT_CAP_CHARS).toBe(300)
 })
+
+test('预算计量含 toolCall：大 toolCall 计入预算，触发裁剪', () => {
+  // 每条 toolCall 约 400 字符 = 100 token；content 极小
+  const bigCall = 'y'.repeat(400)
+  const turns: TranscriptTurn[] = Array.from({ length: 10 }, (_, i) => ({
+    role: 'tool' as const,
+    content: `out${i}`,
+    toolName: 'Bash',
+    toolCall: bigCall,
+  }))
+  // 10 条 × (content ~3 token + toolCall ~100 token) ≈ 1030 token；预算 500 -> 必须裁
+  const out = filterTranscriptForDistill(turns, 500)
+  expect(out.length).toBeLessThan(10)
+})

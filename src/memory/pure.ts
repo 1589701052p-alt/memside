@@ -272,7 +272,10 @@ export function filterTranscriptForDistill(
     const compacted = turns.map((t) =>
       t.role === 'tool' ? compactToolTurn(t) : { ...t, content: truncate(t.content, NON_TOOL_CAP_CHARS) },
     )
-    const used = () => compacted.reduce((s, t) => s + estimateTokens(t.content), 0)
+    const used = () => compacted.reduce(
+      (s, t) => s + estimateTokens(t.content) + estimateTokens(t.toolCall ?? ''),
+      0,
+    )
     if (used() <= budgetTokens) return compacted
     const droppable = compacted
       .map((t, i) => ({ i, p: turnPriority(t) }))
@@ -283,7 +286,7 @@ export function filterTranscriptForDistill(
     for (const x of droppable) {
       if (tokens <= budgetTokens) break
       drop.add(x.i)
-      tokens -= estimateTokens(compacted[x.i]!.content)
+      tokens -= estimateTokens(compacted[x.i]!.content) + estimateTokens(compacted[x.i]!.toolCall ?? '')
     }
     return compacted.filter((_, i) => !drop.has(i))
   } catch {
