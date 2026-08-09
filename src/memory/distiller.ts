@@ -137,7 +137,11 @@ function renderUserPrompt(
   approvedTitles?: string[],
 ): string {
   const transcript = turns
-    .map((t) => (t.role === 'tool' && t.toolName ? `[tool:${t.toolName}] ${t.content}` : `[${t.role}] ${t.content}`))
+    .map((t) => {
+      if (t.role !== 'tool') return `[${t.role}] ${t.content}`
+      const label = t.toolName ? `[tool:${t.toolName}]` : '[tool]'
+      return t.toolCall ? `${label} 调用: ${t.toolCall}\n结果: ${t.content}` : `${label} ${t.content}`
+    })
     .join('\n')
   const slugs = existingSlugs.length > 0 ? existingSlugs.join(', ') : '(none)'
   const sections: string[] = []
