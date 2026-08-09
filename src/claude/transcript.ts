@@ -64,8 +64,10 @@ function extractToolInputPath(input: unknown): string | undefined {
  *   `{role:'tool', content: extractText(item.content), isError: !!is_error}`
  *   turn (so `detectErrorSignals` can count tool failures).
  * - `type:"assistant"`: each `{type:'text'}` item -> `{role:'assistant', content}`.
- *   `{type:'thinking'}` is SKIPPED (internal reasoning would pollute retry
- *   detection). `{type:'tool_use'}` is QUEUED (name + file_path extracted) and
+ *   `{type:'thinking'}` with a string `thinking` field -> `{role:'thinking',
+ *   content}`（spec 2026-08-09 §4.1；独立 role 使 retry 检测结构性免疫，旧版
+ *   skip 的污染顾虑由类型消除）。`redacted_thinking` / 缺文本字段的块跳过。
+ *   `{type:'tool_use'}` is QUEUED (name + file_path extracted) and
  *   paired FIFO with the following user row's `tool_result` blocks, so the
  *   distill-time filter can compact file-source results by tool name.
  *
@@ -143,13 +145,15 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
         if (Array.isArray(content)) {
           for (const item of content) {
             if (item && typeof item === 'object' && !Array.isArray(item)) {
-              const it = item as { type?: unknown; text?: unknown; name?: unknown; input?: unknown }
+              const it = item as { type?: unknown; text?: unknown; thinking?: unknown; name?: unknown; input?: unknown }
               if (it.type === 'text' && typeof it.text === 'string') {
                 turns.push({ role: 'assistant', content: it.text })
+              } else if (it.type === 'thinking' && typeof it.thinking === 'string') {
+                turns.push({ role: 'thinking', content: it.thinking })
               } else if (it.type === 'tool_use' && typeof it.name === 'string') {
                 pendingToolUses.push({ name: it.name, inputPath: extractToolInputPath(it.input) })
               }
-              // thinking is deliberately skipped (see JSDoc above).
+              // redacted_thinking / 缺 thinking 字段的块 -> 跳过
             }
           }
         }

@@ -2,6 +2,7 @@ import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseTranscriptFile, extractText, subagentFilePathFromPayload, loadSubagentTranscript } from '@/claude/transcript'
+import { detectErrorSignals } from '@/memory/pure'
 
 /**
  * Tests for the claude code transcript JSONL parser (C3 fix).
@@ -77,7 +78,7 @@ test('user tool_result with is_error absent -> isError false', () => {
   expect(turns).toEqual([{ role: 'tool', content: 'ok result', isError: false }])
 })
 
-test('assistant text+thinking+tool_use (no following tool_result) -> only text emitted; tool_use queued but unconsumed', () => {
+test('assistant text+thinking+tool_use -> thinking turn + text turn 均产出；tool_use queued but unconsumed', () => {
   const p = writeJsonl({
     type: 'assistant',
     message: {
@@ -90,9 +91,12 @@ test('assistant text+thinking+tool_use (no following tool_result) -> only text e
     },
   })
   const turns = parseTranscriptFile(p)
-  // thinking skipped; tool_use queued for the NEXT tool_result (none here) ->
-  // no tool turn emitted.
-  expect(turns).toEqual([{ role: 'assistant', content: "I'll read the file." }])
+  // thinking 捕获（spec §4.1）按文件顺序原位插入；tool_use queued for the NEXT
+  // tool_result (none here) -> no tool turn emitted.
+  expect(turns).toEqual([
+    { role: 'assistant', content: "I'll read the file." },
+    { role: 'thinking', content: 'internal reasoning here' },
+  ])
 })
 
 test('non-conversation row types are skipped', () => {
@@ -292,4 +296,44 @@ test('loadSubagentTranscript: both miss -> empty (no throw)', () => {
   // agentId 空 + 无 transcript_path 也空
   expect(loadSubagentTranscript('', 'AG')).toEqual([])
   expect(loadSubagentTranscript(join(dir, 'x.jsonl'), '')).toEqual([])
+})
+
+// --- thinking 捕获（spec 2026-08-09 §4.1）---
+
+test('thinking block 在 text 之前时按文件顺序先产出', () => {
+  const p = writeJsonl({
+    type: 'assistant',
+    message: { role: 'assistant', content: [
+      { type: 'thinking', thinking: 'plan first' },
+      { type: 'text', text: 'visible answer' },
+    ] },
+  })
+  expect(parseTranscriptFile(p)).toEqual([
+    { role: 'thinking', content: 'plan first' },
+    { role: 'assistant', content: 'visible answer' },
+  ])
+})
+
+test('redacted_thinking / thinking 缺文本字段 -> 跳过不产出 thinking turn', () => {
+  const p = writeJsonl({
+    type: 'assistant',
+    message: { role: 'assistant', content: [
+      { type: 'redacted_thinking', data: 'abc' },
+      { type: 'thinking' },
+      { type: 'thinking', thinking: 42 },
+      { type: 'text', text: 'answer' },
+    ] },
+  })
+  expect(parseTranscriptFile(p)).toEqual([{ role: 'assistant', content: 'answer' }])
+})
+
+test('retry 检测不受 thinking 污染：重复 thinking 内容不计 retries', () => {
+  const p = writeJsonl(
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'thinking', thinking: 'same reasoning' }, { type: 'text', text: 'first answer' } ] } },
+    { type: 'assistant', message: { role: 'assistant', content: [
+      { type: 'thinking', thinking: 'same reasoning' }, { type: 'text', text: 'second answer' } ] } },
+  )
+  const signals = detectErrorSignals(parseTranscriptFile(p))
+  expect(signals.retries).toBe(0)
 })
