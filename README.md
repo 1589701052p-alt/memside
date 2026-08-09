@@ -219,6 +219,8 @@ bun run dev:web       # 只起 vite dev(5173)——需要 daemon 已单独在跑
 
 - **Capture。** claude code 把每个 hook 的 JSON payload(含 `transcript_path`,一个 JSONL 文件路径)通过 `curl -d @-` 喂给 collector。`src/claude/transcript.ts` 把 JSONL 解析成结构化 turn(user prompt、assistant text、带 `is_error` 的 tool result)。collector 立即返回 202,在 fire-and-forget IIFE 里把 turns 持久化到 `memory_distill_events`。
 - **Distill。** 1Hz scheduler tick(`src/scheduler.ts`)取 pending job,加载 turns,用带分类感知的 system prompt 调 LLM(`src/memory/distiller.ts`)。JSON 响应变成 `candidate` 记忆。debounce(5s)+ 指数退避应对突发和 LLM 瞬时失败。title/bodyMd 用简体中文(`[category:xxx]` 前缀保持英文)。
+- 蒸馏触发为会话级攒量：同一 session 的多次 capture 累加一个任务，内容量达阈值
+  （或会话结束 / 闲置超 2 小时）才调 LLM 提炼；琐碎内容自动跳过并记入蒸馏记录。
 - **Approve。** web UI 调 `POST /api/memories/:id/promote`,body `{action:'approve'|'reject'|'approve_and_supersede'}`。状态转换用 specific-source 检查(不是通用的 `canTransition`),archived 条目不能被静默重新 approve。
 - **Inject。** `SessionStart` 调 `adapter.inject({cwd})`,按 project + runtime 查 approved 记忆,按 token 预算裁剪(project 1500 / global 500),渲染 markdown 块,包成 `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":...}}` 返回--这正是 claude code 从 hook stdout 读的 envelope。
 
