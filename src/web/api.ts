@@ -234,6 +234,8 @@ export interface DistillRunListItem {
   runtime: string
   createdAt: number
   sourceAgentId: string | null
+  /** spec §4.9 行降级徽标；详情端点（getDistillRun）不带此字段，故可选。 */
+  hasDegradations?: boolean
 }
 
 export interface DistillRunDetail extends DistillRunListItem {

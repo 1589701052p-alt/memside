@@ -127,6 +127,43 @@ describe('tick 接线：priorContext/approvedTitles（spec §4.7）', () => {
     await tick(db, deps)
     expect(seen).not.toContain('## 已记录的记忆标题')
   })
+
+  // spec §1 决策 4 终审修复：标题清单除 100 条上限外还有 2K 字符总预算，整条取舍
+  // （绝不切半条标题）。本用例锁：25 条 × 100 字符 = 2500 超预算 -> prompt 只含前
+  // 20 条完整标题（2000 整，纳入），第 21 条起被截，标题节总字符 ≤ 2000。
+  test('标题总长超 2K 字符预算 -> 整条截断，prompt 标题节 ≤ 2000 字符', async () => {
+    let seen = ''
+    const spyLLM: LLMCall = async (_s, user) => { seen = user; return JSON.stringify({ candidates: [] }) }
+    for (let i = 0; i < 25; i++) {
+      await createCandidate(db, {
+        scopeType: 'project', scopeId: '/proj',
+        title: `T${String(i).padStart(2, '0')}-` + 'x'.repeat(96), // 每条恰好 100 字符
+        bodyMd: 'b', tags: [], sourceKind: 'manual', sourceCwd: '/proj', runtime: 'claude-code',
+      })
+    }
+    await db.update(memories).set({ status: 'approved' }).run()
+    // listApprovedByScope 按 createdAt DESC：钉 createdAt 使 T00 排最前，取舍边界可断言。
+    const rows = await db.select().from(memories)
+    for (const r of rows) {
+      const n = Number(r.title.slice(1, 3))
+      await db.update(memories).set({ createdAt: 10_000 - n }).where(eq(memories.id, r.id)).run()
+    }
+    await db.insert(memoryDistillJobs).values({
+      id: 'j1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/proj',
+      sessionId: 's1', status: 'pending', attempts: 0, nextRunAt: 0, createdAt: 1, finishedAt: null,
+    })
+    const deps = tickDeps(spyLLM)
+    deps.loadJudgeConfig = () => ECONOMY
+    deps.loadTranscript = async () => ({ turns: [{ role: 'user', content: '新内容' }], fullLength: 1, prefixTurns: [] })
+    await tick(db, deps)
+    const section = seen.split('## 已记录的记忆标题（禁止重复提炼）\n')[1]!
+    const lines = section.split('\n\n')[0]!.split('\n').filter((l) => l.startsWith('- '))
+    expect(lines.length).toBe(20) // 20 × 100 = 2000 整纳入；第 21 条会超 -> 截
+    expect(lines.every((l) => /^- T\d{2}-x{96}$/.test(l))).toBe(true) // 整条，无半截标题
+    expect(lines.reduce((s, l) => s + l.length - 2, 0)).toBeLessThanOrEqual(2000)
+    expect(seen).toContain('T19-')
+    expect(seen).not.toContain('T20-')
+  })
 })
 
 describe('滚动摘要接线（质量模式，spec §4.7）', () => {

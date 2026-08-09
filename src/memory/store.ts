@@ -672,6 +672,8 @@ export interface DistillRunListRow {
   runtime: string
   createdAt: number
   sourceAgentId: string | null
+  /** spec §4.9 runs 行降级徽标：该 job 在 memory_degradations 有行（明细走 modal 懒加载）。 */
+  hasDegradations: boolean
 }
 
 const RUN_LIST_COLS = {
@@ -703,9 +705,16 @@ async function attachRunJobMeta(
   runRows: RunListBaseRow[],
 ): Promise<DistillRunListRow[]> {
   if (runRows.length === 0) return []
+  const jobIds = runRows.map((r) => r.distillJobId)
   const jobRows = await db.select().from(memoryDistillJobs)
-    .where(inArray(memoryDistillJobs.id, runRows.map((r) => r.distillJobId))).all()
+    .where(inArray(memoryDistillJobs.id, jobIds)).all()
   const jobById = new Map(jobRows.map((j) => [j.id, j]))
+  // hasDegradations（spec §4.9）：inArray 二次查询带出（同 job 元数据模式，
+  // 查询数 O(1)，走 idx_degradations_job），Set 去重。null distillJobId 行不参与匹配。
+  const degRows = await db.select({ distillJobId: memoryDegradations.distillJobId })
+    .from(memoryDegradations)
+    .where(inArray(memoryDegradations.distillJobId, jobIds)).all()
+  const degJobIds = new Set(degRows.map((d) => d.distillJobId))
   return runRows.map((r) => {
     const j = jobById.get(r.distillJobId)
     return {
@@ -715,14 +724,16 @@ async function attachRunJobMeta(
       durationMs: r.durationMs, errorMessage: r.errorMessage ?? null, ts: r.ts,
       cwd: j?.cwd ?? null, runtime: j?.runtime ?? '', createdAt: j?.createdAt ?? 0,
       sourceAgentId: j?.sourceAgentId ?? null,
+      hasDegradations: degJobIds.has(r.distillJobId),
     }
   })
 }
 
 /**
  * 最近 N 条 run（ts DESC，默认 200）。不含 rawOutput（走 GET /api/distill-runs/:jobId）。
- * job 元数据（cwd/runtime/createdAt/sourceAgentId）通过 inArray 二次查询带出，避免
- * drizzle JOIN 结果键名不确定性。孤儿 run（job 已删）-> cwd=null / createdAt=0。
+ * job 元数据（cwd/runtime/createdAt/sourceAgentId）与 hasDegradations（spec §4.9 行徽标）
+ * 通过 inArray 二次查询带出，避免 drizzle JOIN 结果键名不确定性。
+ * 孤儿 run（job 已删）-> cwd=null / createdAt=0。
  */
 export async function listRecentDistillRuns(
   db: DbClient, opts: { limit?: number } = {},

@@ -9,7 +9,8 @@
 import { describe, test, expect, beforeEach } from 'bun:test'
 import { openDb, type DbClient } from '@/db/client'
 import { createApp } from '@/server'
-import { logDegradation } from '@/memory/store'
+import { logDegradation, saveDistillRun } from '@/memory/store'
+import { memoryDistillJobs } from '@/db/schema'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -76,5 +77,36 @@ describe('GET /api/distill-runs/:jobId/degradations', () => {
     const body = await (await app.request('/api/distill-runs/j1/degradations')).json()
     expect(body.degradations.length).toBe(1)
     expect(body.degradations[0].kind).toBe('digest_read_failed')
+  })
+})
+
+// runs 列表行 hasDegradations 徽标数据面（spec §4.9 终审修复）：列表两条路径
+// （旧 LIMIT-200 / 游标分页）共用 attachRunJobMeta，都要带出该标志。
+describe('GET /api/distill-runs hasDegradations（runs 行降级徽标，spec §4.9）', () => {
+  const seedRun = async (id: string) => {
+    await db.insert(memoryDistillJobs).values({
+      id, debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/a',
+      status: 'done', attempts: 0, nextRunAt: 0, createdAt: 10, finishedAt: 20,
+    })
+    await saveDistillRun(db, id, {
+      outcome: 'produced', rawOutput: null, rawCount: 1, acceptedCount: 1, dedupedCount: 1,
+      filteredCount: 1, storedCount: 1, discardedCount: 0, durationMs: 1, errorMessage: null,
+    })
+  }
+
+  test('有降级行的 run -> hasDegradations=true；无 -> false（旧形状与分页端点一致）', async () => {
+    await seedRun('j1')
+    await seedRun('j2')
+    await logDegradation(db, { kind: 'digest_read_failed', detail: 'db locked', distillJobId: 'j1' })
+    // 无 distillJobId 的降级行不得误伤任何 run
+    await logDegradation(db, { kind: 'capture_persist_failed' })
+
+    const legacy = await (await app.request('/api/distill-runs')).json()
+    expect(legacy.items.find((r: any) => r.distillJobId === 'j1').hasDegradations).toBe(true)
+    expect(legacy.items.find((r: any) => r.distillJobId === 'j2').hasDegradations).toBe(false)
+
+    const paged = await (await app.request('/api/distill-runs?limit=20')).json()
+    expect(paged.items.find((r: any) => r.distillJobId === 'j1').hasDegradations).toBe(true)
+    expect(paged.items.find((r: any) => r.distillJobId === 'j2').hasDegradations).toBe(false)
   })
 })

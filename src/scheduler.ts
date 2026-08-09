@@ -23,6 +23,26 @@ export const DISTILL_DEBOUNCE_MS = 5_000
 export const DISTILL_BATCH_LIMIT = 5
 export const DISTILL_MAX_ATTEMPTS = 3
 export const DISTILL_BACKOFF_BASE_MS = 30_000
+// 已审批标题清单预算（spec §1 决策 4）：上限 100 条 / 总 2K 字符，双上限先到先截。
+export const DISTILL_APPROVED_TITLES_MAX_COUNT = 100
+export const DISTILL_APPROVED_TITLES_MAX_CHARS = 2_000
+
+/**
+ * 已审批标题双上限裁剪（spec §1 决策 4）：按传入顺序（project 先于 global）逐条累加，
+ * 条数达 100 或「再加入下一条会使总字符超 2000」即截断；绝不切半条标题（整条取舍）。
+ * 单条标题自身超 2000 字符时同样整条舍弃（清单可能为空）。
+ */
+export function clipTitlesByBudget(titles: string[]): string[] {
+  const out: string[] = []
+  let total = 0
+  for (const t of titles) {
+    if (out.length >= DISTILL_APPROVED_TITLES_MAX_COUNT) break
+    if (total + t.length > DISTILL_APPROVED_TITLES_MAX_CHARS) break
+    out.push(t)
+    total += t.length
+  }
+  return out
+}
 
 export interface EnqueueInput {
   sourceEventId: string
@@ -163,8 +183,11 @@ export async function sweepWaitingJobs(db: DbClient, now: number): Promise<numbe
           discardedCount: 0, durationMs: 0, errorMessage: null,
         })
       } catch (e) { console.warn('memside: saveDistillRun failed', e) }
+      // done 落库守卫（终审修复）：status='waiting' 条件与 releaseWaitingJob 同款——
+      // 若 capture 在 sweep 读事件与本 update 之间放行了该 job，此处不得把含新内容
+      // 的 job 标成 done（竞态下 update 0 行，job 继续走 pending 真蒸馏）。
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: now })
-        .where(eq(memoryDistillJobs.id, job.id)).run()
+        .where(and(eq(memoryDistillJobs.id, job.id), eq(memoryDistillJobs.status, 'waiting'))).run()
     } else {
       await releaseWaitingJob(db, job.id)
     }
@@ -232,8 +255,11 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
             discardedCount: 0, durationMs: 0, errorMessage: null,
           })
         } catch (e) { console.warn('memside: saveDistillRun failed', e) }
+        // done 落库守卫（终审修复）：此处 job 已被本 tick 标 running（capture 放行只
+        // 触 waiting 行，不会并发改 running），条件 eq(status,'running') 是零成本
+        // belt-and-suspenders——并发下若状态已变，宁可不标 done 也不盖掉新状态。
         await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() })
-          .where(eq(memoryDistillJobs.id, job.id)).run()
+          .where(and(eq(memoryDistillJobs.id, job.id), eq(memoryDistillJobs.status, 'running'))).run()
         processed += 1
         continue
       }
@@ -256,13 +282,13 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           priorContext = buildDeterministicDigest(prefixTurns)
         }
       }
-      // 已审批标题清单（上限 100 条，Task 6 评审遗留）：查询失败 -> 空清单降级 +
-      // titles_query_failed 落表，distill 照常（spec §6）。distiller 与质量模式
+      // 已审批标题清单（上限 100 条 / 总 2K 字符，spec §1 决策 4）：查询失败 -> 空清单
+      // 降级 + titles_query_failed 落表，distill 照常（spec §6）。distiller 与质量模式
       // judgeValueAgentic 共用同一份清单。
       let approvedTitles: string[] = []
       try {
         const set = await listApprovedByScope(db, { projectId: job.cwd ?? 'unknown' })
-        approvedTitles = [...set.byScope.project, ...set.byScope.global].map((m) => m.title).slice(0, 100)
+        approvedTitles = clipTitlesByBudget([...set.byScope.project, ...set.byScope.global].map((m) => m.title))
       } catch (e) {
         await logDegradation(db, { kind: 'titles_query_failed', detail: String(e), distillJobId: job.id, sessionId: job.sessionId ?? undefined })
       }

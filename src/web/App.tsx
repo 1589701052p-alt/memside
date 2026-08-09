@@ -968,6 +968,8 @@ function DiscardCard({ d, onPromote }: { d: DiscardItem; onPromote: () => void }
  * 蒸馏记录列表行(runs tab)。outcome 徽标 + 计数链 + 来源/时间/耗时 + 「查看详情」
  * 按钮（打开 DistillRunModal）。subagent 来源显 'subagent'，否则显 cwd 末段。
  * 复用 formatOutcome / formatRunCounts / formatMemoryTime 纯函数。
+ * spec §4.9：hasDegradations 时在 outcome 徽标旁加琥珀色「降级」mini-badge
+ * （明细在 modal 的 degradations 区，#e65100 与状态横幅同色）。
  */
 function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => void }) {
   const oc = formatOutcome(r.outcome)
@@ -976,7 +978,12 @@ function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => voi
   return (
     <div style={{ border: '1px solid #eee', borderRadius: 6, padding: 12, marginBottom: 8 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
+        <span>
+          <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
+          {r.hasDegradations && (
+            <span style={{ color: '#e65100', border: '1px solid #e65100', borderRadius: 4, padding: '1px 6px', fontSize: 11, marginLeft: 6 }}>降级</span>
+          )}
+        </span>
         <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{formatRunCounts({ distilled: r.rawCount, deduped: r.dedupedCount, filtered: r.filteredCount, stored: r.storedCount })}</span>
       </div>
       {r.outcome === 'llm_error' && r.errorMessage && (
