@@ -107,7 +107,7 @@ export function formatMemoryBlock(
 }
 
 export interface TranscriptTurn {
-  role: 'user' | 'assistant' | 'tool' | 'system'
+  role: 'user' | 'assistant' | 'tool' | 'system' | 'thinking'
   content: string
   isError?: boolean
   /** 配对自前一个 assistant 行的 tool_use 块；仅 role==='tool' 有值。 */
@@ -245,6 +245,7 @@ function turnPriority(t: TranscriptTurn): number {
   if (t.role === 'user') return 0
   if (t.role === 'tool' && t.isError) return 1
   if (t.role === 'assistant') return 2
+  if (t.role === 'thinking') return 2 // 与 assistant 同级（spec §4.2 同等对待）
   if (t.role === 'tool') return 3
   return 4
 }

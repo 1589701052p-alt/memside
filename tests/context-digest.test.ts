@@ -48,4 +48,9 @@ describe('buildDeterministicDigest', () => {
     const turns = [t('user', 'a'.repeat(400)), t('tool', 'z', 'Bash'), t('assistant', 'b')]
     expect(buildDeterministicDigest(turns)).toBe(buildDeterministicDigest(turns))
   })
+  test('thinking -> THINKING 行，换行压平 + 同 300 字截断（spec §4.2 同等对待）', () => {
+    const d = buildDeterministicDigest([t('thinking', 'why\n' + 'z'.repeat(500))])
+    expect(d.startsWith('THINKING: why ')).toBe(true)
+    expect(d.length).toBeLessThanOrEqual('THINKING: '.length + DIGEST_LINE_MAX_CHARS)
+  })
 })

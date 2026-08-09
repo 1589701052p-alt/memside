@@ -109,3 +109,42 @@ test('per-turn caps widened: non-tool 20000, tool 3000', async () => {
   expect(out[0]!.content.length).toBeLessThanOrEqual(3000 + '…[truncated]'.length)
   expect(out[1]!.content.length).toBeLessThanOrEqual(20000 + '…[truncated]'.length)
 })
+
+// --- thinking 捕获（spec 2026-08-09 §4.2 同等对待）---
+
+test('thinking turn 走非 tool 分支：20000 字符截断', () => {
+  const turns: TranscriptTurn[] = [{ role: 'thinking', content: 'x'.repeat(25000) }]
+  const out = filterTranscriptForDistill(turns)
+  expect(out[0]!.role).toBe('thinking')
+  expect(out[0]!.content.endsWith('…[truncated]')).toBe(true)
+  expect(out[0]!.content.length).toBe(20000 + '…[truncated]'.length)
+})
+
+test('预算裁剪：thinking 与 assistant 同级（同 tier 最老先丢，user/错误必留）', () => {
+  const big = 'y'.repeat(400) // 每条约 100 token
+  const turns: TranscriptTurn[] = [
+    { role: 'user', content: 'keep me' },
+    { role: 'thinking', content: big },   // idx1，同 tier 中更老 -> 先丢
+    { role: 'assistant', content: big },  // idx2
+    { role: 'tool', content: 'err', isError: true },
+  ]
+  // 总量约 203 token；预算 150 -> 丢一条 p=2（最老的 thinking）即达标
+  const out = filterTranscriptForDistill(turns, 150)
+  expect(out.some((t) => t.role === 'user')).toBe(true)
+  expect(out.some((t) => t.isError)).toBe(true)
+  expect(out.some((t) => t.role === 'assistant')).toBe(true)
+  expect(out.some((t) => t.role === 'thinking')).toBe(false)
+})
+
+test('预算裁剪区分场景：p=3 普通 tool 先于 thinking 被丢（锁 thinking 与 assistant 同为 p=2）', () => {
+  const big = 'z'.repeat(400) // 每条约 100 token
+  const turns: TranscriptTurn[] = [
+    { role: 'user', content: 'keep me' },
+    { role: 'thinking', content: big },
+    { role: 'tool', content: big }, // 非错误 tool -> p=3，应先于 thinking 被丢
+  ]
+  const out = filterTranscriptForDistill(turns, 150)
+  expect(out.some((t) => t.role === 'thinking')).toBe(true)
+  expect(out.some((t) => t.role === 'tool')).toBe(false)
+  expect(out.some((t) => t.role === 'user')).toBe(true)
+})

@@ -766,3 +766,39 @@ Web UI 新增第 6 个「设置」tab：把原本常驻状态栏下方的 LLM �
 - degradations 24h 计数：哪个 kind 高频；
 - 滚动摘要质量：质量模式候选与既有记忆重复率变化；
 - events 表体积增速变化（对比已知债务 #1 的 92MB 基线）。
+
+## Thinking 捕获 + 工具名渲染（2026-08-09）
+
+诊断：distill 输入整体丢弃 AI 思考内容（claude thinking 块刻意 skip、opencode
+reasoning part 过滤），而 origin discipline 放宽后「agent 给出且被用户采纳的
+rationale 可记但需原话出处」——thinking 正是 rationale 主要载体，distiller 看不
+到；伴生缺陷：toolName 已配对拿到但渲染只剩 `[tool]`，LLM 与用户都分不清
+Read/Bash。设计 spec / 计划见 `docs/superpowers/specs|plans/
+2026-08-09-thinking-capture*`。
+
+1. `TranscriptTurn.role` 加 `'thinking'`（方案 A 独立 role）：retry 检测只看
+   assistant，旧版 skip 的污染顾虑结构性消除。
+2. claude `parseTranscriptFile` 捕获 `{type:'thinking', thinking}` 块；
+   opencode `parseOpencodeMessages` 捕获 `{type:'reasoning', text}` part；
+   redacted / 缺文本字段跳过，解析器永不抛。
+3. 同等对待：thinking 与 assistant 同 20000 cap、同 turnPriority=2、digest
+   同 300 字 `THINKING:` 行；三档压缩策略逐字不动。
+4. 渲染：distiller prompt `[thinking]` / `[tool:Name]`（无名兜底 `[tool]`）；
+   SYSTEM_PROMPT 加 thinking 说明段（可作 rationale 出处证据，未浮现未采纳
+   仍 REJECT）；Web 遮罩 thinking 紫徽标 + tool:Name 标签。
+5. e2e 闭环锁：fixture 带 thinking 块，断言 `[thinking] …` 抵达 distiller
+   输入。无 schema 迁移。
+6. 攒量批处理交互：thinking 计入 slice signal（computeSliceSignal 复用
+   filterTranscriptForDistill），放行阈值（8000 chars）与琐碎下限
+   （1000 chars）对 thinking 同等计数——以 thinking 为主的 session 会更早
+   放行/更少 skipped_trivial，方向与「同等对待」自洽，上线观测对照
+   skipped_trivial 占比变化（测试锁定见 threshold.test.ts）。
+
+### 上线后观测（并入 2026-08-09 攒量批处理清单）
+
+- thinking turn 占蒸馏输入比例（distill runs 抽样）；
+- events 表体积增速变化（thinking 全文入快照，对比 92MB 基线）；
+- evidence 摘自 thinking 的候选质量（人工审批抽样）与 LLM 过度提取迹象
+  （origin=agent-observed 且 evidence 仅出自 thinking 的占比）。
+- skipped_trivial 占比是否因 thinking 计入 slice signal 而下降（对照攒量
+  批处理基线）。

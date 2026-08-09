@@ -9,6 +9,7 @@ export interface OpencodeMessage {
 /** opencode Part 的判别联合（按 type 字段）。只列转换关心的形态，其余走 default 过滤。 */
 export type OpencodePart =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool'; tool?: string; callID?: string; input?: unknown; output?: string; error?: boolean; metadata?: Record<string, unknown> }
   | { type: string; [k: string]: unknown }
 
@@ -16,7 +17,7 @@ export type OpencodePart =
  * 把 opencode session 消息转成 memside TranscriptTurn[]。
  * - user/assistant TextPart -> {role, content}
  * - ToolPart 按 callID 配对，tool result error -> isError；output 作为 tool turn content
- * - reasoning/subtask/step/patch/snapshot/... 一律过滤（对齐 filterTranscriptForDistill 只保留 user/assistant text + tool I/O）
+ * - reasoning -> thinking turn（spec 2026-08-09 §4.1）；subtask/step/patch/snapshot/... 一律过滤
  * 纯函数，malformed part 跳过不抛。入参非数组或单条 message 缺 parts 也跳过不抛（final-review Important #1）：
  * 真实 opencode 版本的 message 形态是文档化验证空缺，畸形 payload 不得让 capture 路由 500。
  */
@@ -39,6 +40,9 @@ export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTu
     for (const p of m.parts) {
       if (p.type === 'text') {
         turns.push({ role: m.info.role, content: (p as any).text ?? '' })
+      } else if (p.type === 'reasoning') {
+        const rp = p as { text?: unknown }
+        if (typeof rp.text === 'string') turns.push({ role: 'thinking', content: rp.text })
       } else if (p.type === 'tool') {
         const tp = p as any
         // tool result（有 output）-> tool turn；tool_use（有 input 无 output）不单独成 turn（input 已在配对 result）
@@ -51,7 +55,7 @@ export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTu
           })
         }
       }
-      // 其余 part（reasoning/subtask/step/patch/snapshot/agent/retry/compaction）-> 跳过
+      // 其余 part（subtask/step/patch/snapshot/agent/retry/compaction）-> 跳过
     }
   }
   return turns

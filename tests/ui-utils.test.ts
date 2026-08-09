@@ -109,6 +109,21 @@ test('formatSourceTurn: unknown role -> 灰色 + 原角色名', () => {
   expect(r.color).toBe('#666')
 })
 
+test('formatSourceTurn: thinking -> 紫色标签（spec §4.2）', () => {
+  const r = formatSourceTurn({ role: 'thinking', content: 'x' })
+  expect(r).toEqual({ label: 'thinking', color: '#6a1b9a' })
+})
+
+test('formatSourceTurn: tool 带 toolName -> tool:Read 标签（spec §4.3）', () => {
+  const r = formatSourceTurn({ role: 'tool', content: 'x', toolName: 'Read' })
+  expect(r).toEqual({ label: 'tool:Read', color: '#666' })
+})
+
+test('formatSourceTurn: tool 带 toolName 且 error -> tool:Bash 红色标签', () => {
+  const r = formatSourceTurn({ role: 'tool', content: 'x', toolName: 'Bash', isError: true })
+  expect(r).toEqual({ label: 'tool:Bash', color: '#c00' })
+})
+
 // --- formatOutcome ---
 // 蒸馏记录 outcome 四态 -> 徽标 { label, color }。CLAUDE.md「首选可断言面」。
 // 设计依据：docs/superpowers/specs/2026-07-29-distill-work-record-design.md §7。
