@@ -3,14 +3,14 @@ import {
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, WEB_PAGE_SIZE,
   promoteMemory, patchMemory, getStatus, getSourceInput,
   restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
-  getDistillRun, getDistillRunSourceInput,
+  getDistillRun, getDistillRunSourceInput, getRunDegradations, ackDegradations,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, type MemoryTabKey } from './tab-cache'
 
 /**
@@ -346,6 +346,19 @@ export default function App() {
             {status.lastError ? (
               <div style={{ marginTop: 6, color: '#c00' }}>
                 最近错误: {String(status.lastError.error).slice(0, 160)}
+              </div>
+            ) : null}
+            {/* 降级横幅（spec §4.9 降级可见化）：数据走既有 status 轮询不新增 fetch；
+                只在 count24h>0 且（未 ack 或最新降级晚于 ack）时出现。「知道了」调
+                POST /api/degradations/ack（ack_ts 落 appSettings）；ack 失败横幅
+                自然留下（ack_ts 未落库），不静默吞错。 */}
+            {status.recentDegradations && status.recentDegradations.count24h > 0 &&
+             (status.recentDegradations.acknowledgedTs === null ||
+              (status.recentDegradations.latest && status.recentDegradations.latest.ts > status.recentDegradations.acknowledgedTs)) ? (
+              <div style={{ marginTop: 6, color: '#e65100' }}>
+                近 24h {status.recentDegradations.count24h} 次降级
+                {status.recentDegradations.latest ? `: ${degradationKindLabel(status.recentDegradations.latest.kind)}` : ''}
+                <button style={{ marginLeft: 8, fontSize: 12 }} onClick={() => { void ackDegradations().then(() => refresh(tab)).catch(() => {}) }}>知道了</button>
               </div>
             ) : null}
           </>
@@ -955,6 +968,8 @@ function DiscardCard({ d, onPromote }: { d: DiscardItem; onPromote: () => void }
  * 蒸馏记录列表行(runs tab)。outcome 徽标 + 计数链 + 来源/时间/耗时 + 「查看详情」
  * 按钮（打开 DistillRunModal）。subagent 来源显 'subagent'，否则显 cwd 末段。
  * 复用 formatOutcome / formatRunCounts / formatMemoryTime 纯函数。
+ * spec §4.9：hasDegradations 时在 outcome 徽标旁加琥珀色「降级」mini-badge
+ * （明细在 modal 的 degradations 区，#e65100 与状态横幅同色）。
  */
 function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => void }) {
   const oc = formatOutcome(r.outcome)
@@ -963,7 +978,12 @@ function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => voi
   return (
     <div style={{ border: '1px solid #eee', borderRadius: 6, padding: 12, marginBottom: 8 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
+        <span>
+          <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
+          {r.hasDegradations && (
+            <span style={{ color: '#e65100', border: '1px solid #e65100', borderRadius: 4, padding: '1px 6px', fontSize: 11, marginLeft: 6 }}>降级</span>
+          )}
+        </span>
         <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{formatRunCounts({ distilled: r.rawCount, deduped: r.dedupedCount, filtered: r.filteredCount, stored: r.storedCount })}</span>
       </div>
       {r.outcome === 'llm_error' && r.errorMessage && (
@@ -1070,6 +1090,20 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
   const [sourceLoading, setSourceLoading] = useState(false)
   const [sourceError, setSourceError] = useState<string | null>(null)
   const [sourceLoaded, setSourceLoaded] = useState(false)
+  // 降级明细（spec §4.9）：modal 打开即懒加载 GET /api/distill-runs/:jobId/degradations，
+  // 三态不静默——degs=null 加载中 / degsError 红字 / 列表。
+  const [degs, setDegs] = useState<null | { kind: string; detail: string | null; ts: number }[]>(null)
+  const [degsError, setDegsError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setDegs(null)
+    setDegsError(null)
+    getRunDegradations(jobId)
+      .then((r) => { if (!cancelled) setDegs(r.degradations) })
+      .catch((e) => { if (!cancelled) setDegsError(e instanceof Error ? e.message : String(e)) })
+    return () => { cancelled = true }
+  }, [jobId])
 
   useEffect(() => {
     let cancelled = false
@@ -1171,10 +1205,26 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                   </div>
                 )
                 : detail.outcome === 'skipped_no_new_turns' ? <span>该 job 无新 turn，未调用 LLM</span>
+                : detail.outcome === 'skipped_trivial' ? <span>新增内容过少，未调用 LLM</span>
                 : Array.isArray(cands) ? cands.map((c, i) => (
                     <pre key={i} style={{ background: '#f7f7f7', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap' }}>{JSON.stringify(c, null, 2)}</pre>
                   )) : <span>（无产出解析）</span>}
             </div>
+            {/* 降级记录（spec §4.9）：loading / error / 列表三态；无降级不渲染。 */}
+            {degsError ? (
+              <div style={{ marginTop: 8, color: '#c00', fontSize: 13 }}>无法加载降级记录: {degsError}</div>
+            ) : degs === null ? (
+              <div style={{ marginTop: 8, color: '#999', fontSize: 13 }}>降级记录加载中…</div>
+            ) : degs.length > 0 ? (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontWeight: 600 }}>降级记录</div>
+                {degs.map((d) => (
+                  <div key={d.kind + d.ts} style={{ color: '#e65100', fontSize: 13 }}>
+                    {degradationKindLabel(d.kind)}{d.detail ? `：${d.detail}` : ''}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {agentTrace && agentTrace.length > 0 ? (
               <div style={{ marginBottom: 12 }}>
                 <strong>agent 探查轨迹（{agentTrace.length} 步）：</strong>

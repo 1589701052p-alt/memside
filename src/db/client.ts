@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings } from './schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations } from './schema'
 
 export type DbClient = ReturnType<typeof openDb>
 
@@ -11,7 +11,7 @@ export function openDb(path: string) {
   const raw = new Database(path)
   raw.exec('PRAGMA journal_mode=WAL')
   raw.exec('PRAGMA synchronous=NORMAL')
-  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings } })
+  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations } })
   // Schema bootstrap (idempotent). DDL lives here so tests need no migration runner.
   raw.exec(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -107,6 +107,26 @@ export function openDb(path: string) {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS memory_session_flushes (
+      session_id TEXT PRIMARY KEY,
+      ts INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS memory_session_digests (
+      session_id TEXT PRIMARY KEY,
+      digest TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS memory_degradations (
+      id TEXT PRIMARY KEY,
+      ts INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      detail TEXT,
+      distill_job_id TEXT,
+      session_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_degradations_ts ON memory_degradations(ts);
+    CREATE INDEX IF NOT EXISTS idx_degradations_job ON memory_degradations(distill_job_id);
   `)
   // Idempotent migration: add source_cwd to pre-existing memories tables.
   // CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so a column
@@ -250,6 +270,14 @@ export function openDb(path: string) {
     const cols = raw.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
     if (!cols.some((c) => c.name === 'error_message')) {
       raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN error_message TEXT')
+    }
+  }
+  // Idempotent migration: add last_capture_at to memory_distill_jobs.
+  // 攒量批处理的 TTL 判定依据；NULL = legacy job 不走 sweep（spec §4.5）。无 backfill。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'last_capture_at')) {
+      raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN last_capture_at INTEGER')
     }
   }
   return db

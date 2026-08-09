@@ -1,4 +1,4 @@
-import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
+import { test, expect, describe, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -364,4 +364,39 @@ test('app_settings table exists with expected columns (idempotent on reopen)', (
   const raw = (db as any).$client as import('bun:sqlite').Database
   const cols = raw.prepare("PRAGMA table_info(app_settings)").all() as { name: string }[]
   expect(cols.map((c) => c.name).sort()).toEqual(['key', 'updated_at', 'value'])
+})
+
+describe('distill-batching schema（spec §4.5）', () => {
+  test('新库：三个新表 + last_capture_at 列 + waiting 状态可插入', async () => {
+    // 注：brief 原文用 openDb(':memory:')，但 client.ts 的 mkdirSync(dirname(path))
+    // 对 ':memory:' 会在 bun 下抛 EEXIST(mkdir '.')，改用本文件既有的 fresh-dir 文件库模式。
+    db = openDb(join(dir, 'batch.db'))
+    const cols = db.$client.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+    expect(cols.some((c) => c.name === 'last_capture_at')).toBe(true)
+    // waiting 状态可插入（无 CHECK 约束回归锁：spec §4.5 已核实 live DB 无 CHECK）
+    db.$client.exec(`INSERT INTO memory_distill_jobs (id, debounce_key, source_event_id, runtime, status, attempts, next_run_at, created_at)
+      VALUES ('j1', 'k', 'e', 'claude-code', 'waiting', 0, 0, 0)`)
+    db.$client.exec(`INSERT INTO memory_session_flushes (session_id, ts) VALUES ('s1', 1)`)
+    db.$client.exec(`INSERT INTO memory_session_digests (session_id, digest, mode, updated_at) VALUES ('s1', 'd', 'llm', 1)`)
+    db.$client.exec(`INSERT INTO memory_degradations (id, ts, kind) VALUES ('g1', 1, 'sweep_error')`)
+  })
+  test('幂等：模拟老库（无 last_capture_at、无新表）openDb 两次不炸且补齐', async () => {
+    const path = join(tmpdir(), `memside-schema-batch-${Date.now()}.db`)
+    // 手工建"老库"：只建旧版 jobs 表
+    const raw = new Database(path)
+    raw.exec(`CREATE TABLE memory_distill_jobs (
+      id TEXT PRIMARY KEY, debounce_key TEXT NOT NULL, source_event_id TEXT NOT NULL,
+      runtime TEXT NOT NULL, cwd TEXT, session_id TEXT, source_agent_id TEXT,
+      scope_resolved_json TEXT, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+      next_run_at INTEGER NOT NULL, last_error TEXT, created_at INTEGER NOT NULL, finished_at INTEGER)`)
+    raw.close()
+    const db1 = openDb(path)  // 第一次：迁移执行
+    db1.$client.close()
+    const db2 = openDb(path)  // 第二次：幂等不炸
+    const cols = db2.$client.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+    expect(cols.some((c) => c.name === 'last_capture_at')).toBe(true)
+    db2.$client.close()
+    // 注：brief 原文此处 rmSync(path)，但 Windows 上 bun:sqlite close 后 WAL 锁不立即释放
+    // （见本文件头部注释），rmSync 会 EBUSY。tmp 文件留在 tmpdir 无害，与 app_settings 测试同模式。
+  })
 })

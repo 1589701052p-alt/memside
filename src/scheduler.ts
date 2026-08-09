@@ -3,14 +3,17 @@ import { ulid } from 'ulid'
 import { existsSync } from 'node:fs'
 import { parse as parsePath } from 'node:path'
 import type { DbClient } from '@/db/client'
-import { memoryDistillJobs } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope, listApprovedByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, type DiscardRecord } from '@/memory/store'
+import { listForDedupByScope, listApprovedByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, getSessionDigest, upsertSessionDigest, listWaitingJobs, consumeFlush, releaseWaitingJob, logDegradation, getSessionOffset, type DiscardRecord } from '@/memory/store'
 import { exactDedupCandidates } from '@/memory/exactDedup'
 import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass, type ValueVerdict } from '@/memory/valueFilter'
 import { judgeValueAgentic } from '@/memory/agentJudge'
 import { DEFAULT_JUDGE_CONFIG, type JudgeConfig } from '@/memory/judgeConfig'
+import { computeSliceSignal, isTrivial, isStale } from '@/memory/threshold'
+import { buildDeterministicDigest, DIGEST_MAX_CHARS } from '@/memory/contextDigest'
+import { mergeRollingSummary } from '@/memory/rollingSummary'
 import type { AgentStep } from '@/memory/agentLoop'
 import type { MemoryInput, Memory } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
@@ -20,6 +23,26 @@ export const DISTILL_DEBOUNCE_MS = 5_000
 export const DISTILL_BATCH_LIMIT = 5
 export const DISTILL_MAX_ATTEMPTS = 3
 export const DISTILL_BACKOFF_BASE_MS = 30_000
+// 已审批标题清单预算（spec §1 决策 4）：上限 100 条 / 总 2K 字符，双上限先到先截。
+export const DISTILL_APPROVED_TITLES_MAX_COUNT = 100
+export const DISTILL_APPROVED_TITLES_MAX_CHARS = 2_000
+
+/**
+ * 已审批标题双上限裁剪（spec §1 决策 4）：按传入顺序（project 先于 global）逐条累加，
+ * 条数达 100 或「再加入下一条会使总字符超 2000」即截断；绝不切半条标题（整条取舍）。
+ * 单条标题自身超 2000 字符时同样整条舍弃（清单可能为空）。
+ */
+export function clipTitlesByBudget(titles: string[]): string[] {
+  const out: string[] = []
+  let total = 0
+  for (const t of titles) {
+    if (out.length >= DISTILL_APPROVED_TITLES_MAX_COUNT) break
+    if (total + t.length > DISTILL_APPROVED_TITLES_MAX_CHARS) break
+    out.push(t)
+    total += t.length
+  }
+  return out
+}
 
 export interface EnqueueInput {
   sourceEventId: string
@@ -44,11 +67,28 @@ export async function enqueueDistillJob(db: DbClient, input: EnqueueInput) {
   return { jobId: id, nextRunAt }
 }
 
+/**
+ * 累加 job（spec §4.8）：与 enqueueDistillJob 同字段，status='waiting'，
+ * lastCaptureAt=now。waiting 不进 tick 的 pending 选择；放行由
+ * releaseWaitingJob（capture 阈值）或 sweep（flush/TTL）做。
+ */
+export async function enqueueWaitingJob(db: DbClient, input: EnqueueInput) {
+  const id = ulid()
+  const now = Date.now()
+  await db.insert(memoryDistillJobs).values({
+    id, debounceKey: input.debounceKey, sourceEventId: input.sourceEventId,
+    runtime: input.runtime, cwd: input.cwd, sessionId: input.sessionId ?? null,
+    sourceAgentId: input.sourceAgentId ?? null, status: 'waiting', attempts: 0,
+    nextRunAt: now, createdAt: now, finishedAt: null, lastCaptureAt: now,
+  })
+  return { jobId: id, nextRunAt: now }
+}
+
 export interface TickDeps {
   loadTranscript: (job: {
     id: string; cwd: string | null; sourceEventId: string; sessionId: string | null
     sourceAgentId: string | null
-  }) => Promise<{ turns: TranscriptTurn[]; fullLength: number }>
+  }) => Promise<{ turns: TranscriptTurn[]; fullLength: number; prefixTurns: TranscriptTurn[] }>
   callLLM: LLMCall
   /** Signature matches store.createCandidate(db, MemoryInput): Promise<Memory>. */
   createCandidate: (db: DbClient, input: MemoryInput) => Promise<Memory>
@@ -106,6 +146,57 @@ export async function dedupCandidates(
 }
 
 /**
+ * Sweep 累加中的 waiting job（spec §4.7）：SessionEnd flush 标记或 TTL 过期
+ * （lastCaptureAt 超 SESSION_FLUSH_TTL_MS）触发结算——切片信号低于琐碎下限
+ * （DISTILL_TRIVIAL_FLOOR_CHARS，不调 LLM）记 skipped_trivial 收场；足量则
+ * releaseWaitingJob 放行 pending，进 tick 的 due 选择。
+ *
+ * 只动 status='waiting' 的 conversation job（listWaitingJobs 已排除 subagent 与
+ * running/done）；lastCaptureAt === null 的 legacy 行跳过（无 TTL 判据）。
+ * flush/TTL 路径不适用 capture 侧的 8000 字放行阈值——只由 1000 字琐碎下限决定
+ * skipped_trivial vs 放行（spec §4.7）。返回处理的 waiting job 数。
+ */
+export async function sweepWaitingJobs(db: DbClient, now: number): Promise<number> {
+  let handled = 0
+  const waiting = await listWaitingJobs(db)
+  for (const job of waiting) {
+    if (!job.sessionId) continue
+    if (job.lastCaptureAt === null) continue // legacy 行无 TTL 判据，不走 sweep
+    const flushed = await consumeFlush(db, job.sessionId)
+    const stale = isStale(job.lastCaptureAt, now)
+    if (!flushed && !stale) continue
+    // flush/TTL 触发：琐碎 -> skipped_trivial 收场；足量 -> 放行。
+    const rows = await db.select().from(memoryDistillEvents)
+      .where(eq(memoryDistillEvents.distillJobId, job.id))
+    let turns: TranscriptTurn[] = []
+    for (const r of rows) {
+      try { const p = JSON.parse(r.payload); if (Array.isArray(p)) turns = p as TranscriptTurn[] } catch { /* skip */ }
+    }
+    let offset = 0
+    try { offset = await getSessionOffset(db, job.sessionId) } catch { /* 全量判定 */ }
+    const signal = computeSliceSignal(turns, offset)
+    if (isTrivial(signal)) {
+      try {
+        await saveDistillRun(db, job.id, {
+          outcome: 'skipped_trivial', rawOutput: null, rawCount: 0,
+          acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0,
+          discardedCount: 0, durationMs: 0, errorMessage: null,
+        })
+      } catch (e) { console.warn('memside: saveDistillRun failed', e) }
+      // done 落库守卫（终审修复）：status='waiting' 条件与 releaseWaitingJob 同款——
+      // 若 capture 在 sweep 读事件与本 update 之间放行了该 job，此处不得把含新内容
+      // 的 job 标成 done（竞态下 update 0 行，job 继续走 pending 真蒸馏）。
+      await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: now })
+        .where(and(eq(memoryDistillJobs.id, job.id), eq(memoryDistillJobs.status, 'waiting'))).run()
+    } else {
+      await releaseWaitingJob(db, job.id)
+    }
+    handled += 1
+  }
+  return handled
+}
+
+/**
  * Single pass over due jobs. Selects only `pending` jobs whose `nextRunAt <= now`
  * (limit DISTILL_BATCH_LIMIT), marks each `running`, calls the distiller, persists
  * candidates, then marks `done`. On error: bumps attempts; if attempts >=
@@ -118,6 +209,11 @@ export async function dedupCandidates(
  */
 export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
   const now = Date.now()
+  // waiting 结算（spec §4.7）：sweep 异常不得阻塞 pending 处理（spec §5 #9），落表可见。
+  try { await sweepWaitingJobs(db, now) }
+  catch (e) {
+    await logDegradation(db, { kind: 'sweep_error', detail: String(e) })
+  }
   const due = await db.select().from(memoryDistillJobs)
     .where(and(eq(memoryDistillJobs.status, 'pending'), lte(memoryDistillJobs.nextRunAt, now)))
     .orderBy(asc(memoryDistillJobs.nextRunAt))
@@ -130,7 +226,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
     if (job.status === 'running') continue
     await db.update(memoryDistillJobs).set({ status: 'running' }).where(eq(memoryDistillJobs.id, job.id)).run()
     try {
-      const { turns: newTurns, fullLength } = await deps.loadTranscript({
+      const { turns: newTurns, fullLength, prefixTurns } = await deps.loadTranscript({
         id: job.id, cwd: job.cwd, sourceEventId: job.sourceEventId,
         sessionId: job.sessionId ?? null, sourceAgentId: (job.sourceAgentId as string | null) ?? null,
       })
@@ -149,6 +245,52 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           .where(eq(memoryDistillJobs.id, job.id)).run()
         processed += 1
         continue
+      }
+      // subagent trivial（spec §4.8）：一次性 job 低于琐碎下限 -> skipped_trivial 不调 LLM。
+      if (job.sourceAgentId && isTrivial(computeSliceSignal(newTurns, 0))) {
+        try {
+          await saveDistillRun(db, job.id, {
+            outcome: 'skipped_trivial', rawOutput: null, rawCount: 0,
+            acceptedCount: 0, dedupedCount: 0, filteredCount: 0, storedCount: 0,
+            discardedCount: 0, durationMs: 0, errorMessage: null,
+          })
+        } catch (e) { console.warn('memside: saveDistillRun failed', e) }
+        // done 落库守卫（终审修复）：此处 job 已被本 tick 标 running（capture 放行只
+        // 触 waiting 行，不会并发改 running），条件 eq(status,'running') 是零成本
+        // belt-and-suspenders——并发下若状态已变，宁可不标 done 也不盖掉新状态。
+        await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() })
+          .where(and(eq(memoryDistillJobs.id, job.id), eq(memoryDistillJobs.status, 'running'))).run()
+        processed += 1
+        continue
+      }
+      // distiller 上下文接线（spec §4.7）：priorContext（前文 digest）+ 已审批标题。
+      // 切片起点在全量中的位置 = fullLength - newTurns.length（loadTranscript 已切好；
+      // 真实 loader 下恒等于 session offset，>= 0）。
+      const offset = fullLength - newTurns.length
+      const judgeCfg = deps.loadJudgeConfig?.() ?? DEFAULT_JUDGE_CONFIG
+      let priorContext: string | null = null
+      if (job.sessionId && offset > 0) {
+        if (judgeCfg.mode === 'quality') {
+          try {
+            const d = await getSessionDigest(db, job.sessionId)
+            priorContext = d?.digest ?? buildDeterministicDigest(prefixTurns) // legacy 兜底（spec §5 #7）
+          } catch (e) {
+            await logDegradation(db, { kind: 'digest_read_failed', detail: String(e), distillJobId: job.id, sessionId: job.sessionId })
+            priorContext = null
+          }
+        } else {
+          priorContext = buildDeterministicDigest(prefixTurns)
+        }
+      }
+      // 已审批标题清单（上限 100 条 / 总 2K 字符，spec §1 决策 4）：查询失败 -> 空清单
+      // 降级 + titles_query_failed 落表，distill 照常（spec §6）。distiller 与质量模式
+      // judgeValueAgentic 共用同一份清单。
+      let approvedTitles: string[] = []
+      try {
+        const set = await listApprovedByScope(db, { projectId: job.cwd ?? 'unknown' })
+        approvedTitles = clipTitlesByBudget([...set.byScope.project, ...set.byScope.global].map((m) => m.title))
+      } catch (e) {
+        await logDegradation(db, { kind: 'titles_query_failed', detail: String(e), distillJobId: job.id, sessionId: job.sessionId ?? undefined })
       }
       // subject-keyed 聚合（spec §4.6）：取 project(job.cwd) ∪ global 的现有
       // slug 清单喂 distiller 促复用。查询失败 -> 空清单，distill 照常（spec §6）。
@@ -170,6 +312,8 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         existingSlugs,
         callLLM: deps.callLLM,
         sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
+        priorContext,      // spec §4.7：前文 digest（经济=确定性，质量=滚动摘要/兜底）
+        approvedTitles,    // spec §4.7：已审批标题清单（禁止重复提炼）
       })
       const durationMs = Date.now() - t0
       // 逐字去重(spec §4.1):规范化逐字相同才合并,零语义判断;合并项走审计表。
@@ -193,7 +337,6 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       // Value filter: 模式分发(spec §4.6)。economy = 九分类单发 judgeValue;
       // quality = agent 终审(judgeValueAgentic,第 10 类 duplicate + 仓库工具查验)。
       // 两路径都吞自身 LLM 错误(stated->decision / observed->null),never bubbles。
-      const judgeCfg = deps.loadJudgeConfig?.() ?? DEFAULT_JUDGE_CONFIG
       // spec 失败矩阵:项目目录已删除 -> 该批降级经济模式(蒸馏记录注明降级)。
       // 绝不让 agent 在 rootDir=null 下跑(makeRepoTools('/') 会把沙箱放宽到盘根)。
       // 文件系统根('/' / 'C:\')同理:existsSync 为真但等于盘根沙箱,一并降级。
@@ -207,12 +350,8 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         judgeFallback = 'economy:no-root-dir'
         verdicts = await judgeValue(deduped, deps.callLLM)
       } else {
-        // 质量模式(spec §4.5):agent 终审。已审批标题清单查询失败 -> 空清单降级。
-        let approvedTitles: string[] = []
-        try {
-          const set = await listApprovedByScope(db, { projectId: job.cwd ?? 'unknown' })
-          approvedTitles = [...set.byScope.project, ...set.byScope.global].map((m) => m.title).slice(0, 100)
-        } catch (e) { console.warn('memside: listApprovedByScope failed', e) }
+        // 质量模式(spec §4.5):agent 终审。approvedTitles 复用 distiller 接线的
+        // 同一份清单（查询失败已在上方落 titles_query_failed 降级）。
         const r = await judgeValueAgentic(deduped, {
           callLLM: deps.callLLM, rootDir: agentRootDir, approvedTitles,
           sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
@@ -301,6 +440,22 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       if (job.sessionId && !job.sourceAgentId) {
         try { await setSessionOffset(db, job.sessionId, fullLength) }
         catch (e) { console.warn('memside: setSessionOffset failed', e) }
+      }
+      // 滚动摘要维护（spec §4.7）：distill 成功（未抛错）+ 质量模式 + 会话 job（非
+      // subagent）才把本次切片并入 session 滚动摘要。LLM/写库失败只降级落表
+      // （digest_llm_failed），不影响 job 已 done 的事实。截断由代码强制并落
+      // digest_truncated（spec §5 #8）。
+      if (!callThrew && judgeCfg.mode === 'quality' && job.sessionId && !job.sourceAgentId) {
+        try {
+          const prior = await getSessionDigest(db, job.sessionId)
+          const { digest: merged, truncated } = await mergeRollingSummary(prior?.digest ?? null, newTurns, deps.callLLM)
+          await upsertSessionDigest(db, job.sessionId, merged, 'llm')
+          if (truncated) {
+            await logDegradation(db, { kind: 'digest_truncated', detail: `LLM 摘要超 ${DIGEST_MAX_CHARS} 字被代码强制截断`, distillJobId: job.id, sessionId: job.sessionId })
+          }
+        } catch (e) {
+          await logDegradation(db, { kind: 'digest_llm_failed', detail: String(e), distillJobId: job.id, sessionId: job.sessionId })
+        }
       }
       processed += 1
     } catch (err) {

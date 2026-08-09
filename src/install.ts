@@ -30,17 +30,20 @@ export interface InstallOpts {
 }
 
 /**
- * The four claude code hook events memside subscribes to. Each event is a
+ * The five claude code hook events memside subscribes to. Each event is a
  * POST to the collector (`POST /hooks/claude/<event>`, see `src/server.ts`).
  *
  * - SessionStart / Stop / SubagentStop -> `sourceKind: 'conversation'`
  * - PostToolUse -> `sourceKind: 'error'` (error-signal transcript path)
+ * - SessionEnd -> flush 标记（攒量批处理收尾，spec §4.8）：会话有序结束时
+ *   在 memory_session_flushes 落一行，tick sweep 据此结算该 session 的
+ *   waiting job；崩溃/强杀时本事件不可靠，TTL 扫描兜底。
  *
  * The collector's <50ms ack contract means the curl call returns near-instantly;
  * a `--max-time 2` guards against a dead collector blocking the user's
  * claude code session.
  */
-const EVENTS = ['SessionStart', 'Stop', 'PostToolUse', 'SubagentStop'] as const
+const EVENTS = ['SessionStart', 'Stop', 'PostToolUse', 'SubagentStop', 'SessionEnd'] as const
 type HookEvent = (typeof EVENTS)[number]
 
 /**

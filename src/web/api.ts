@@ -100,6 +100,14 @@ export interface MemsideStatus {
   rescan?: RescanState
   /** 未评估候选数（status='candidate' 且 valueClass 非保护类）；老 daemon 无此字段。 */
   unevaluatedCandidates?: number
+  /** 降级可见化（spec §4.9）：24h 降级计数 + 最新一条 + ack 时间；老 daemon 无此字段。 */
+  recentDegradations?: {
+    count24h: number
+    latest: { kind: string; detail: string | null; ts: number } | null
+    acknowledgedTs: number | null
+  }
+  /** 累加中的 waiting job 数（spec §4.9：单列避免「pending 堆积」假象）；老 daemon 无此字段。 */
+  waitingJobs?: number
 }
 
 /**
@@ -208,7 +216,7 @@ export async function promoteDiscard(id: string, fetchFn: FetchLike = fetch): Pr
 
 // --- Distill runs (工作记录透明化) client ------------------------------------
 
-export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced'
+export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced' | 'skipped_trivial'
 
 export interface DistillRunListItem {
   distillJobId: string
@@ -226,6 +234,8 @@ export interface DistillRunListItem {
   runtime: string
   createdAt: number
   sourceAgentId: string | null
+  /** spec §4.9 行降级徽标；详情端点（getDistillRun）不带此字段，故可选。 */
+  hasDegradations?: boolean
 }
 
 export interface DistillRunDetail extends DistillRunListItem {
@@ -249,6 +259,21 @@ export async function getDistillRunSourceInput(
   const res = await fetchFn(`/api/distill-runs/${jobId}/source-input`)
   if (!res.ok) return null
   return (await res.json()) as { turnCount: number; charCount: number; turns: SourceTurn[] }
+}
+
+// --- 降级可见化（spec §4.9）client --------------------------------------------
+
+/** POST /api/degradations/ack — 用户点「知道了」，ack ts = now 落 appSettings。 */
+export async function ackDegradations(fetchFn: FetchLike = fetch): Promise<void> {
+  await fetchFn('/api/degradations/ack', { method: 'POST' })
+}
+
+/** GET /api/distill-runs/:jobId/degradations — 该 job 的降级明细（modal 懒加载）。 */
+export async function getRunDegradations(
+  jobId: string, fetchFn: FetchLike = fetch,
+): Promise<{ degradations: { id: string; ts: number; kind: string; detail: string | null }[] }> {
+  const res = await fetchFn(`/api/distill-runs/${encodeURIComponent(jobId)}/degradations`)
+  return (await res.json()) as { degradations: { id: string; ts: number; kind: string; detail: string | null }[] }
 }
 
 // --- 五 tab 无限滚动分页 client（spec 2026-08-07）--------------------------

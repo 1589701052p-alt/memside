@@ -222,9 +222,13 @@ test('collector SubagentStop still acks 202 when enqueue rejects, broadcasts fai
   expect(bc.some((m: any) => m.type === 'memory.enqueue.failed' && m.sourceEventId === 'e-rej')).toBe(true)
 })
 
-test('collector Stop reads session_id and passes it to enqueueDistillJob', async () => {
+test('collector Stop reads session_id and keys the session waiting job by it', async () => {
   // 第五轮：hook payload 的 session_id 是增量蒸馏的会话键。server.ts 必须读取并
-  // 传入 enqueueDistillJob，否则 tick 无法按 session 切片偏移。
+  // 落到 job.sessionId，否则 tick 无法按 session 切片偏移。
+  // 攒量批处理（Task 7，spec §4.8）后：带 session_id 的主会话 Stop 不再走
+  // deps.enqueueDistillJob（那是 legacy 无 sessionId / subagent 的 seam），而是
+  // 累加进该 session 唯一的 waiting job（不变量 A）——本测试改为锁新契约：
+  // job 以 session_id 为键建成 waiting，且未立即放行。
   const fixturePath = writeJsonlFixture('stop-sid.jsonl', {
     type: 'user',
     message: { role: 'user', content: 'stop with session id' },
@@ -235,8 +239,11 @@ test('collector Stop reads session_id and passes it to enqueueDistillJob', async
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
-  expect(enqueueCalls.length).toBe(1)
-  expect(enqueueCalls[0]!.sessionId).toBe('sess-abc')
+  await new Promise((res) => setTimeout(res, 50))
+  const jobs = await db.select().from(memoryDistillJobs)
+  expect(jobs.length).toBe(1)
+  expect(jobs[0]!.sessionId).toBe('sess-abc')
+  expect(jobs[0]!.status).toBe('waiting')
 })
 
 test('collector Stop without session_id still enqueues (backward compat)', async () => {

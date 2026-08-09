@@ -51,13 +51,14 @@ export const memoryDistillJobs = sqliteTable(
     sourceAgentId: text('source_agent_id'), // subagent 蒸馏任务的 agent_id；主会话任务为 null
     scopeResolvedJson: text('scope_resolved_json'), // {projectId, includeGlobal}
     status: text('status', {
-      enum: ['pending', 'running', 'done', 'failed', 'canceled'],
+      enum: ['pending', 'running', 'done', 'failed', 'canceled', 'waiting'],
     }).notNull(),
     attempts: integer('attempts').notNull().default(0),
     nextRunAt: integer('next_run_at').notNull(),
     lastError: text('last_error'),
     createdAt: integer('created_at').notNull(),
     finishedAt: integer('finished_at'),
+    lastCaptureAt: integer('last_capture_at'), // 攒量批处理：该 session 最后一次 capture 的 ts（TTL 判定；NULL=legacy 不走 sweep）
   },
   (t) => ({
     statusNextIdx: index('idx_distill_jobs_status_next').on(t.status, t.nextRunAt),
@@ -150,3 +151,37 @@ export const appSettings = sqliteTable('app_settings', {
   value: text('value').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
+
+export const memorySessionFlushes = sqliteTable(
+  'memory_session_flushes',
+  {
+    sessionId: text('session_id').primaryKey(),
+    ts: integer('ts').notNull(),
+  },
+)
+
+export const memorySessionDigests = sqliteTable(
+  'memory_session_digests',
+  {
+    sessionId: text('session_id').primaryKey(),
+    digest: text('digest').notNull(),
+    mode: text('mode').notNull(), // 'llm' | 'deterministic-fallback'
+    updatedAt: integer('updated_at').notNull(),
+  },
+)
+
+export const memoryDegradations = sqliteTable(
+  'memory_degradations',
+  {
+    id: text('id').primaryKey(),
+    ts: integer('ts').notNull(),
+    kind: text('kind').notNull(), // spec §5 枚举
+    detail: text('detail'),
+    distillJobId: text('distill_job_id'),
+    sessionId: text('session_id'),
+  },
+  (t) => ({
+    tsIdx: index('idx_degradations_ts').on(t.ts),
+    jobIdx: index('idx_degradations_job').on(t.distillJobId),
+  }),
+)

@@ -745,3 +745,24 @@ Web UI 新增第 6 个「设置」tab：把原本常驻状态栏下方的 LLM �
    `as MemoryTabKey` cast（守卫后运行时恒真；升级 type guard 可消 cast，留 follow-up）。
 2. `isListTab('foo')` 未断言（spec §5 限定测试集；调用点均传编译期 TabKey）。
 3. tab-cache.ts / tab-cache.test.ts 结尾无换行符（pre-existing 风格延续）。
+
+## 蒸馏上下文补全与攒量批处理（2026-08-09）
+
+方案 C 会话级累加 job（spec：`docs/superpowers/specs/2026-08-09-distill-context-and-batching-design.md`）：
+
+1. **累加机制**：一个 (runtime, sessionId) 最多一个 waiting job；capture upsert
+   全量快照（events 一 job 一行，顺手消掉已知债务 #1 的重复快照增长）；阈值
+   （8000 字符 / 50 turn 护栏）放行，SessionEnd flush + TTL 2h sweep 双兜底，
+   低于 1000 字符判 skipped_trivial 不调 LLM。
+2. **distiller 上下文**：新切片 + 前文 digest（质量模式滚动 LLM 摘要存
+   memory_session_digests / 经济模式确定性截断）+ 已审批标题清单（≤100 条）；
+   两节均空时 prompt 与旧行为逐字节一致。
+3. **降级可见化**：memory_degradations 审计表 + /api/status recentDegradations
+   + 状态栏琥珀横幅（可确认）+ 蒸馏记录 modal 降级明细。任何降级不得静默。
+
+### 上线后观测（硬要求，结论回填本节）
+
+- waiting->放行分布 / skipped_trivial 占比 / 阈值松紧；
+- degradations 24h 计数：哪个 kind 高频；
+- 滚动摘要质量：质量模式候选与既有记忆重复率变化；
+- events 表体积增速变化（对比已知债务 #1 的 92MB 基线）。

@@ -4,15 +4,17 @@ import { and, count, desc, eq, gt, inArray, isNull, notInArray, or } from 'drizz
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns, appSettings } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
-import type { MemoryStatus } from '@/memory/pure'
+import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor } from '@/memory/store'
+import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listRecentDegradations, listDegradationsForJob } from '@/memory/store'
+import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
 import type { OpencodeMessage } from '@/opencode/transcript'
-import type { EnqueueInput } from '@/scheduler'
+import { enqueueWaitingJob, type EnqueueInput } from '@/scheduler'
 import { loadUiLlmConfig, saveUiLlmConfig, maskToken, loadJudgeConfig, saveJudgeConfig, type UiLlmConfig } from '@/settings'
 import type { JudgeConfig } from '@/memory/judgeConfig'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
@@ -157,6 +159,50 @@ export function createApp(deps: AppDeps) {
   }
 
   // --- Collector ----------------------------------------------------------
+  /**
+   * 会话级累加 capture（spec §3.2/§4.8）：有 sessionId 的主会话 capture 走此路径。
+   * 不变量 A（一 session 一 waiting job）/D（一 job 一行 event upsert）。
+   * 阈值是优化非正确性依赖：任何异常 -> 立即放行 + logDegradation（spec §5 #1/#2）。
+   */
+  const accumulateCapture = async (input: {
+    runtime: 'claude-code' | 'opencode'; sessionId: string; cwd: string
+    sourceEventId: string; debounceKey: string; turns: TranscriptTurn[]
+  }): Promise<void> => {
+    let jobId: string | null = null
+    try {
+      const waiting = await findWaitingJob(deps.db, input.runtime, input.sessionId)
+      jobId = waiting?.id
+        ?? (await enqueueWaitingJob(deps.db, {
+          sourceEventId: input.sourceEventId, runtime: input.runtime, cwd: input.cwd,
+          debounceKey: input.debounceKey, sessionId: input.sessionId,
+        })).jobId
+      await upsertSessionEvent(deps.db, jobId, JSON.stringify(input.turns))
+      await touchLastCapture(deps.db, jobId, Date.now())
+    } catch (e) {
+      // spec §5 #2：存储异常 -> 本次捕获丢失（下个 Stop 全量快照天然恢复），
+      // 不放行（waiting job 留着等下次 upsert）+ capture_persist_failed 落表。
+      await logDegradation(deps.db, {
+        kind: 'capture_persist_failed', detail: String(e),
+        distillJobId: jobId ?? undefined, sessionId: input.sessionId,
+      })
+      deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId: input.sourceEventId, error: String(e) })
+      return
+    }
+    // 阈值判定独立 try：spec §5 #1——阈值是优化非正确性依赖，异常 -> 立即放行。
+    try {
+      let offset = 0
+      try { offset = await getSessionOffset(deps.db, input.sessionId) } catch { /* 降级：全量判定 */ }
+      const signal = computeSliceSignal(input.turns, offset)
+      if (shouldRelease(signal)) await releaseWaitingJob(deps.db, jobId)
+    } catch (e) {
+      try { await releaseWaitingJob(deps.db, jobId) } catch { /* 已非 waiting 则 no-op */ }
+      await logDegradation(deps.db, {
+        kind: 'threshold_compute_error', detail: String(e),
+        distillJobId: jobId, sessionId: input.sessionId,
+      })
+    }
+  }
+
   app.post('/hooks/claude/:event', async (c) => {
     const event = c.req.param('event')
     const body = await c.req.json().catch(() => ({}) as {
@@ -186,6 +232,20 @@ export function createApp(deps: AppDeps) {
         })
       }
       return c.json({ ok: true })
+    }
+
+    // SessionEnd（spec §4.8）：会话有序结束 -> flush 标记，tick sweep 结算。
+    // 崩溃/强杀时本事件不可靠，TTL 扫描兜底；处理失败 -> flush_mark_failed 落表。
+    if (event === 'SessionEnd') {
+      if (sessionId) {
+        void (async () => {
+          try { await markFlush(deps.db, sessionId) }
+          catch (e) {
+            await logDegradation(deps.db, { kind: 'flush_mark_failed', detail: `${String(e)}（TTL 兜底仍生效）`, sessionId })
+          }
+        })()
+      }
+      return c.json({ ok: true }, 202)
     }
 
     // PostToolUse 不蒸馏（第四轮）：transcript 是累积式全量，与 Stop transcript
@@ -259,14 +319,20 @@ export function createApp(deps: AppDeps) {
     void (async () => {
       try {
         const turns = transcriptPath ? parseTranscriptFile(transcriptPath) : []
-        const { jobId } = await deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey, sessionId })
-        await deps.db.insert(memoryDistillEvents).values({
-          distillJobId: jobId,
-          attemptIndex: 0,
-          ts: Date.now(),
-          kind: sourceKind,
-          payload: JSON.stringify(turns),
-        })
+        if (sessionId) {
+          // 有 sessionId 的主会话：会话级累加（不变量 A/D），阈值跨越才放行。
+          await accumulateCapture({ runtime: 'claude-code', sessionId, cwd, sourceEventId, debounceKey, turns })
+        } else {
+          // legacy 无 sessionId：旧行为（一次 capture 一个立即放行 job）。
+          const { jobId } = await deps.enqueueDistillJob(deps.db, { sourceEventId, runtime: 'claude-code', cwd, debounceKey, sessionId })
+          await deps.db.insert(memoryDistillEvents).values({
+            distillJobId: jobId,
+            attemptIndex: 0,
+            ts: Date.now(),
+            kind: sourceKind,
+            payload: JSON.stringify(turns),
+          })
+        }
       } catch (e) {
         deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) })
       }
@@ -315,13 +381,19 @@ export function createApp(deps: AppDeps) {
     void (async () => {
       try {
         const turns = parseOpencodeMessages(Array.isArray(body.messages) ? body.messages : [])
-        const { jobId } = await deps.enqueueDistillJob(deps.db, {
-          sourceEventId, runtime: 'opencode', cwd, debounceKey, sessionId,
-        })
-        await deps.db.insert(memoryDistillEvents).values({
-          distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
-          kind: 'conversation', payload: JSON.stringify(turns),
-        })
+        if (sessionId) {
+          // 有 sessionId：与 claude code Stop 同一路径累加（spec 决策 1，两侧统一）。
+          await accumulateCapture({ runtime: 'opencode', sessionId, cwd, sourceEventId, debounceKey, turns })
+        } else {
+          // legacy 无 sessionId：旧行为（一次 capture 一个立即放行 job）。
+          const { jobId } = await deps.enqueueDistillJob(deps.db, {
+            sourceEventId, runtime: 'opencode', cwd, debounceKey, sessionId,
+          })
+          await deps.db.insert(memoryDistillEvents).values({
+            distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
+            kind: 'conversation', payload: JSON.stringify(turns),
+          })
+        }
       } catch (e) {
         deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) })
       }
@@ -365,6 +437,14 @@ export function createApp(deps: AppDeps) {
       eq(memories.status, 'candidate'),
       or(isNull(memories.valueClass), notInArray(memories.valueClass, [...PROTECTED_VALUE_CLASSES])),
     )).all()
+    // 降级可见化（spec §4.9）：24h 计数 + 最新一条 + ack 状态。
+    const degrRows = await listRecentDegradations(deps.db, cutoff)
+    const ackRow = await deps.db.select().from(appSettings)
+      .where(eq(appSettings.key, 'degradations.ack_ts')).limit(1)
+    const acknowledgedTs = ackRow[0] ? Number(ackRow[0].value) : null
+    // waiting 单列（spec §4.9）：累加中的 job 不是积压，避免 UI「pending 堆积」假象。
+    const waitingCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
+      .where(eq(memoryDistillJobs.status, 'waiting')).all()
     const jobStats: Record<string, number> = {}
     for (const j of jobs) jobStats[j.status] = (jobStats[j.status] ?? 0) + 1
     const memStats: Record<string, number> = {}
@@ -380,8 +460,29 @@ export function createApp(deps: AppDeps) {
       distillRuns: { total: runGroups.reduce((s, g) => s + g.n, 0), byOutcome: runStats, allTime: runAllTime[0]?.n ?? 0 },
       lastError: errored ? { error: errored.lastError } : null,
       unevaluatedCandidates: unevalCount[0]?.n ?? 0,
+      recentDegradations: {
+        count24h: degrRows.length,
+        latest: degrRows[0] ? { kind: degrRows[0].kind, detail: degrRows[0].detail, ts: degrRows[0].ts } : null,
+        acknowledgedTs: Number.isFinite(acknowledgedTs) ? acknowledgedTs : null,
+      },
+      waitingJobs: waitingCount[0]?.n ?? 0,
       rescan: rescanState,
     })
+  })
+
+  // 降级 ack（spec §4.9）：用户点「知道了」，ack ts = now 落 appSettings（upsert）；
+  // 横幅只在 count24h>0 且（未 ack 或最新降级晚于 ack）时出现。
+  app.post('/api/degradations/ack', async (c) => {
+    const now = Date.now()
+    await deps.db.insert(appSettings).values({ key: 'degradations.ack_ts', value: String(now), updatedAt: now })
+      .onConflictDoUpdate({ target: appSettings.key, set: { value: String(now), updatedAt: now } }).run()
+    return c.json({ ok: true })
+  })
+
+  // 单 job 降级明细（spec §4.9）：蒸馏记录 modal 懒加载。
+  app.get('/api/distill-runs/:jobId/degradations', async (c) => {
+    const rows = await listDegradationsForJob(deps.db, c.req.param('jobId'))
+    return c.json({ degradations: rows })
   })
 
   // 存量回扫(Task 7,spec §4.7):fire-and-forget——202 立即返回,后台按当前判定

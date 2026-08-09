@@ -53,7 +53,7 @@ test('缺 loadJudgeConfig -> 默认质量模式(agent 路径,候选以 trap 入�
   let captured: any = null
   const judgeSystems: string[] = []
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'token mask keeps first6 last4' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'token mask keeps first6 last4' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (system) => {
       if (system.includes('memside-distiller')) return DISTILL_ONE
       if (system.includes('memside-dedup')) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
@@ -84,7 +84,7 @@ test('mode=economy -> 走单发 judge(无 agent 协议段)', async () => {
   let captured: any = null
   const judgeSystems: string[] = []
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (system) => {
       if (system.includes('memside-distiller')) return DISTILL_ONE
       if (system.includes('memside-dedup')) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
@@ -106,7 +106,7 @@ test('质量模式 agent LLM 报错 -> 候选仍入库(全保留兜底),job done
   const jobId = await seedDueJob(dir)  // 真实存在的 cwd -> 走 agent 路径
   let createCalls = 0
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (system) => {
       if (system.includes('memside-distiller')) return DISTILL_ONE
       if (system.includes('memside-dedup')) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
@@ -129,7 +129,7 @@ test('质量模式 + job.cwd 目录不存在 -> 降级经济模式单发判定(�
   let captured: any = null
   const judgeSystems: string[] = []
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (system) => {
       if (system.includes('memside-distiller')) return DISTILL_ONE
       if (system.includes('memside-dedup')) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
@@ -163,7 +163,7 @@ test('质量模式 + job.cwd 是文件系统根 -> 同样降级经济模式(盘�
   let captured: any = null
   const judgeSystems: string[] = []
   await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1 }),
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
     callLLM: async (system) => {
       if (system.includes('memside-distiller')) return DISTILL_ONE
       if (system.includes('memside-dedup')) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
