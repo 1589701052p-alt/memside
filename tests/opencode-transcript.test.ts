@@ -58,3 +58,24 @@ test('malformed part skipped, no throw', () => {
   const msgs: OpencodeMessage[] = [{ info: { role: 'user' }, parts: [{ type: 'text' } as any, { type: 'unknown' } as any] }]
   expect(parseOpencodeMessages(msgs)).toEqual([{ role: 'user', content: '' }])
 })
+
+test('tool part 带 input -> toolCall；缺 input -> 无', () => {
+  const msgs: OpencodeMessage[] = [{
+    info: { role: 'assistant' },
+    parts: [
+      { type: 'tool', tool: 'bash', callID: 'c1', input: { command: 'ls -la' } } as any,
+      { type: 'tool', tool: 'grep', callID: 'c2' } as any, // 缺 input
+    ],
+  }, {
+    info: { role: 'user' },
+    parts: [
+      { type: 'tool', callID: 'c1', output: 'out1' } as any,
+      { type: 'tool', callID: 'c2', output: 'out2' } as any,
+    ],
+  }]
+  const turns = parseOpencodeMessages(msgs)
+  const t1 = turns.find((t) => t.toolName === 'bash')
+  const t2 = turns.find((t) => t.toolName === 'grep')
+  expect(t1?.toolCall).toBe('{"command":"ls -la"}')
+  expect(t2?.toolCall).toBeUndefined()
+})
