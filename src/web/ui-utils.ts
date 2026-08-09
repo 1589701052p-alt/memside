@@ -35,7 +35,7 @@ export function sortCandidatesByTime<T extends { createdAt?: number }>(items: T[
  * 设计依据：docs/superpowers/specs/2026-07-28-source-input-traceability-design.md §7。
  *
  * 参数类型放宽 content?：测试与遮罩层都直接喂 SourceTurn 形状的字面量（含 content），
- * 列出 content? 让对象字面量通过 TS excess-property 检查，函数本身只读 role / isError。
+ * 列出 content? 让对象字面量通过 TS excess-property 检查，函数本身只读 role / isError / toolName。
  */
 export function formatSourceTurn(turn: { role: string; content?: string; isError?: boolean; toolName?: string }): { label: string; color: string } {
   if (turn.role === 'user') return { label: 'user', color: '#1565c0' }

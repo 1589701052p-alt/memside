@@ -788,6 +788,11 @@ Read/Bash。设计 spec / 计划见 `docs/superpowers/specs|plans/
    仍 REJECT）；Web 遮罩 thinking 紫徽标 + tool:Name 标签。
 5. e2e 闭环锁：fixture 带 thinking 块，断言 `[thinking] …` 抵达 distiller
    输入。无 schema 迁移。
+6. 攒量批处理交互：thinking 计入 slice signal（computeSliceSignal 复用
+   filterTranscriptForDistill），放行阈值（8000 chars）与琐碎下限
+   （1000 chars）对 thinking 同等计数——以 thinking 为主的 session 会更早
+   放行/更少 skipped_trivial，方向与「同等对待」自洽，上线观测对照
+   skipped_trivial 占比变化（测试锁定见 threshold.test.ts）。
 
 ### 上线后观测（并入 2026-08-09 攒量批处理清单）
 
@@ -795,3 +800,5 @@ Read/Bash。设计 spec / 计划见 `docs/superpowers/specs|plans/
 - events 表体积增速变化（thinking 全文入快照，对比 92MB 基线）；
 - evidence 摘自 thinking 的候选质量（人工审批抽样）与 LLM 过度提取迹象
   （origin=agent-observed 且 evidence 仅出自 thinking 的占比）。
+- skipped_trivial 占比是否因 thinking 计入 slice signal 而下降（对照攒量
+  批处理基线）。

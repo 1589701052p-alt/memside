@@ -41,6 +41,20 @@ describe('computeSliceSignal', () => {
     expect(s.turnCount).toBe(1)
     expect(s.chars).toBeLessThan(10_000)
   })
+  test('thinking 计入信号量：与 assistant 同等计数（锁放行门槛/琐碎下限的同等对待）', () => {
+    // 锁「thinking 与 assistant 同等对待」在攒量批处理阈值层的体现：
+    // computeSliceSignal 复用 filterTranscriptForDistill，thinking 字符同等计入
+    // 放行门槛（8000 chars）与琐碎下限（1000 chars）。
+    const mixed = computeSliceSignal(
+      [t('assistant', 'a'.repeat(100)), t('thinking', 'k'.repeat(150))], 0)
+    expect(mixed).toEqual({ chars: 250, turnCount: 2 })
+    // 纯 thinking 达到放行门槛即放行（与纯 assistant 行为一致）
+    const thinkingRelease = computeSliceSignal([t('thinking', 'k'.repeat(DISTILL_RELEASE_MIN_CHARS))], 0)
+    expect(thinkingRelease.chars).toBe(DISTILL_RELEASE_MIN_CHARS)
+    expect(shouldRelease(thinkingRelease)).toBe(true)
+    // 纯 thinking 达到琐碎下限即不判 skipped_trivial
+    expect(isTrivial(computeSliceSignal([t('thinking', 'k'.repeat(DISTILL_TRIVIAL_FLOOR_CHARS))], 0))).toBe(false)
+  })
 })
 
 describe('shouldRelease', () => {

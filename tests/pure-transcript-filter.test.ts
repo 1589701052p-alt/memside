@@ -135,3 +135,16 @@ test('预算裁剪：thinking 与 assistant 同级（同 tier 最老先丢，use
   expect(out.some((t) => t.role === 'assistant')).toBe(true)
   expect(out.some((t) => t.role === 'thinking')).toBe(false)
 })
+
+test('预算裁剪区分场景：p=3 普通 tool 先于 thinking 被丢（锁 thinking 与 assistant 同为 p=2）', () => {
+  const big = 'z'.repeat(400) // 每条约 100 token
+  const turns: TranscriptTurn[] = [
+    { role: 'user', content: 'keep me' },
+    { role: 'thinking', content: big },
+    { role: 'tool', content: big }, // 非错误 tool -> p=3，应先于 thinking 被丢
+  ]
+  const out = filterTranscriptForDistill(turns, 150)
+  expect(out.some((t) => t.role === 'thinking')).toBe(true)
+  expect(out.some((t) => t.role === 'tool')).toBe(false)
+  expect(out.some((t) => t.role === 'user')).toBe(true)
+})
