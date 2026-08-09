@@ -114,6 +114,8 @@ export interface TranscriptTurn {
   toolName?: string
   /** 提取自 tool_use.input（file_path / notebook_path / path）；仅文件类工具有值。 */
   toolInputPath?: string
+  /** 工具调用信息（input 紧凑 JSON，捕获时截 TOOL_INPUT_CAP_CHARS 字）。无则缺失（老 payload/无 input）。 */
+  toolCall?: string
 }
 
 export interface ErrorSignals {
@@ -204,6 +206,8 @@ export function extractJsonObject(raw: string): string {
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_DISTILL_INPUT_BUDGET_TOKENS = 64000
+
+export const TOOL_INPUT_CAP_CHARS = 300
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const TOOL_RESULT_CAP_CHARS = 3000
