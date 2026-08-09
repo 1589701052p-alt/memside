@@ -475,3 +475,32 @@ test('distillTranscript subagent 也覆盖 user-confirmed（不只 stated）', a
   })
   expect(result.candidates[0]!.origin).toBe('agent-observed')
 })
+
+// --- thinking 捕获 + 工具名渲染（spec 2026-08-09 §4.2/§4.3/§4.4）---
+
+test('renderUserPrompt: thinking -> [thinking] 标签；tool 带 toolName -> [tool:Read]；无名兜底 [tool]', async () => {
+  let captured = ''
+  await distillTranscript({
+    turns: [
+      { role: 'thinking', content: 'why this design' },
+      { role: 'tool', content: 'file placeholder', toolName: 'Read' },
+      { role: 'tool', content: 'legacy output' },
+    ],
+    runtime: 'claude-code',
+    cwd: '/repo',
+    existingSlugs: [],
+    callLLM: async (_s: string, u: string) => {
+      captured = u
+      return JSON.stringify({ candidates: [] })
+    },
+  })
+  expect(captured).toContain('[thinking] why this design')
+  expect(captured).toContain('[tool:Read] file placeholder')
+  expect(captured).toContain('[tool] legacy output')
+})
+
+test('DISTILLER_SYSTEM_PROMPT 含 [thinking] 说明段（spec §4.4）', () => {
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('[thinking]')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('内部推理')
+  expect(DISTILLER_SYSTEM_PROMPT).toContain('evidence 可摘 thinking 原文')
+})
