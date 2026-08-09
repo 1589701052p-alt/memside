@@ -483,7 +483,8 @@ test('renderUserPrompt: thinking -> [thinking] 标签；tool 带 toolName -> [to
   await distillTranscript({
     turns: [
       { role: 'thinking', content: 'why this design' },
-      { role: 'tool', content: 'file placeholder', toolName: 'Read' },
+      { role: 'tool', content: 'some bash output', toolName: 'Bash' },
+      { role: 'tool', content: 'xxxxxxxxxx', toolName: 'Read', toolInputPath: '/a.ts' },
       { role: 'tool', content: 'legacy output' },
     ],
     runtime: 'claude-code',
@@ -495,7 +496,9 @@ test('renderUserPrompt: thinking -> [thinking] 标签；tool 带 toolName -> [to
     },
   })
   expect(captured).toContain('[thinking] why this design')
-  expect(captured).toContain('[tool:Read] file placeholder')
+  expect(captured).toContain('[tool:Bash] some bash output')
+  // 文件类工具结果压占位（既有三档压缩不动），标签包在占位外
+  expect(captured).toContain('[tool:Read] [file: /a.ts, 原文 1 行]')
   expect(captured).toContain('[tool] legacy output')
 })
 

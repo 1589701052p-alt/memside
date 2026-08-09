@@ -228,8 +228,8 @@ function truncate(s: string, max: number): string {
 
 function compactToolTurn(t: TranscriptTurn): TranscriptTurn {
   if (t.isError) return { ...t }
-  if (t.toolName && FILE_TOOLS.has(t.toolName) && t.toolInputPath) {
-    return { ...t, content: `[file: ${t.toolInputPath}, 原文 ${lineCount(t.content)} 行]` }
+  if (t.toolName && FILE_TOOLS.has(t.toolName)) {
+    return { ...t, content: `[file: ${t.toolInputPath ?? '未知路径'}, 原文 ${lineCount(t.content)} 行]` }
   }
   if (t.toolName) {
     return { ...t, content: truncate(t.content, TOOL_RESULT_CAP_CHARS) }
