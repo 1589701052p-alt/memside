@@ -76,6 +76,17 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
     JSON.stringify({
       type: 'user',
       message: { role: 'user', content: 'we only issue refunds within 14 days of shipment' },
+    }) + '\n' +
+    JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [
+        { type: 'text', text: 'checking the refund policy' },
+        { type: 'tool_use', id: 'toolu_e2e', name: 'Bash', input: { command: 'grep -r refund RULES.md', description: 'find refund policy' } },
+      ] },
+    }) + '\n' +
+    JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_e2e', content: 'no matches found' }] },
     }) + '\n',
   )
   const hookRes = await app.fetch(new Request('http://x/hooks/claude/Stop', {
@@ -151,6 +162,10 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   // （JSONL -> parseTranscriptFile -> events -> makeLoadTranscript -> 渲染）
   // 抵达 distiller 输入，并以 [thinking] 标签呈现。
   expect(capturedUserPrompt).toContain('[thinking] refund policy rationale THINKING_SENTINEL')
+
+  // 工具调用信息闭环锁（spec 2026-08-09 §6 #6）：tool_use input 经真实链路
+  // 抵达 distiller 输入，以 调用: 标签呈现。
+  expect(capturedUserPrompt).toContain('调用: {"command":"grep -r refund RULES.md"')
 
   // 5. Candidate exists in the DB - proving the REAL loadTranscript read the
   //    turns that the REAL collector wrote.

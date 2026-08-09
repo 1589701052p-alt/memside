@@ -143,6 +143,7 @@ export interface SourceTurn {
   isError?: boolean
   toolName?: string
   toolInputPath?: string
+  toolCall?: string
 }
 
 export interface SourceInput {

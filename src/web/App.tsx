@@ -1061,6 +1061,9 @@ function SourceInputModal({ memoryId, onClose }: { memoryId: string; onClose: ()
                 return (
                   <div key={i} style={{ marginBottom: 8, border: '1px solid #eee', borderRadius: 4, padding: 8 }}>
                     <span style={{ color, fontWeight: 600, fontSize: 12 }}>[{label}]</span>
+                    {t.toolCall && (
+                      <div style={{ fontSize: 12, color: '#6a1b9a' }}>调用: {t.toolCall.slice(0, 300)}</div>
+                    )}
                     <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{t.content}</pre>
                   </div>
                 )
@@ -1258,7 +1261,13 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                   {source.turns.map((t, i) => {
                     const f = formatSourceTurn(t)
                     return (
-                      <pre key={i} style={{ borderLeft: `3px solid ${f.color}`, padding: '4px 8px', margin: '4px 0', whiteSpace: 'pre-wrap' }}>[{f.label}] {t.content}</pre>
+                      <div key={i} style={{ borderLeft: `3px solid ${f.color}`, padding: '4px 8px', margin: '4px 0' }}>
+                        <span style={{ color: f.color, fontWeight: 600, fontSize: 12 }}>[{f.label}]</span>
+                        {t.toolCall && (
+                          <div style={{ fontSize: 12, color: '#6a1b9a' }}>调用: {t.toolCall.slice(0, 300)}</div>
+                        )}
+                        <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>{t.content}</pre>
+                      </div>
                     )
                   })}
                 </div>
