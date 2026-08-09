@@ -53,4 +53,25 @@ describe('buildDeterministicDigest', () => {
     expect(d.startsWith('THINKING: why ')).toBe(true)
     expect(d.length).toBeLessThanOrEqual('THINKING: '.length + DIGEST_LINE_MAX_CHARS)
   })
+  test('tool 带 toolCall -> [tool: 名字] <截 100 字>（spec §4.2）', () => {
+    const d = buildDeterministicDigest([
+      { role: 'tool', content: 'out', toolName: 'Bash', toolCall: '{"command":"bun test"}' },
+    ])
+    expect(d).toBe('[tool: Bash] {"command":"bun test"}')
+  })
+
+  test('tool 带 toolCall 超 100 字 -> 截断', () => {
+    const d = buildDeterministicDigest([
+      { role: 'tool', content: 'out', toolName: 'Bash', toolCall: 'x'.repeat(150) },
+    ])
+    expect(d.startsWith('[tool: Bash] ')).toBe(true)
+    expect(d.endsWith('…[truncated]')).toBe(true)
+    // 调用部分截 100 字：'[tool: Bash] '.length + 100 + 后缀
+    expect(d.length).toBe('[tool: Bash] '.length + 100 + '…[truncated]'.length)
+  })
+
+  test('tool 无 toolCall -> 保持 [tool: 名字]（兼容）', () => {
+    const d = buildDeterministicDigest([t('tool', 'out', 'Read')])
+    expect(d).toBe('[tool: Read]')
+  })
 })

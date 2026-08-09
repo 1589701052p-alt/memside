@@ -3,12 +3,13 @@ import type { TranscriptTurn } from './pure'
 
 export const DIGEST_MAX_CHARS = 3000
 export const DIGEST_LINE_MAX_CHARS = 300
+export const DIGEST_TOOL_CALL_MAX_CHARS = 100
 
 const squash = (s: string): string => s.replace(/\s+/g, ' ').trim()
 
 /**
  * 确定性 digest（经济模式；质量模式的降级兜底）：user/assistant/thinking 每条截
- * DIGEST_LINE_MAX_CHARS 字单行（thinking 前缀 `THINKING:`），tool 只留 `[tool: 名字]`，system 跳过。
+ * DIGEST_LINE_MAX_CHARS 字单行（thinking 前缀 `THINKING:`），tool 只留 `[tool: 名字]`（带 toolCall 时附截 100 字调用摘要），system 跳过。
  * 时间序拼接；超 maxChars 从最早处整行丢弃（保留最近上下文）。
  * 纯函数、同输入逐字节同输出（prompt 稳定性，spec §4.2）、永不抛。
  */
@@ -22,7 +23,17 @@ export function buildDeterministicDigest(
     if (t.role === 'user') lines.push(`USER: ${squash(t.content).slice(0, DIGEST_LINE_MAX_CHARS)}`)
     else if (t.role === 'assistant') lines.push(`ASSISTANT: ${squash(t.content).slice(0, DIGEST_LINE_MAX_CHARS)}`)
     else if (t.role === 'thinking') lines.push(`THINKING: ${squash(t.content).slice(0, DIGEST_LINE_MAX_CHARS)}`)
-    else if (t.role === 'tool') lines.push(`[tool: ${t.toolName ?? 'unknown'}]`)
+    else if (t.role === 'tool') {
+      const name = t.toolName ?? 'unknown'
+      if (t.toolCall) {
+        const c = t.toolCall.length > DIGEST_TOOL_CALL_MAX_CHARS
+          ? t.toolCall.slice(0, DIGEST_TOOL_CALL_MAX_CHARS) + '…[truncated]'
+          : t.toolCall
+        lines.push(`[tool: ${name}] ${c}`)
+      } else {
+        lines.push(`[tool: ${name}]`)
+      }
+    }
     // system 跳过
   }
   // 从最早处整行丢弃直到总量达标（最后截一次行首防单行即超限的边界）。
