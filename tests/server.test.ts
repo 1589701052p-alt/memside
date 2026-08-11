@@ -1001,3 +1001,84 @@ test('GET /api/status 含 unevaluatedCandidates 且数值正确', async () => {
   const r = await req('/api/status')
   expect(r.body.unevaluatedCandidates).toBe(1)
 })
+
+// --- 2026-08-11 web-memory-filters: 四维服务端筛选 + facets + total ---------
+
+async function seedMemFull(opts: {
+  ts: number; status?: MemoryStatus; valueClass?: ValueClass | null
+  sourceCwd?: string | null; slug?: string | null; title?: string
+}) {
+  const m = await createCandidate(db, {
+    scopeType: 'global', scopeId: null,
+    title: opts.title ?? `[category:convention] t-${opts.ts}`, bodyMd: 'b',
+    tags: [], sourceKind: 'manual', runtime: null,
+    valueClass: opts.valueClass ?? null, sourceCwd: opts.sourceCwd ?? null,
+    subjectSlug: opts.slug ?? null,
+  })
+  await db.update(memories).set({ createdAt: opts.ts, status: opts.status ?? 'candidate' })
+    .where(eq(memories.id, m.id)).run()
+  return m.id
+}
+
+test('GET /api/memories?limit 四维筛选参数各自生效 + total + 组合 AND', async () => {
+  await seedMemFull({ ts: 1000, sourceCwd: 'C:/p/a', slug: 'refund-policy', valueClass: 'decision' })
+  await seedMemFull({ ts: 2000, sourceCwd: 'C:/p/b', slug: 'other', valueClass: null })
+  const byProject = await req(`/api/memories?limit=50&project=${encodeURIComponent('C:/p/a')}`)
+  expect(byProject.status).toBe(200)
+  expect(byProject.body.items.length).toBe(1)
+  expect(byProject.body.total).toBe(1)
+  const bySlug = await req('/api/memories?limit=50&slug=refund-policy')
+  expect(bySlug.body.items.length).toBe(1)
+  const byCat = await req('/api/memories?limit=50&category=convention')
+  expect(byCat.body.items.length).toBe(2)
+  const byVc = await req('/api/memories?limit=50&valueClass=unevaluated')
+  expect(byVc.body.items.length).toBe(1)
+  const combined = await req(`/api/memories?limit=50&project=${encodeURIComponent('C:/p/a')}&valueClass=decision`)
+  expect(combined.body.items.length).toBe(1)
+  expect(combined.body.total).toBe(1)
+})
+
+test('GET /api/memories 非法 valueClass 宽松忽略不 400', async () => {
+  await seedMemFull({ ts: 1000, valueClass: 'decision' })
+  const r = await req('/api/memories?limit=50&valueClass=bogus')
+  expect(r.status).toBe(200)
+  expect(r.body.items.length).toBe(1)
+})
+
+test('GET /api/memories 旧全量路径忽略 filter 参数（决策 D4 锁）', async () => {
+  await seedMemFull({ ts: 1000, sourceCwd: 'C:/p/a' })
+  await seedMemFull({ ts: 2000, sourceCwd: 'C:/p/b' })
+  const r = await req(`/api/memories?project=${encodeURIComponent('C:/p/a')}`)
+  expect(r.status).toBe(200)
+  expect(r.body.items.length).toBe(2) // 无 limit -> 旧形状，不筛选
+  expect('hasMore' in r.body).toBe(false)
+})
+
+test('GET /api/discards?limit project/category 筛选 + total', async () => {
+  db.insert(memoryDistillJobs).values({
+    id: 'job-f', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code',
+    cwd: '/r', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 0,
+  }).run()
+  await logDiscards(db, 'job-f', [
+    { title: '[category:trap] 坑A', bodyMd: 'b', reason: 'fleeting' as const, scopeType: 'project' as const, scopeId: 'C:/p/a', sourceCwd: 'C:/p/a', runtime: null, sourceKind: 'conversation' as const },
+    { title: '[category:convention] 约定B', bodyMd: 'b', reason: 'derivable' as const, scopeType: 'project' as const, scopeId: 'C:/p/a', sourceCwd: 'C:/p/a', runtime: null, sourceKind: 'conversation' as const },
+  ])
+  const byProject = await req(`/api/discards?limit=50&project=${encodeURIComponent('C:/p/a')}`)
+  expect(byProject.body.items.length).toBe(2)
+  expect(byProject.body.total).toBe(2)
+  const byCat = await req('/api/discards?limit=50&category=trap')
+  expect(byCat.body.items.length).toBe(1)
+  const none = await req(`/api/discards?limit=50&project=${encodeURIComponent('C:/nope')}`)
+  expect(none.body.items.length).toBe(0)
+  expect(none.body.total).toBe(0)
+})
+
+test('GET /api/facets 形状 + 数据驱动', async () => {
+  await seedMemFull({ ts: 1000, sourceCwd: 'C:/p/a', slug: 's1', valueClass: 'decision' })
+  const r = await req('/api/facets')
+  expect(r.status).toBe(200)
+  expect(r.body.projects).toEqual([{ value: 'C:/p/a', count: 1 }])
+  expect(r.body.slugs).toEqual([{ value: 's1', count: 1 }])
+  expect(r.body.categories).toEqual([{ value: 'convention', count: 1 }])
+  expect(r.body.valueClasses).toEqual([{ value: 'decision', count: 1 }])
+})
