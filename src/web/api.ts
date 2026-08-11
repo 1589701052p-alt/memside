@@ -294,6 +294,7 @@ export type FacetTab = 'candidate' | 'approved' | 'rejected' | 'discards'
 /** GET /api/facets?tab= — 按 tab 圈定的下拉选项（随 3s 轮询刷新）。 */
 export async function getFacets(fetchFn: FetchLike = fetch, tab: FacetTab): Promise<Facets> {
   const res = await fetchFn(`/api/facets?tab=${tab}`)
+  if (!res.ok) throw new Error(`facets ${res.status}`)
   return (await res.json()) as Facets
 }
 

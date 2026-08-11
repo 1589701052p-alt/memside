@@ -346,6 +346,13 @@ test('getFacets: GET /api/facets?tab= 按 tab 圈定', async () => {
   expect(f.projects[0]).toEqual({ value: 'C:/x', count: 2 })
 })
 
+test('getFacets: 非 2xx throw（App catch -> null -> 灰字降级链路）', async () => {
+  // 回归锁：getFacets 曾不查 res.ok 直接 res.json()——400 不 throw，App 的
+  // .catch(() => null) 不触发，实际降级是「可用但空下拉」而非 spec 承诺的灰字禁用。
+  const fetchFn = (async () => new Response(JSON.stringify({ error: 'invalid tab' }), { status: 400 })) as any
+  await expect(getFacets(fetchFn, 'candidate')).rejects.toThrow('facets 400')
+})
+
 test('listMemoriesPage: before 游标 + 筛选参数共存，筛选排在分页参数之后', async () => {
   let called = ''
   const fetchFn = (async (url: string) => {

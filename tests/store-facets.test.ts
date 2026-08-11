@@ -65,8 +65,10 @@ test('memories scope: approved scope 覆盖 approved/archived/superseded 三态'
   await seedMem('[category:trap] A', { sourceCwd: 'C:/p/a', status: 'approved' })
   const b = await seedMem('[category:trap] B', { sourceCwd: 'C:/p/a' })
   await db.update(memories).set({ status: 'archived' }).where(eq(memories.id, b.id))
+  const s = await seedMem('[category:trap] S', { sourceCwd: 'C:/p/a' })
+  await db.update(memories).set({ status: 'superseded' }).where(eq(memories.id, s.id))
   await seedMem('[category:trap] C', { sourceCwd: 'C:/p/a' }) // candidate，不应出现
-  expect((await listFacets(db, APPROVED)).projects).toEqual([{ value: 'C:/p/a', count: 2 }])
+  expect((await listFacets(db, APPROVED)).projects).toEqual([{ value: 'C:/p/a', count: 3 }])
 })
 
 test('memories scope: categories/slugs/valueClasses 同样按 scope（未评估桶只数 scope 内 NULL）', async () => {
