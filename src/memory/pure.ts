@@ -333,3 +333,22 @@ export function normalizeSubjectSlug(raw: unknown): string | null {
   if (s.length === 0 || s.length > SUBJECT_SLUG_MAX_LEN) return null
   return SUBJECT_SLUG_RE.test(s) ? s : null
 }
+
+// ---------------------------------------------------------------------------
+// 记忆 title 分类前缀提取（spec 2026-08-11-web-memory-filters §4.1）。
+// ---------------------------------------------------------------------------
+
+const CATEGORY_PREFIX_RE = /\[category:([^\]]*)\]/i
+
+/**
+ * 从记忆 title 提取 [category:xxx] 前缀的分类值（trim + 转小写）。
+ * 提取不限定行首（用户可在审批卡片编辑 title 挪动前缀）；无匹配 / 空值 /
+ * 非字符串输入一律返回 null，永不抛。与 exactDedup.ts 的剥离正则语义对齐。
+ */
+export function categoryFromTitle(title: unknown): string | null {
+  if (typeof title !== 'string') return null
+  const m = CATEGORY_PREFIX_RE.exec(title)
+  if (!m) return null
+  const v = m[1]!.trim().toLowerCase()
+  return v.length > 0 ? v : null
+}
