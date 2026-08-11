@@ -19,12 +19,10 @@ test('App.tsx surfaces edit errors (spec §8)', () => {
   expect(src).toContain('editError')
 })
 
-// Task 8: 价值优先级排序 + valueClass 徽标 + 批量拒绝未评估。
-// 派生优先级标签(高·决策 等) + 未评估 占位 + 批量拒绝按钮文案。
-// 一旦 refactor 删掉这些 UI 锚点会立刻变红。
-test('App.tsx renders valueClass badge labels and bulk-reject button (source text)', () => {
-  // 派生优先级标签
-  expect(src).toContain('高·决策')
+// 价值徽标 + 批量拒绝未评估。2026-08-11 ui-clarity：旧缩写文案（高·决策 等）
+// 有意废除，六筐映射迁 ui-utils valueClassInfo；锚点改锁新接线。
+test('App.tsx renders value badge via valueClassInfo + bulk-reject button (source text)', () => {
+  expect(src).toContain('valueClassInfo(')
   expect(src).toContain('未评估')
   // 批量拒绝未评估按钮
   expect(src).toContain('批量拒绝未评估')
@@ -149,11 +147,12 @@ test('App.tsx renders origin badge + evidence 出处 line (source text)', () => 
   expect(src).toContain('discardReasonLabel(')
 })
 
-test('App.tsx VALUE_LABEL covers 6 buckets incl user-rule + preference (source text)', () => {
-  const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'App.tsx'), 'utf8')
-  // 6 筐映射必须含 user-rule（高·规矩）与 preference（中·偏好）
-  expect(src).toContain("'user-rule'")
-  expect(src).toContain('preference')
+test('ui-utils valueClassInfo covers 6 buckets incl user-rule + preference (source text)', () => {
+  // 2026-08-11 ui-clarity：六筐映射从 App.tsx VALUE_LABEL 迁到 ui-utils.ts
+  const utils = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'ui-utils.ts'), 'utf8')
+  expect(utils).toContain("'user-rule'")
+  expect(utils).toContain('preference')
+  expect(utils).toContain('valueClassInfo')
 })
 
 // opencode 支持：sourceLabel 必须能产出 'opencode' 标签，且 'opencode' 字符串存在于
@@ -383,4 +382,50 @@ test('App.tsx wires per-tab memory list filters (source text)', () => {
   // 其余 tab 缓存对应各自筛选不受影响。refactor 改回全量作废或漏清当前 tab 即红。
   expect(src).toContain('setMemCache((c) => ({ ...c, [tab]: emptyPage() }))')
   expect(src).toContain('setDiscards(emptyPage())')
+})
+
+// Web UI 可理解性改造（2026-08-11 ui-clarity）：卡片信息架构重构回归锁。
+// 标题剥离 + 徽章行（分类/价值/出处/主题）+ 元信息字段化 + 旧缩写退场。
+test('App.tsx 卡片可理解性：标题剥离 + 徽章行 + 元信息字段化 (source text)', () => {
+  expect(src).toContain('stripCategoryPrefix(')
+  expect(src).toContain('categoryInfo(')
+  expect(src).toContain('scopeInfo(')
+  expect(src).toContain('runtimeLabel(')
+  expect(src).toContain('SLUG_BADGE_TIP')
+  expect(src).toContain('分类：')
+  expect(src).toContain('价值：')
+  expect(src).toContain('主题：')
+  expect(src).toContain('范围:')
+  expect(src).toContain('会话工具:')
+  expect(src).toContain('源项目:')
+  expect(src).toContain('提炼于:')
+})
+
+test('App.tsx 旧缩写文案退场（反向断言：高·/中· 拼接格式不得复活）', () => {
+  expect(src).not.toContain('高·')
+  expect(src).not.toContain('中·')
+})
+
+test('App.tsx DiscardCard 可理解性：标题剥离 + 拒绝理由前缀 + 元信息字段化 (source text)', () => {
+  expect(src).toContain('stripCategoryPrefix(d.title)')
+  expect(src).toContain('拒绝理由:')
+  expect(src).toContain('拒绝于:')
+})
+
+// Web UI 可理解性改造（2026-08-11 ui-clarity Task 4）：筛选栏标题/说明 + 维度改名
+// （项目→源项目、slug→主题（slug）、价值筐→价值）+ 分类选项中文化（categoryInfo）。
+// React 组件不单测，源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx runtime 字段悬停走按值文案（spec §4.5，终审 Minor #1）', () => {
+  expect(src).toContain('runtimeTip(')
+  expect(src).not.toContain('title="产生这条记忆的会话所用的运行时工具"')
+})
+
+test('App.tsx 筛选栏可理解性：标题/说明 + 维度改名 + 分类选项中文化 (source text)', () => {
+  expect(src).toContain('按以下条件缩小列表')
+  expect(src).toContain('每个 tab 的筛选相互独立')
+  expect(src).toContain('label="源项目"')
+  expect(src).toContain('label="主题（slug）"')
+  expect(src).toContain('label="价值"')
+  expect(src).not.toContain('label="价值筐"')
+  expect(src).toContain('categoryInfo(p.value)')
 })

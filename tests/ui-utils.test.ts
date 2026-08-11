@@ -162,10 +162,19 @@ test('llmSourceLabel 映射各来源', () => {
 // 中文化。纯函数，可单测（CLAUDE.md「首选可断言面」）。
 // 设计依据：docs/superpowers/specs/2026-07-30-origin-driven-value-judgment-design.md。
 
-test('originBadge: user-stated/user-confirmed/agent-observed/null 映射', () => {
-  expect(originBadge('user-stated')).toEqual({ label: '用户陈述', color: '#6a1b9a' })
-  expect(originBadge('user-confirmed')).toEqual({ label: '用户采纳', color: '#00838f' })
-  expect(originBadge('agent-observed')).toEqual({ label: 'agent 观察', color: '#999' })
+test('originBadge: user-stated/user-confirmed/agent-observed/null 映射（label/color 逐字回归 + tip）', () => {
+  const stated = originBadge('user-stated')!
+  expect(stated.label).toBe('用户陈述')
+  expect(stated.color).toBe('#6a1b9a')
+  expect(stated.tip.length).toBeGreaterThan(0)
+  const confirmed = originBadge('user-confirmed')!
+  expect(confirmed.label).toBe('用户采纳')
+  expect(confirmed.color).toBe('#00838f')
+  expect(confirmed.tip.length).toBeGreaterThan(0)
+  const observed = originBadge('agent-observed')!
+  expect(observed.label).toBe('agent 观察')
+  expect(observed.color).toBe('#999')
+  expect(observed.tip.length).toBeGreaterThan(0)
   expect(originBadge(null)).toBeNull()
   expect(originBadge(undefined)).toBeNull()
 })

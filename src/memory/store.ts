@@ -984,7 +984,7 @@ export async function listFacets(db: DbClient, scope: FacetScope): Promise<Facet
   }
 }
 
-/** 6 个保护类 valueClass（= 前端 priorityRank < 2 的全集）；其余候选视为「未评估」。 */
+/** 6 个保护类 valueClass（= 前端 valueClassInfo 的 6 个标准筐）；其余候选视为「未评估」。 */
 export const PROTECTED_VALUE_CLASSES: readonly string[] = [
   'user-rule', 'decision', 'preference', 'convention', 'trap', 'topology',
 ]

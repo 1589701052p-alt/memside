@@ -106,11 +106,12 @@ export function llmSourceLabel(source: string | null): string {
  * agent-observed 灰（agent 自行观察，需审慎审批）。老行无 origin 字段返回 null。
  *
  * 设计依据：docs/superpowers/specs/2026-07-30-origin-driven-value-judgment-design.md。
+ * tip 文案权威表见 spec 2026-08-11-ui-clarity §4.3。
  */
-export function originBadge(origin: string | null | undefined): { label: string; color: string } | null {
-  if (origin === 'user-stated') return { label: '用户陈述', color: '#6a1b9a' }
-  if (origin === 'user-confirmed') return { label: '用户采纳', color: '#00838f' }
-  if (origin === 'agent-observed') return { label: 'agent 观察', color: '#999' }
+export function originBadge(origin: string | null | undefined): { label: string; color: string; tip: string } | null {
+  if (origin === 'user-stated') return { label: '用户陈述', color: '#6a1b9a', tip: '用户在会话里亲口说的，可信度最高' }
+  if (origin === 'user-confirmed') return { label: '用户采纳', color: '#00838f', tip: 'agent 提议、被用户采纳的' }
+  if (origin === 'agent-observed') return { label: 'agent 观察', color: '#999', tip: 'agent 自己观察总结的，审批时多留个心眼' }
   return null
 }
 
@@ -176,3 +177,102 @@ export function projectDisplayName(value: string, allValues: string[]): string {
   if (s.length >= 2) return `${s[s.length - 2]}/${base}`
   return value
 }
+
+// ---------------------------------------------------------------------------
+// Web UI 可理解性（spec 2026-08-11-ui-clarity）：黑话 -> 人话语义映射。
+// 徽章/筛选下拉全部措辞的单一事实来源；渲染处只拼接「分类：」「价值：」等前缀。
+// ---------------------------------------------------------------------------
+
+/** spec §4.1 文案权威表。键为小写分类值。 */
+const CATEGORY_INFO: Record<string, { name: string; tip: string }> = {
+  'domain-glossary': { name: '领域术语', tip: '本产品/领域特有的概念定义' },
+  invariant: { name: '业务铁律', tip: '用户领域里必须永远成立的硬规则' },
+  process: { name: '业务流程', tip: '业务流转、状态机、顺序/依赖约束' },
+  architecture: { name: '架构决策', tip: '带理由的技术/设计决策（"为什么"是重点）' },
+  integration: { name: '外部集成', tip: '外部系统契约、SLA、幂等/重试约定' },
+  compliance: { name: '合规约束', tip: '法规/法律层面的限制' },
+  'data-semantics': { name: '数据语义', tip: '字段、枚举、状态值的隐含含义' },
+  'anti-pattern': { name: '避坑教训', tip: '已知故障模式/不要做的事' },
+  convention: { name: '团队约定', tip: '团队/评审者的稳定偏好，后续会话应遵守' },
+  'quality-bar': { name: '完成标准', tip: '本项目里什么算"做完了"' },
+}
+
+/**
+ * category 语义（spec §5）。null/空/纯空白 -> null；标准值 trim+小写后查表；
+ * 未知（幻觉）值 -> { name: 原值, tip: 非标准提示 }。never-throw。
+ */
+export function categoryInfo(value: string | null | undefined): { name: string; tip: string } | null {
+  if (typeof value !== 'string') return null
+  const v = value.trim().toLowerCase()
+  if (v === '') return null
+  return CATEGORY_INFO[v] ?? { name: value, tip: '非标准分类（模型自由发挥）' }
+}
+
+/**
+ * 从 title 提取 [category:xxx] 值。web 本地副本（spec 决策 D7：vite 无 @ alias，
+ * web 层不跨层 import）——与 @/memory/pure categoryFromTitle 同语义，
+ * tests/ui-clarity.test.ts 一致性段锁定漂移。
+ */
+export function categoryFromTitle(title: string): string | null {
+  if (typeof title !== 'string') return null
+  const m = /\[category:([^\]]*)\]/i.exec(title)
+  if (!m) return null
+  const v = m[1]!.trim().toLowerCase()
+  return v.length > 0 ? v : null
+}
+
+/**
+ * 显示用：剥离 title 的 [category:xxx] 前缀（与 exactDedup.ts 剥离正则同族：
+ * 大小写不敏感、剥全部出现、trim）。剥离后为空串 -> 返回原标题，绝不渲染空白。
+ * 只用于显示路径；编辑输入框仍用原标题（spec §6.1 规则 4）。
+ */
+export function stripCategoryPrefix(title: string): string {
+  if (typeof title !== 'string') return title
+  const stripped = title.replace(/\[category:[^\]]*\]/gi, '').trim()
+  return stripped === '' ? title : stripped
+}
+
+/** spec §4.2 文案权威表。 */
+const VALUE_CLASS_INFO: Record<string, { name: string; priority: '高' | null; tip: string }> = {
+  'user-rule': { name: '规矩', priority: '高', tip: '用户明确立下的规矩/约定，审批时最值得优先看' },
+  decision: { name: '决策', priority: '高', tip: '用户确认过的重要决策（含理由）' },
+  preference: { name: '偏好', priority: null, tip: '用户的个性化偏好' },
+  convention: { name: '约定', priority: null, tip: '团队/评审者的稳定约定' },
+  trap: { name: '避坑教训', priority: null, tip: '踩过的坑/事故教训' },
+  topology: { name: '结构拓扑', priority: null, tip: '系统构成与依赖关系' },
+}
+
+/**
+ * 价值六筐语义（spec §5）。null/undefined/未知值 -> 未评估（承接旧 valueBadge
+ * 兜底语义）。never-throw。
+ */
+export function valueClassInfo(vc: string | null | undefined): { name: string; priority: '高' | null; tip: string } {
+  if (typeof vc === 'string' && VALUE_CLASS_INFO[vc]) return VALUE_CLASS_INFO[vc]!
+  return { name: '未评估', priority: null, tip: 'AI 未给出价值判定；候选 tab 可一键批量拒绝未评估项' }
+}
+
+/** scope 文案（spec §4.5）。never-throw。 */
+export function scopeInfo(scopeType: string | null | undefined): { name: string; tip: string } {
+  if (scopeType === 'project') return { name: '仅本项目', tip: '这条记忆只会注入源项目（来源目录）的会话' }
+  if (scopeType === 'global') return { name: '所有项目', tip: '这条记忆会注入所有项目的会话' }
+  return { name: '未知', tip: '老数据缺少 scope 信息' }
+}
+
+/** runtime 文案（spec §4.5）。未知值原样返回兜底。never-throw。 */
+export function runtimeLabel(runtime: string | null | undefined): string {
+  if (runtime === 'claude-code') return 'Claude Code'
+  if (runtime === 'opencode') return 'opencode'
+  if (runtime == null) return '任意'
+  return runtime
+}
+
+/** runtime 悬停解释（按值措辞，spec §4.5）。未知值兜底通用文案。never-throw。 */
+export function runtimeTip(runtime: string | null | undefined): string {
+  if (runtime === 'claude-code') return '产生这条记忆的会话来自 Claude Code'
+  if (runtime === 'opencode') return '产生这条记忆的会话来自 opencode'
+  if (runtime == null) return '未限定来源工具（老数据）'
+  return '产生这条记忆的会话所用的运行时工具'
+}
+
+/** 主题 slug 徽章固定 tip（spec §4.4）。 */
+export const SLUG_BADGE_TIP = '主题分组标识。同主题的记忆共用一个 slug，注入新会话时合并为一节；可在编辑里修改。'

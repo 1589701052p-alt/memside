@@ -892,3 +892,50 @@ spec / 计划见 `docs/superpowers/specs|plans/2026-08-11-per-tab-memory-filters
 
 执行：subagent-driven（2 实现 task 各 implementer + reviewer，全部 Approved 零发现）。
 `bun run typecheck && bun test` 865/865 全绿。
+
+## Web UI 可理解性改造（记忆审阅页信息架构重构，2026-08-11）
+
+用户反馈记忆审阅页「非常不直观」，五痛点：category 含义不透明、`[slug]` 标签无解释、
+`中·陷阱`/`agent 观察` 式徽章缩写难懂、`project · claude-code · 来源: memside` 元信息
+行无字段名、筛选栏无标题。方案：全部「黑话 → 人话」语义映射抽为 `src/web/ui-utils.ts`
+纯函数层（单一事实来源），App.tsx 只做「分类：/价值：/出处：/主题：」等前缀拼接与
+`title` 悬停挂载；视觉风格不动、数据模型 / 服务端 / 注入链路零改动、筛选值仍传英文原值。
+设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-11-ui-clarity*`。
+
+1. **ui-utils 语义纯函数层**（`src/web/ui-utils.ts`）：`categoryInfo`（10 标准分类
+   中文名 + tip，幻觉值兜底显原值）、`valueClassInfo`（6 筐 + 未评估，含 priority/tip）、
+   `stripCategoryPrefix`（显示剥 `[category:xxx]` 前缀，剥空回退原标题）、
+   `categoryFromTitle`（web 本地副本，决策 D7：vite 无 `@` alias 不跨层 import，
+   一致性测试锁 `@/memory/pure` 同语义）、`scopeInfo`/`runtimeLabel`/`runtimeTip`、
+   `SLUG_BADGE_TIP`；`originBadge` 加 tip 字段（label/color 逐字不变）。
+2. **MemoryCard 信息架构重构**（App.tsx）：title 剥离前缀 + 徽章行（分类/价值/出处/
+   主题，各带字段名前缀 + 悬停 tip）+ 元信息字段化（范围/会话工具/源项目/提炼于，
+   各带 tip）。删死代码 VALUE_LABEL/valueBadge/priorityRank；`store.ts:987` 注释同步。
+   **编辑表单 title 保留含前缀原值**（stripCategoryPrefix 只走显示路径，服务端分类筛选
+   靠 title 前缀 instr 匹配，不动存储值）。
+3. **DiscardCard 同步**：title 剥离前缀 + 分类 chip + 拒绝理由前缀（`拒绝理由: ` + tip，
+   红色保留）+ 元信息字段化（范围/源项目/拒绝于）；promoted/提升按钮逻辑不动。
+4. **筛选栏**：加「筛选」标题 + 说明行、布局改列向；维度改名（源项目/分类/主题(slug)/
+   价值，「价值筐」黑话退役）；分类/价值选项中文化（`categoryInfo`/`valueClassInfo`，
+   幻觉值兜底显原值、option title 挂英文原值）。数据流（changeFilter/facetsByTab/
+   filterRef/清除筛选/灰字降级）零触碰。
+
+回归防护：源码层文本断言锁新接线（stripCategoryPrefix/categoryInfo/scopeInfo/runtimeLabel/
+runtimeTip 等）+ 反向断言（`高·`/`中·` 缩写与 `label="价值筐"` 不得复活）+ D7 跨模块
+一致性测试（web 副本 vs `@/memory/pure` 逐例相等、剥后提不出分类）。
+
+执行：subagent-driven（4 实现 task 各 implementer + reviewer 全 Approved；终审 opus
+whole-branch review verdict=Ready to merge=Yes，1 Minor——runtime tip 静态文案——经一轮
+fix wave 对齐 spec §4.5 按值措辞后 scoped re-review ADDRESSED）。plan 两处测试用例内部
+矛盾经裁定改测试（实现符合 spec）。`bun run typecheck && bun test` 891/891 全绿。
+
+### 终审 deferred minor（非阻塞）
+
+1. `tests/ui-clarity.test.ts` 结尾无换行符（cosmetic）。
+2. `valueClassInfo` 不 trim/小写输入（与 `categoryInfo` 不对称；valueClass 是内部枚举
+   无自由文本路径，spec 未要求）。
+3. `categoryInfo` 幻觉兜底 name 用未 trim 原值（spec §4.1 明文「name = 原值」，合规）。
+4. `label="分类"` 锚点未加强为「恰一处」断言（既有值非本次回归面，polish）。
+5. 筛选标题 div 无 marginBottom，间距由说明行承担（spec §7.1 既定结构，视觉 polish）。
+6. 同一卡片两个「出处：」并存（origin chip + evidence 行，spec §6.1 已批准设计；后续
+   若用户困惑可考虑 origin chip 改名「来源类型」）。
