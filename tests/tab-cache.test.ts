@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab } from '../src/web/tab-cache'
+import { memoryTabFilter, hasCachedData, shouldShowLoading, mergePage, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER } from '../src/web/tab-cache'
 
 // Task 1（perf/tab-switch-cache）：tab 切换 stale-while-revalidate 缓存的纯函数。
 // 数据按 tab 缓存，回访直接渲染缓存 + 后台刷新。纯函数层可单测（CLAUDE.md「首选可断言面」）。
@@ -141,4 +141,19 @@ test('isListTab: 五个列表 tab 全 true，settings false', () => {
   expect(isListTab('discards')).toBe(true)
   expect(isListTab('runs')).toBe(true)
   expect(isListTab('settings')).toBe(false)
+})
+
+// --- 2026-08-11 记忆列表筛选（spec web-memory-filters §4.3）---
+
+test('hasActiveFilter: 全空 false，任一维非空 true', () => {
+  expect(hasActiveFilter({ project: '', slug: '', category: '', valueClass: '' })).toBe(false)
+  expect(hasActiveFilter({ project: 'C:/x', slug: '', category: '', valueClass: '' })).toBe(true)
+  expect(hasActiveFilter({ project: '', slug: 's', category: '', valueClass: '' })).toBe(true)
+  expect(hasActiveFilter({ project: '', slug: '', category: 'trap', valueClass: '' })).toBe(true)
+  expect(hasActiveFilter({ project: '', slug: '', category: '', valueClass: 'unevaluated' })).toBe(true)
+})
+
+test('EMPTY_MEMORY_FILTER 四维全空且未激活', () => {
+  expect(EMPTY_MEMORY_FILTER).toEqual({ project: '', slug: '', category: '', valueClass: '' })
+  expect(hasActiveFilter(EMPTY_MEMORY_FILTER)).toBe(false)
 })

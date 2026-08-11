@@ -156,3 +156,23 @@ export function rescanPercent(done: number, total: number): number {
   if (total <= 0) return 0
   return Math.min(100, Math.round((done / total) * 100))
 }
+
+/**
+ * 项目下拉显示名：取路径末段（同时切 \ 与 /，去空段）；末段在同批值里撞名时
+ * 升级为「父段/末段」；取不到段 -> 原值兜底。永不抛。
+ * spec 2026-08-11-web-memory-filters §4.3。
+ */
+export function projectDisplayName(value: string, allValues: string[]): string {
+  const segs = (v: string) => v.split(/[\\/]+/).filter(Boolean)
+  const last = (v: string): string => {
+    const s = segs(v)
+    return s.length > 0 ? s[s.length - 1]! : v
+  }
+  const base = last(value)
+  if (base === '') return value
+  const collide = allValues.some((o) => o !== value && last(o) === base)
+  if (!collide) return base
+  const s = segs(value)
+  if (s.length >= 2) return `${s[s.length - 2]}/${base}`
+  return value
+}

@@ -8,7 +8,7 @@ import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memor
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor, type MemoryListFilter } from '@/memory/store'
 import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listRecentDegradations, listDegradationsForJob } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
@@ -547,10 +547,16 @@ export function createApp(deps: AppDeps) {
     const wanted = statusParam.split(',').map((s) => s.trim()).filter((s): s is MemoryStatus => s.length > 0 && VALID.has(s))
     // 带 limit -> 游标分页（spec 2026-08-07）；不带 -> 旧全量形状（兼容锚点）
     if (c.req.query('limit') !== undefined) {
+      const filter: MemoryListFilter = {}
+      const project = c.req.query('project'); if (project) filter.sourceCwd = project
+      const slug = c.req.query('slug'); if (slug) filter.subjectSlug = slug
+      const category = c.req.query('category'); if (category) filter.category = category
+      const valueClass = c.req.query('valueClass'); if (valueClass) filter.valueClass = valueClass
       const page = await listMemoriesPage(deps.db, {
         statuses: wanted,
         limit: Number(c.req.query('limit')),
         before: parseBefore(c),
+        filter,
       })
       return c.json(page)
     }
@@ -650,11 +656,20 @@ export function createApp(deps: AppDeps) {
   // --- Discards (AI 自动拒绝审计) -----------------------------------------
   app.get('/api/discards', async (c) => {
     if (c.req.query('limit') !== undefined) {
-      return c.json(await listDiscardsPage(deps.db, { limit: Number(c.req.query('limit')), before: parseBefore(c) }))
+      const filter: MemoryListFilter = {}
+      const project = c.req.query('project'); if (project) filter.sourceCwd = project
+      const category = c.req.query('category'); if (category) filter.category = category
+      return c.json(await listDiscardsPage(deps.db, {
+        limit: Number(c.req.query('limit')), before: parseBefore(c), filter,
+      }))
     }
     const items = await listDiscards(deps.db)
     return c.json({ items })
   })
+
+  // 四维筛选下拉选项（spec 2026-08-11-web-memory-filters §4.2）：全局口径，
+  // Web 筛选条随 3s 轮询刷新（新 distill 产出新 slug/项目无静默窗口）。
+  app.get('/api/facets', async (c) => c.json(await listFacets(deps.db)))
 
   app.post('/api/discards/:id/promote', async (c) => {
     try {

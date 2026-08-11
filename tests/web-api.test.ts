@@ -3,6 +3,7 @@ import {
   listMemories, promoteMemory, patchMemory, getSourceInput, listDiscards, restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
   listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection, type MemoryItem,
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, WEB_PAGE_SIZE,
+  getFacets, UNEVALUATED,
 } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
@@ -304,4 +305,63 @@ test('bulkRejectUnevaluated: POST 到按条件批量端点', async () => {
   expect(captured!.url).toBe('/api/memories/bulk-reject-unevaluated')
   expect(captured!.method).toBe('POST')
   expect(r.rejected).toBe(3)
+})
+
+// --- 2026-08-11 web-memory-filters: 筛选参数 URL + facets + total ---------
+
+test('listMemoriesPage: 筛选参数只在非空时拼入 URL（空串忽略）', async () => {
+  const urls: string[] = []
+  const fetchFn = (async (url: string) => {
+    urls.push(url)
+    return new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null, total: 0 }), { status: 200 })
+  }) as any
+  await listMemoriesPage(fetchFn, {
+    status: 'candidate', limit: 20, project: 'C:/p/a', slug: '', category: 'trap', valueClass: UNEVALUATED,
+  })
+  expect(urls[0]).toBe(`/api/memories?status=candidate&limit=20&project=${encodeURIComponent('C:/p/a')}&category=trap&valueClass=unevaluated`)
+  await listMemoriesPage(fetchFn, { status: 'rejected', limit: 20 })
+  expect(urls[1]).toBe('/api/memories?status=rejected&limit=20')
+})
+
+test('listDiscardsPage: project/category 筛选参数拼在游标参数之后', async () => {
+  let called = ''
+  const fetchFn = (async (url: string) => {
+    called = url
+    return new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null, total: 0 }), { status: 200 })
+  }) as any
+  await listDiscardsPage(fetchFn, { limit: 20, project: 'C:/p/a', category: 'trap' })
+  expect(called).toBe(`/api/discards?limit=20&project=${encodeURIComponent('C:/p/a')}&category=trap`)
+})
+
+test('getFacets: GET /api/facets 解析形状', async () => {
+  let called = ''
+  const fetchFn = (async (url: string) => {
+    called = url
+    return new Response(JSON.stringify({
+      projects: [{ value: 'C:/x', count: 2 }], categories: [], slugs: [], valueClasses: [],
+    }), { status: 200 })
+  }) as any
+  const f = await getFacets(fetchFn)
+  expect(called).toBe('/api/facets')
+  expect(f.projects[0]).toEqual({ value: 'C:/x', count: 2 })
+})
+
+test('listMemoriesPage: before 游标 + 筛选参数共存，筛选排在分页参数之后', async () => {
+  let called = ''
+  const fetchFn = (async (url: string) => {
+    called = url
+    return new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null, total: 0 }), { status: 200 })
+  }) as any
+  await listMemoriesPage(fetchFn, {
+    status: 'candidate', limit: 20, project: 'C:/x', category: 'trap', before: { ts: 9, id: 'z' },
+  })
+  // 分页参数（limit/before/beforeId）在前，筛选参数（project/category）在其后
+  expect(called).toBe(`/api/memories?status=candidate&limit=20&before=9&beforeId=z&project=${encodeURIComponent('C:/x')}&category=trap`)
+})
+
+test('PageDto.total: 旧 daemon 无 total -> null（降级不崩）', async () => {
+  const fetchFn = (async () =>
+    new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null }), { status: 200 })) as any
+  const page = await listMemoriesPage(fetchFn, { status: 'candidate' })
+  expect(page.total).toBeNull()
 })

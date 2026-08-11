@@ -358,3 +358,23 @@ test('App.tsx 设置 tab 存在 + 区块恰一处挂载 + 数据流短路 (sourc
   // 五处入口守卫：refresh / loadMore / observer effect / 轮询 effect / 列表尾部
   expect((s.match(/isListTab\(/g) ?? []).length).toBeGreaterThanOrEqual(5)
 })
+
+// 2026-08-11 四维筛选（spec web-memory-filters §4.3）：筛选条 + 缓存作废 +
+// filterRef 防轮换闭包 + 筛选态空态/计数。React 组件不单测，源码文本断言锁
+// 接线锚点，refactor 删除即变红。
+test('App.tsx wires memory list filters (source text)', () => {
+  expect(src).toContain('清除筛选')
+  expect(src).toContain('没有符合当前筛选的记录')
+  expect(src).toContain('符合当前筛选')
+  expect(src).toContain('筛选选项加载失败')
+  expect(src).toContain('filterRef')
+  expect(src).toContain('hasActiveFilter')
+  expect(src).toContain('getFacets')
+  expect(src).toContain('projectDisplayName')
+  expect(src).toContain('FilterSelect')
+  // 缓存作废（spec 失败模式 F2）：改筛选必须重置候选/已审批/已拒绝三个记忆 tab
+  // 缓存 + discards 缓存，否则 mergeRefreshPage 把旧筛选条目当「掉出第一页的老数据」
+  // 追加回新列表。refactor 收窄作废范围（只清当前 tab）即红。
+  expect(src).toContain('setMemCache({ candidate: emptyPage(), approved: emptyPage(), rejected: emptyPage() })')
+  expect(src).toContain('setDiscards(emptyPage())')
+})

@@ -1,9 +1,10 @@
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations } from '@/db/schema'
 import {
   canTransition,
+  categoryFromTitle,
   normalizeSubjectSlug,
   type InjectableMemorySet,
   type MemoryScope,
@@ -753,6 +754,9 @@ export async function listRecentDistillRuns(
 export interface PageCursor { ts: number; id: string }
 export interface Page<T> { items: T[]; hasMore: boolean; nextCursor: PageCursor | null }
 
+/** 带全表匹配计数的分页（memories/discards 筛选用；distill runs 不带）。 */
+export interface PageWithTotal<T> extends Page<T> { total: number }
+
 export const MEMORY_PAGE_DEFAULT_LIMIT = 20
 export const MEMORY_PAGE_MAX_LIMIT = 200
 
@@ -762,13 +766,62 @@ export function clampPageLimit(limit?: number): number {
   return Math.min(Math.max(Math.floor(limit), 1), MEMORY_PAGE_MAX_LIMIT)
 }
 
+// ---------------------------------------------------------------------------
+// 四维服务端筛选（spec 2026-08-11-web-memory-filters §4.1）
+// ---------------------------------------------------------------------------
+
+/** valueClass 筛「未评估」的哨兵值（= value_class IS NULL）。六个合法
+ *  value_class 里没有这个词，URL/接口层无歧义。 */
+export const VALUE_CLASS_UNEVALUATED = 'unevaluated'
+
+export interface MemoryListFilter {
+  /** memories.source_cwd / discards.source_cwd 精确匹配。 */
+  sourceCwd?: string
+  /** memories.subject_slug 精确匹配（discards 无此列，忽略）。 */
+  subjectSlug?: string
+  /** instr(title, '[category:X]') > 0（带闭括号精确子串）。 */
+  category?: string
+  /** 'unevaluated' 哨兵 -> IS NULL；合法六值 -> eq；其余值忽略（宽松）。 */
+  valueClass?: string
+}
+
+function memoryFilterConds(filter?: MemoryListFilter) {
+  const conds: any[] = []
+  if (!filter) return conds
+  if (filter.sourceCwd) conds.push(eq(memories.sourceCwd, filter.sourceCwd))
+  if (filter.subjectSlug) conds.push(eq(memories.subjectSlug, filter.subjectSlug))
+  if (filter.category) {
+    conds.push(sql`instr(${memories.title}, ${'[category:' + filter.category + ']'}) > 0`)
+  }
+  if (filter.valueClass) {
+    if (filter.valueClass === VALUE_CLASS_UNEVALUATED) conds.push(isNull(memories.valueClass))
+    else if ((PROTECTED_VALUE_CLASSES as readonly string[]).includes(filter.valueClass)) {
+      conds.push(eq(memories.valueClass, filter.valueClass))
+    }
+    // 其余值 -> 忽略该条件（白名单宽松策略，与非法 status 同风格，spec §4.2）
+  }
+  return conds
+}
+
+function discardFilterConds(filter?: MemoryListFilter) {
+  const conds: any[] = []
+  if (!filter) return conds
+  if (filter.sourceCwd) conds.push(eq(memoryDiscards.sourceCwd, filter.sourceCwd))
+  if (filter.category) {
+    conds.push(sql`instr(${memoryDiscards.title}, ${'[category:' + filter.category + ']'}) > 0`)
+  }
+  return conds
+}
+
 export async function listMemoriesPage(
   db: DbClient,
-  opts: { statuses: MemoryStatus[]; limit?: number; before?: PageCursor },
-): Promise<Page<Memory>> {
+  opts: { statuses: MemoryStatus[]; limit?: number; before?: PageCursor; filter?: MemoryListFilter },
+): Promise<PageWithTotal<Memory>> {
   const limit = clampPageLimit(opts.limit)
-  const conds = []
-  if (opts.statuses.length > 0) conds.push(inArray(memories.status, opts.statuses))
+  const baseConds = []
+  if (opts.statuses.length > 0) baseConds.push(inArray(memories.status, opts.statuses))
+  baseConds.push(...memoryFilterConds(opts.filter))
+  const conds = [...baseConds]
   if (opts.before) {
     conds.push(or(
       lt(memories.createdAt, opts.before.ts),
@@ -779,6 +832,9 @@ export async function listMemoriesPage(
     .where(conds.length > 0 ? and(...conds) : undefined)
     .orderBy(desc(memories.createdAt), desc(memories.id))
     .limit(limit + 1).all()
+  // total 与筛选条件同 WHERE、不含游标（游标只切页不切计数）
+  const countRows = await db.select({ n: sql<number>`COUNT(*)` }).from(memories)
+    .where(baseConds.length > 0 ? and(...baseConds) : undefined).all()
   const hasMore = rows.length > limit
   const pageRows = rows.slice(0, limit)
   const last = pageRows[pageRows.length - 1]
@@ -786,24 +842,29 @@ export async function listMemoriesPage(
     items: pageRows.map(rowToMemory),
     hasMore,
     nextCursor: hasMore && last ? { ts: last.createdAt, id: last.id } : null,
+    total: Number(countRows[0]?.n ?? 0),
   }
 }
 
 export async function listDiscardsPage(
   db: DbClient,
-  opts: { limit?: number; before?: PageCursor } = {},
-): Promise<Page<DiscardRow>> {
+  opts: { limit?: number; before?: PageCursor; filter?: MemoryListFilter } = {},
+): Promise<PageWithTotal<DiscardRow>> {
   const limit = clampPageLimit(opts.limit)
-  const conds = opts.before
-    ? [or(
-        lt(memoryDiscards.ts, opts.before.ts),
-        and(eq(memoryDiscards.ts, opts.before.ts), lt(memoryDiscards.id, opts.before.id)),
-      )]
-    : []
+  const baseConds = discardFilterConds(opts.filter)
+  const conds = [...baseConds]
+  if (opts.before) {
+    conds.push(or(
+      lt(memoryDiscards.ts, opts.before.ts),
+      and(eq(memoryDiscards.ts, opts.before.ts), lt(memoryDiscards.id, opts.before.id)),
+    ))
+  }
   const rows = await db.select().from(memoryDiscards)
     .where(conds.length > 0 ? and(...conds) : undefined)
     .orderBy(desc(memoryDiscards.ts), desc(memoryDiscards.id))
     .limit(limit + 1).all()
+  const countRows = await db.select({ n: sql<number>`COUNT(*)` }).from(memoryDiscards)
+    .where(baseConds.length > 0 ? and(...baseConds) : undefined).all()
   const hasMore = rows.length > limit
   const pageRows = rows.slice(0, limit)
   const last = pageRows[pageRows.length - 1]
@@ -811,6 +872,7 @@ export async function listDiscardsPage(
     items: pageRows.map(rowToDiscard),
     hasMore,
     nextCursor: hasMore && last ? { ts: last.ts, id: last.id } : null,
+    total: Number(countRows[0]?.n ?? 0),
   }
 }
 
@@ -836,6 +898,68 @@ export async function listDistillRunsPage(
     items: await attachRunJobMeta(db, pageRows),
     hasMore,
     nextCursor: hasMore && last ? { ts: last.ts, id: last.distillJobId } : null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 四维筛选下拉选项（spec 2026-08-11-web-memory-filters §4.1）
+// ---------------------------------------------------------------------------
+
+export interface FacetValue { value: string; count: number }
+export interface Facets {
+  projects: FacetValue[]
+  categories: FacetValue[]
+  slugs: FacetValue[]
+  valueClasses: FacetValue[]
+}
+export const FACET_LIST_CAP = 200
+
+function sortFacets(m: Map<string, number>): FacetValue[] {
+  return [...m.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0))
+    .slice(0, FACET_LIST_CAP)
+}
+
+/**
+ * 四维筛选的下拉选项：全局口径（不按 tab/status 切分，决策 D2）；项目与分类
+ * UNION memories+discards 两表（决策 D1：discard 行不在 memories 表）；
+ * value_class NULL 聚成 VALUE_CLASS_UNEVALUATED 桶。各组 count 降序、
+ * 同 count 按 value 字母序，截 FACET_LIST_CAP。
+ */
+export async function listFacets(db: DbClient): Promise<Facets> {
+  const bump = (m: Map<string, number>, v: string, n: number) => m.set(v, (m.get(v) ?? 0) + n)
+
+  const projects = new Map<string, number>()
+  const memProj = await db.select({ v: memories.sourceCwd, n: sql<number>`COUNT(*)` })
+    .from(memories).where(isNotNull(memories.sourceCwd)).groupBy(memories.sourceCwd).all()
+  const disProj = await db.select({ v: memoryDiscards.sourceCwd, n: sql<number>`COUNT(*)` })
+    .from(memoryDiscards).where(isNotNull(memoryDiscards.sourceCwd)).groupBy(memoryDiscards.sourceCwd).all()
+  for (const r of [...memProj, ...disProj]) if (r.v) bump(projects, r.v, Number(r.n))
+
+  const cats = new Map<string, number>()
+  const memTitles = await db.select({ t: memories.title }).from(memories).all()
+  const disTitles = await db.select({ t: memoryDiscards.title }).from(memoryDiscards).all()
+  for (const r of [...memTitles, ...disTitles]) {
+    const c = categoryFromTitle(r.t)
+    if (c) bump(cats, c, 1)
+  }
+
+  const slugs = new Map<string, number>()
+  const slugRows = await db.select({ v: memories.subjectSlug, n: sql<number>`COUNT(*)` })
+    .from(memories).where(isNotNull(memories.subjectSlug)).groupBy(memories.subjectSlug).all()
+  for (const r of slugRows) if (r.v) bump(slugs, r.v, Number(r.n))
+
+  const vcs = new Map<string, number>()
+  const vcRows = await db.select({ v: memories.valueClass, n: sql<number>`COUNT(*)` })
+    .from(memories).groupBy(memories.valueClass).all()
+  for (const r of vcRows) bump(vcs, r.v ?? VALUE_CLASS_UNEVALUATED, Number(r.n))
+
+  return {
+    projects: sortFacets(projects),
+    categories: sortFacets(cats),
+    slugs: sortFacets(slugs),
+    valueClasses: sortFacets(vcs),
   }
 }
 

@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, formatToolCall } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, formatToolCall, projectDisplayName } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -200,4 +200,22 @@ test('formatToolCall: undefined -> null', () => {
 
 test('formatToolCall: 空串 -> null', () => {
   expect(formatToolCall('')).toBeNull()
+})
+
+// --- projectDisplayName（spec 2026-08-11-web-memory-filters §4.3）---
+
+test('projectDisplayName: 取路径末段（正反斜杠 / 尾分隔符）', () => {
+  expect(projectDisplayName('C:\\Users\\admin\\Desktop\\memside', ['C:\\Users\\admin\\Desktop\\memside'])).toBe('memside')
+  expect(projectDisplayName('/home/u/proj/', ['/home/u/proj/'])).toBe('proj')
+})
+
+test('projectDisplayName: 末段撞名升级 父/子', () => {
+  const all = ['C:\\a\\app', 'C:\\b\\app']
+  expect(projectDisplayName('C:\\a\\app', all)).toBe('a/app')
+  expect(projectDisplayName('C:\\b\\app', all)).toBe('b/app')
+})
+
+test('projectDisplayName: 无父段 / 空输入回退原值，永不抛', () => {
+  expect(projectDisplayName('solo', ['solo', 'x/solo'])).toBe('solo')
+  expect(projectDisplayName('', [''])).toBe('')
 })

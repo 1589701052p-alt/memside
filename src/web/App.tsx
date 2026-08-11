@@ -6,12 +6,13 @@ import {
   getDistillRun, getDistillRunSourceInput, getRunDegradations, ackDegradations,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
+  getFacets, UNEVALUATED,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
-  type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto,
+  type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall } from './ui-utils'
-import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, type MemoryTabKey } from './tab-cache'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName } from './ui-utils'
+import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
 
 /**
  * valueClass -> 中文徽标 / 优先级排序。模块顶层定义以便 MemoryCard 直接复用
@@ -40,8 +41,8 @@ type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'set
  * 每 tab 的分页缓存形状（spec 2026-08-07 tab 列表分页）。items=已加载条目，
  * nextCursor=下一页游标（before），hasMore=是否还有更多。Task 8 无限滚动直接复用。
  */
-interface TabPage<T> { items: T[]; nextCursor: { ts: number; id: string } | null; hasMore: boolean }
-function emptyPage<T>(): TabPage<T> { return { items: [], nextCursor: null, hasMore: true } }
+interface TabPage<T> { items: T[]; nextCursor: { ts: number; id: string } | null; hasMore: boolean; total: number | null }
+function emptyPage<T>(): TabPage<T> { return { items: [], nextCursor: null, hasMore: true, total: null } }
 
 /**
  * 5+1 tab 视图：候选审批 / 已审批 / 已拒绝 / AI自动拒绝 / 蒸馏记录 五个列表 tab
@@ -69,6 +70,11 @@ export default function App() {
   // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
   // (对齐重构前的初始 loading=true 行为)。
   const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false })
+  // 四维筛选（spec 2026-08-11-web-memory-filters §4.3）：跨 tab 共享单一 state；
+  // 空串 = 不筛该维度。facets = /api/facets 下拉选项（null = 尚未加载成功）。
+  const [filter, setFilter] = useState<MemoryFilter>(EMPTY_MEMORY_FILTER)
+  const [facets, setFacets] = useState<Facets | null>(null)
+  const filterRef = useRef<MemoryFilter>(filter)
   const [status, setStatus] = useState<MemsideStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
@@ -79,22 +85,39 @@ export default function App() {
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadMoreRef = useRef<(t: TabKey) => Promise<void>>(async () => {})
 
-  async function refresh(target: TabKey) {
+  async function refresh(target: TabKey, filterOverride?: MemoryFilter) {
     if (!isListTab(target)) return // settings tab 无列表数据流（spec settings-tab §3.2）
+    const f = filterOverride ?? filterRef.current
     setPending((p) => ({ ...p, [target]: true }))
     try {
       if (target === 'discards') {
-        const [pg, st] = await Promise.all([listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus()])
-        setDiscards((d) => mergeRefreshPage(d, pg, (x) => x.id))
+        const [pg, st, fc] = await Promise.all([
+          listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE, project: f.project, category: f.category }),
+          getStatus(),
+          getFacets().catch(() => null), // facets 失败不拖垮列表刷新（spec 失败模式 F6）
+        ])
+        setDiscards((d) => ({ ...mergeRefreshPage(d, pg, (x) => x.id), total: pg.total ?? null }))
         setStatus(st)
+        if (fc) setFacets(fc)
       } else if (target === 'runs') {
         const [pg, st] = await Promise.all([listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus(fetch)])
-        setRuns((r) => mergeRefreshPage(r, pg, (x) => x.distillJobId))
+        setRuns((r) => ({ ...mergeRefreshPage(r, pg, (x) => x.distillJobId), total: r.total }))
         setStatus(st)
       } else {
-        const [pg, st] = await Promise.all([listMemoriesPage(fetch, { status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE }), getStatus()])
-        setMemCache((c) => ({ ...c, [target as MemoryTabKey]: mergeRefreshPage(c[target as MemoryTabKey], pg, (x) => x.id) }))
+        const [pg, st, fc] = await Promise.all([
+          listMemoriesPage(fetch, {
+            status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE,
+            project: f.project, slug: f.slug, category: f.category, valueClass: f.valueClass,
+          }),
+          getStatus(),
+          getFacets().catch(() => null),
+        ])
+        setMemCache((c) => ({
+          ...c,
+          [target as MemoryTabKey]: { ...mergeRefreshPage(c[target as MemoryTabKey], pg, (x) => x.id), total: pg.total ?? null },
+        }))
         setStatus(st)
+        if (fc) setFacets(fc)
       }
       setLoaded((l) => ({ ...l, [target]: true }))
       setError(null)
@@ -115,6 +138,7 @@ export default function App() {
   async function loadMore(target: TabKey) {
     if (!isListTab(target)) return // settings tab 无列表数据流（spec settings-tab §3.2）
     if (pending[target] || loadingMore[target]) return
+    const f = filterRef.current
     const cur = tabPageOf(target)
     const before = nextCursorAfter(cur)
     if (!before) return // hasMore=false 或无游标
@@ -122,14 +146,20 @@ export default function App() {
     setLoadMoreError((e) => ({ ...e, [target]: null }))
     try {
       if (target === 'discards') {
-        const pg = await listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE, before })
-        setDiscards((d) => ({ items: mergeAppend(d.items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+        const pg = await listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE, before, project: f.project, category: f.category })
+        setDiscards((d) => ({ items: mergeAppend(d.items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore, total: d.total }))
       } else if (target === 'runs') {
         const pg = await listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE, before })
-        setRuns((r) => ({ items: mergeAppend(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore }))
+        setRuns((r) => ({ items: mergeAppend(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore, total: r.total }))
       } else {
-        const pg = await listMemoriesPage(fetch, { status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE, before })
-        setMemCache((c) => ({ ...c, [target as MemoryTabKey]: { items: mergeAppend(c[target as MemoryTabKey].items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore } }))
+        const pg = await listMemoriesPage(fetch, {
+          status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE, before,
+          project: f.project, slug: f.slug, category: f.category, valueClass: f.valueClass,
+        })
+        setMemCache((c) => ({
+          ...c,
+          [target as MemoryTabKey]: { items: mergeAppend(c[target as MemoryTabKey].items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore, total: c[target as MemoryTabKey].total },
+        }))
       }
     } catch (e) {
       setLoadMoreError((er) => ({ ...er, [target]: e instanceof Error ? e.message : String(e) }))
@@ -140,6 +170,10 @@ export default function App() {
 
   // loadMoreRef 每渲染同步最新闭包，避免 Observer 回调拿陈旧 state
   useEffect(() => { loadMoreRef.current = loadMore })
+
+  // filterRef 每渲染同步（loadMoreRef 同模式）：轮询 interval 捕获建 effect 那帧
+  // 的 refresh 闭包，闭包读 filter state 会拿陈旧值；一律读 ref（spec 失败模式 F5）。
+  useEffect(() => { filterRef.current = filter })
 
   // 无限滚动哨兵：触底自动追加下一页；切 tab/卸载 disconnect（spec 决策 1）
   useEffect(() => {
@@ -250,6 +284,16 @@ export default function App() {
     await bulkRejectUnevaluatedApi()
     setMemCache((c) => ({ ...c, candidate: emptyPage() }))
     void refresh('candidate')
+  }
+
+  // 筛选变化：四个记忆 tab 缓存全部作废（筛选跨 tab 共享；只清当前 tab 会让
+  // mergeRefreshPage 把旧筛选条目当「掉出第一页的老数据」追加回来，spec 失败模式 F2），
+  // 立即按新筛选重拉，不等下个 3s 轮询周期。
+  function changeFilter(next: MemoryFilter) {
+    setFilter(next)
+    setMemCache({ candidate: emptyPage(), approved: emptyPage(), rejected: emptyPage() })
+    setDiscards(emptyPage())
+    void refresh(tab, next)
   }
 
   // 记忆列表按 createdAt 倒序(newest first)。memCache 在 candidate/approved/rejected
@@ -384,6 +428,44 @@ export default function App() {
         </div>
       ) : null}
 
+      {/* 筛选条（spec 2026-08-11-web-memory-filters §4.3）：四个记忆 tab（含 discards）
+          可用；runs/settings 不渲染。选项来自 /api/facets（随 3s 轮询刷新，新 slug/
+          项目无静默窗口）；facets 未就绪 -> 下拉禁用 + 灰字，不静默。discards tab
+          只渲染有对应列的两维（项目/分类）。 */}
+      {tab === 'candidate' || tab === 'approved' || tab === 'rejected' || tab === 'discards' ? (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16, padding: 10, border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa' }}>
+          <FilterSelect label="项目" disabled={facets === null} value={filter.project}
+            onChange={(v) => changeFilter({ ...filter, project: v })}
+            options={(facets?.projects ?? []).map((p) => ({
+              value: p.value,
+              label: `${projectDisplayName(p.value, (facets?.projects ?? []).map((x) => x.value))} (${p.count})`,
+              title: p.value,
+            }))} />
+          <FilterSelect label="分类" disabled={facets === null} value={filter.category}
+            onChange={(v) => changeFilter({ ...filter, category: v })}
+            options={(facets?.categories ?? []).map((p) => ({ value: p.value, label: `${p.value} (${p.count})` }))} />
+          {tab !== 'discards' ? (
+            <>
+              <FilterSelect label="slug" disabled={facets === null} value={filter.slug}
+                onChange={(v) => changeFilter({ ...filter, slug: v })}
+                options={(facets?.slugs ?? []).map((p) => ({ value: p.value, label: `${p.value} (${p.count})` }))} />
+              <FilterSelect label="价值筐" disabled={facets === null} value={filter.valueClass}
+                onChange={(v) => changeFilter({ ...filter, valueClass: v })}
+                options={(facets?.valueClasses ?? []).map((p) => ({
+                  value: p.value,
+                  label: `${p.value === UNEVALUATED ? '未评估' : VALUE_LABEL[p.value] ?? p.value} (${p.count})`,
+                }))} />
+            </>
+          ) : null}
+          {facets === null ? (
+            <span style={{ fontSize: 12, color: '#888' }}>筛选选项加载失败，稍后自动重试</span>
+          ) : null}
+          {hasActiveFilter(filter) ? (
+            <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* 列表 - 按 tab 渲染对应数据 + 操作;加载中 / 空 / 错误三态不静默 stall */}
       {tab === 'settings' ? (
         <>
@@ -397,7 +479,9 @@ export default function App() {
         <p>加载中…</p>
       ) : tab === 'candidate' ? (
         <>
-          <p>{tabTotalCount(status, 'candidate') ?? memItems.length} 条候选记忆待审</p>
+          <p>{hasActiveFilter(filter)
+          ? `共 ${memCache.candidate.total ?? memItems.length} 条符合当前筛选`
+          : `${tabTotalCount(status, 'candidate') ?? memItems.length} 条候选记忆待审`}</p>
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {(status?.unevaluatedCandidates ?? 0) > 0 ? (
@@ -465,14 +549,22 @@ export default function App() {
             />
           ))}
           {memItems.length === 0 && !showLoading && (
-            <p style={{ color: '#666' }}>
-              暂无候选记忆。结束一个 claude code 会话后,后台会异步提炼(distill 约 15-30s),候选记忆会自动出现在这里。上方状态栏可看后台进度。
-            </p>
+            hasActiveFilter(filter) ? (
+              <p style={{ color: '#666' }}>
+                没有符合当前筛选的记录 <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
+              </p>
+            ) : (
+              <p style={{ color: '#666' }}>
+                暂无候选记忆。结束一个 claude code 会话后,后台会异步提炼(distill 约 15-30s),候选记忆会自动出现在这里。上方状态栏可看后台进度。
+              </p>
+            )
           )}
         </>
       ) : tab === 'approved' ? (
         <>
-          <p>{tabTotalCount(status, 'approved') ?? memItems.length} 条已审批记忆</p>
+          <p>{hasActiveFilter(filter)
+          ? `共 ${memCache.approved.total ?? memItems.length} 条符合当前筛选`
+          : `${tabTotalCount(status, 'approved') ?? memItems.length} 条已审批记忆`}</p>
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}
@@ -483,12 +575,20 @@ export default function App() {
             />
           ))}
           {memItems.length === 0 && !showLoading && (
-            <p style={{ color: '#666' }}>暂无已审批记忆</p>
+            hasActiveFilter(filter) ? (
+              <p style={{ color: '#666' }}>
+                没有符合当前筛选的记录 <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
+              </p>
+            ) : (
+              <p style={{ color: '#666' }}>暂无已审批记忆</p>
+            )
           )}
         </>
       ) : tab === 'rejected' ? (
         <>
-          <p>{tabTotalCount(status, 'rejected') ?? memItems.length} 条已拒绝记忆</p>
+          <p>{hasActiveFilter(filter)
+          ? `共 ${memCache.rejected.total ?? memItems.length} 条符合当前筛选`
+          : `${tabTotalCount(status, 'rejected') ?? memItems.length} 条已拒绝记忆`}</p>
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}
@@ -497,7 +597,13 @@ export default function App() {
             />
           ))}
           {memItems.length === 0 && !showLoading && (
-            <p style={{ color: '#666' }}>暂无已拒绝记忆</p>
+            hasActiveFilter(filter) ? (
+              <p style={{ color: '#666' }}>
+                没有符合当前筛选的记录 <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
+              </p>
+            ) : (
+              <p style={{ color: '#666' }}>暂无已拒绝记忆</p>
+            )
           )}
         </>
       ) : tab === 'runs' ? (
@@ -512,12 +618,20 @@ export default function App() {
         </div>
       ) : (
         <>
-          <p>{tabTotalCount(status, 'discards') ?? discards.items.length} 条 AI 自动拒绝记录</p>
+          <p>{hasActiveFilter(filter)
+          ? `共 ${discards.total ?? discards.items.length} 条符合当前筛选`
+          : `${tabTotalCount(status, 'discards') ?? discards.items.length} 条 AI 自动拒绝记录`}</p>
           {discards.items.map((d) => (
             <DiscardCard key={d.id} d={d} onPromote={() => promote(d.id)} />
           ))}
           {discards.items.length === 0 && !showLoading && (
-            <p style={{ color: '#666' }}>暂无 AI 自动拒绝记录</p>
+            hasActiveFilter(filter) ? (
+              <p style={{ color: '#666' }}>
+                没有符合当前筛选的记录 <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
+              </p>
+            ) : (
+              <p style={{ color: '#666' }}>暂无 AI 自动拒绝记录</p>
+            )
           )}
         </>
       )}
@@ -1279,5 +1393,29 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * 筛选条下拉（spec 2026-08-11-web-memory-filters §4.3）：首项「全部」= 不筛
+ * 该维度；选项来自 /api/facets 动态生成带计数。
+ */
+function FilterSelect({ label, value, onChange, options, disabled }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: { value: string; label: string; title?: string }[]
+  disabled?: boolean
+}) {
+  return (
+    <label style={{ fontSize: 13, color: '#444' }}>
+      {label}{' '}
+      <select value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} style={{ fontSize: 13 }}>
+        <option value="">全部</option>
+        {options.map((o) => (
+          <option key={o.value} value={o.value} title={o.title}>{o.label}</option>
+        ))}
+      </select>
+    </label>
   )
 }

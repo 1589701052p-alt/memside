@@ -827,3 +827,46 @@ input（Bash 命令、Grep pattern 等）仍被整体丢弃--distiller 看到工
 - events 表体积增速变化（toolCall 入快照，每条 tool turn 至多 +300 字）；
 - 蒸馏候选中 evidence 引自命令调用（`调用:` 行）的质量抽样；
 - distill runs 抽样：toolCall 占蒸馏输入的比例。
+
+## Web 记忆列表多维筛选（2026-08-11）
+
+诊断：分页架构（每页 20 条、服务端游标）下客户端一次只持有一页数据，
+跨多项目的记忆（live DB 3135 条候选/已拒）无法定位——客户端侧筛选
+必错，全部下沉服务端。设计 spec / 计划见 `docs/superpowers/specs|plans/
+2026-08-11-web-memory-filters*`。
+
+1. **四维服务端筛选**（记忆 tab）：项目（source_cwd 精确匹配）、slug
+   （subject_slug）、分类（title 的 `[category:xxx]` 前缀 instr 匹配，
+   带闭括号防 `arch` 误配 `architecture`；facets 数据驱动含幻觉值）、
+   价值六筐（value_class，`unevaluated` 哨兵筛 NULL）。四个记忆 tab
+   （候选/已审批/已拒绝/AI自动拒绝）每维单选下拉，跨维 AND 组合；
+   discards tab 两维（项目/分类——表无 slug/value_class 列）。
+2. **新 `GET /api/facets`**：全局口径（不分 tab），项目/分类 UNION
+   memories+memory_discards 两表（丢弃行永不进 memories 表），slug 仅
+   memories 非空值，value_class 含未评估桶；count 降序 + 值字典序，
+   cap 200；随 3s 轮询刷新。
+3. **分页响应加 total**（`PageWithTotal`）：筛选激活时列表头显示服务端
+   COUNT 诚实计数，不是前端已加载条数。
+4. **改筛选 = 四个记忆 tab 缓存全部作废**——`mergeRefreshPage` 会追加
+   不在页 1 的旧条目，不作废则旧筛选条目混进新列表；**filterRef** 镜像
+   最新 filter，防 3s 轮询 setInterval 闭包读旧值（loadMoreRef 同模式）。
+5. 无 schema 迁移、注入链路 / distiller / scheduler / 状态机零改动；
+   筛选参数仅分页路径（带 limit）识别，旧无 limit 全量路径不变。
+
+执行：subagent-driven（7 实现 task 各 implementer + reviewer，全部
+Approved；deferred minor 见 sdd ledger）。`bun run typecheck && bun test`
+860/860 全绿。
+
+### 终审 deferred minor（非阻塞）
+
+1. pure-category / store-filter / store-facets 测试文件结尾无换行符
+   （cosmetic，pre-existing 风格延续）。
+2. `projectDisplayName` 混合分隔符/盘符根升级路径无测试（brief 未要求，
+   评审判定非缺陷）。
+3. filter conds 为 `any[]`（可用 drizzle `SQL[]` 收紧；与 store.ts 原生
+   风格一致，行为无差）。
+4. `listFacets` categories 全量 title 载入 JS 解析（超大表时的规模上限，
+   现量级无压力）。
+5. 空串 query 参数无显式测试（代码经 truthiness 正确处理）。
+6. 「筛选选项加载失败」文案在首次 facets 正常加载期间也显示（brief 既定
+   JSX；失败与加载中同一降级表现）。
