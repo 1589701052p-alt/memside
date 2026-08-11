@@ -695,6 +695,7 @@ test('e2e incremental: same-session second Stop distills only new turns', async 
   // 断言只锁 Transcript 节，避免把「正确上下文」误判为重复蒸馏；核心意图（只蒸馏
   // 新增 D/E、偏移推进到 5）不变。
   const distillPrompt = distillInputTurns[0]!
+  expect(distillPrompt).toContain('Transcript:')
   const transcriptSection = distillPrompt.split('Transcript:')[1] ?? distillPrompt
   expect(transcriptSection).toContain('turn D (new)')
   expect(transcriptSection).toContain('turn E (new)')
