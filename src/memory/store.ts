@@ -4,6 +4,7 @@ import type { DbClient } from '@/db/client'
 import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations } from '@/db/schema'
 import {
   canTransition,
+  categoryFromTitle,
   normalizeSubjectSlug,
   type InjectableMemorySet,
   type MemoryScope,
@@ -897,6 +898,68 @@ export async function listDistillRunsPage(
     items: await attachRunJobMeta(db, pageRows),
     hasMore,
     nextCursor: hasMore && last ? { ts: last.ts, id: last.distillJobId } : null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 四维筛选下拉选项（spec 2026-08-11-web-memory-filters §4.1）
+// ---------------------------------------------------------------------------
+
+export interface FacetValue { value: string; count: number }
+export interface Facets {
+  projects: FacetValue[]
+  categories: FacetValue[]
+  slugs: FacetValue[]
+  valueClasses: FacetValue[]
+}
+export const FACET_LIST_CAP = 200
+
+function sortFacets(m: Map<string, number>): FacetValue[] {
+  return [...m.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0))
+    .slice(0, FACET_LIST_CAP)
+}
+
+/**
+ * 四维筛选的下拉选项：全局口径（不按 tab/status 切分，决策 D2）；项目与分类
+ * UNION memories+discards 两表（决策 D1：discard 行不在 memories 表）；
+ * value_class NULL 聚成 VALUE_CLASS_UNEVALUATED 桶。各组 count 降序、
+ * 同 count 按 value 字母序，截 FACET_LIST_CAP。
+ */
+export async function listFacets(db: DbClient): Promise<Facets> {
+  const bump = (m: Map<string, number>, v: string, n: number) => m.set(v, (m.get(v) ?? 0) + n)
+
+  const projects = new Map<string, number>()
+  const memProj = await db.select({ v: memories.sourceCwd, n: sql<number>`COUNT(*)` })
+    .from(memories).where(isNotNull(memories.sourceCwd)).groupBy(memories.sourceCwd).all()
+  const disProj = await db.select({ v: memoryDiscards.sourceCwd, n: sql<number>`COUNT(*)` })
+    .from(memoryDiscards).where(isNotNull(memoryDiscards.sourceCwd)).groupBy(memoryDiscards.sourceCwd).all()
+  for (const r of [...memProj, ...disProj]) if (r.v) bump(projects, r.v, Number(r.n))
+
+  const cats = new Map<string, number>()
+  const memTitles = await db.select({ t: memories.title }).from(memories).all()
+  const disTitles = await db.select({ t: memoryDiscards.title }).from(memoryDiscards).all()
+  for (const r of [...memTitles, ...disTitles]) {
+    const c = categoryFromTitle(r.t)
+    if (c) bump(cats, c, 1)
+  }
+
+  const slugs = new Map<string, number>()
+  const slugRows = await db.select({ v: memories.subjectSlug, n: sql<number>`COUNT(*)` })
+    .from(memories).where(isNotNull(memories.subjectSlug)).groupBy(memories.subjectSlug).all()
+  for (const r of slugRows) if (r.v) bump(slugs, r.v, Number(r.n))
+
+  const vcs = new Map<string, number>()
+  const vcRows = await db.select({ v: memories.valueClass, n: sql<number>`COUNT(*)` })
+    .from(memories).groupBy(memories.valueClass).all()
+  for (const r of vcRows) bump(vcs, r.v ?? VALUE_CLASS_UNEVALUATED, Number(r.n))
+
+  return {
+    projects: sortFacets(projects),
+    categories: sortFacets(cats),
+    slugs: sortFacets(slugs),
+    valueClasses: sortFacets(vcs),
   }
 }
 
