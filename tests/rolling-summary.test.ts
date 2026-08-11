@@ -1,8 +1,10 @@
 // tests/rolling-summary.test.ts
+// 会话事实账本回归锁（spec 2026-08-11-digest-ledger-redesign §9）：纯函数集
+// （sliceBudget/isLineStructured/sanitizeLlmLines/prompt 中立性）+ updateSessionLedger
+// 编排（直追/压缩/超配额裁剪/全局留存/prose 重整/失败路径/性质断言）。
 import { describe, test, expect } from 'bun:test'
 import { DIGEST_MAX_CHARS, DIGEST_LINE_MAX_CHARS } from '@/memory/contextDigest'
 import {
-  ROLLING_SUMMARY_SYSTEM_PROMPT, mergeRollingSummary,
   SLICE_BUDGET_MIN, DIRECT_APPEND_MAX_CHARS,
   sliceBudget, isLineStructured, sanitizeLlmLines, sliceDigestSystemPrompt,
   updateSessionLedger,
@@ -11,47 +13,6 @@ import type { TranscriptTurn } from '@/memory/pure'
 import type { LLMCall } from '@/llm'
 
 const t = (role: TranscriptTurn['role'], content: string): TranscriptTurn => ({ role, content })
-
-describe('mergeRollingSummary（mock LLM）', () => {
-  test('prior=null 首建：prompt 不含旧摘要段，返回新摘要', async () => {
-    let seen = ''
-    const callLLM: LLMCall = async (_sys, user) => { seen = user; return '摘要v1' }
-    const out = await mergeRollingSummary(null, [t('user', '讨论 bun 测试')], callLLM)
-    expect(out.digest).toBe('摘要v1')
-    expect(out.truncated).toBe(false)
-    expect(seen).not.toContain('旧摘要')
-    expect(seen).toContain('讨论 bun 测试')
-  })
-  test('增量合并：prompt 同时含旧摘要与新切片', async () => {
-    let seen = ''
-    const callLLM: LLMCall = async (_sys, user) => { seen = user; return '合并后摘要' }
-    const out = await mergeRollingSummary('旧摘要内容', [t('assistant', '新进展')], callLLM)
-    expect(out.digest).toBe('合并后摘要')
-    expect(seen).toContain('旧摘要内容')
-    expect(seen).toContain('新进展')
-  })
-  test('超长产出被代码强制截断且 truncated=true（不信任 LLM，spec §4.3/§5 #8）', async () => {
-    const callLLM: LLMCall = async () => 'x'.repeat(DIGEST_MAX_CHARS + 500)
-    const out = await mergeRollingSummary(null, [t('user', 'a')], callLLM)
-    expect(out.digest.length).toBe(DIGEST_MAX_CHARS)
-    expect(out.truncated).toBe(true)
-  })
-  test('空白产出视为失败向外抛（调用方降级保留旧摘要）', async () => {
-    const callLLM: LLMCall = async () => '   '
-    await expect(mergeRollingSummary('旧', [t('user', 'a')], callLLM)).rejects.toThrow()
-  })
-  test('LLM 抛错向外传播（catch 不得吞）', async () => {
-    const callLLM: LLMCall = async () => { throw new Error('ark 502') }
-    await expect(mergeRollingSummary('旧', [t('user', 'a')], callLLM)).rejects.toThrow('ark 502')
-  })
-})
-
-describe('ROLLING_SUMMARY_SYSTEM_PROMPT 中立性（项目记忆：判定 prompt 禁倾向性措辞）', () => {
-  test('只压缩不评判：无 keep/discard/保留/丢弃类指令词', () => {
-    expect(ROLLING_SUMMARY_SYSTEM_PROMPT).not.toMatch(/keep|discard|保留重要|丢弃|取舍/i)
-    expect(ROLLING_SUMMARY_SYSTEM_PROMPT.length).toBeGreaterThan(50)
-  })
-})
 
 describe('sliceBudget（切片压缩配额，spec §5.2）', () => {
   test('下限钳制 SLICE_BUDGET_MIN', () => {
@@ -135,7 +96,7 @@ describe('updateSessionLedger 编排（mock LLM，spec §4.1）', () => {
   })
   test('全局预算裁剪：追加后超 6000 -> 丢最旧行，truncated=false（设计内留存，spec §7 #3）', async () => {
     const prior = Array.from({ length: 30 }, (_, i) => `旧-${String(i).padStart(2, '0')} ` + 'p'.repeat(290)).join('\n')
-    // 30 行 × 296 字 + 29 换行 = 8909 字；裁剪后 ≤6000
+    // 30 行 × 295 字 + 29 换行 = 8879 字；裁剪后 ≤6000
     const callLLM: LLMCall = async () => '新事实'
     const out = await updateSessionLedger(prior, bigSlice(), callLLM)
     expect(out.digest.length).toBeLessThanOrEqual(DIGEST_MAX_CHARS)

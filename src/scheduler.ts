@@ -12,8 +12,8 @@ import { judgeValue, type ValueClass, type ValueVerdict } from '@/memory/valueFi
 import { judgeValueAgentic } from '@/memory/agentJudge'
 import { DEFAULT_JUDGE_CONFIG, type JudgeConfig } from '@/memory/judgeConfig'
 import { computeSliceSignal, isTrivial, isStale } from '@/memory/threshold'
-import { buildDeterministicDigest, DIGEST_MAX_CHARS } from '@/memory/contextDigest'
-import { mergeRollingSummary } from '@/memory/rollingSummary'
+import { buildDeterministicDigest } from '@/memory/contextDigest'
+import { updateSessionLedger } from '@/memory/rollingSummary'
 import type { AgentStep } from '@/memory/agentLoop'
 import type { MemoryInput, Memory } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
@@ -441,17 +441,19 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         try { await setSessionOffset(db, job.sessionId, fullLength) }
         catch (e) { console.warn('memside: setSessionOffset failed', e) }
       }
-      // 滚动摘要维护（spec §4.7）：distill 成功（未抛错）+ 质量模式 + 会话 job（非
-      // subagent）才把本次切片并入 session 滚动摘要。LLM/写库失败只降级落表
-      // （digest_llm_failed），不影响 job 已 done 的事实。截断由代码强制并落
-      // digest_truncated（spec §5 #8）。
+      // 滚动账本维护（spec 2026-08-11-digest-ledger-redesign §4.1）：distill 成功（未抛错）+
+      // 质量模式 + 会话 job（非 subagent）才把本次切片并入会话事实账本。LLM/写库失败只降级
+      // 落表（digest_llm_failed），不影响 job 已 done 的事实。切片压缩超配额由代码按行裁剪并
+      // 落 digest_truncated；全局预算由 trimOldestLines 丢最旧整行强制，属设计内留存，不记降级。
       if (!callThrew && judgeCfg.mode === 'quality' && job.sessionId && !job.sourceAgentId) {
         try {
           const prior = await getSessionDigest(db, job.sessionId)
-          const { digest: merged, truncated } = await mergeRollingSummary(prior?.digest ?? null, newTurns, deps.callLLM)
-          await upsertSessionDigest(db, job.sessionId, merged, 'llm')
-          if (truncated) {
-            await logDegradation(db, { kind: 'digest_truncated', detail: `LLM 摘要超 ${DIGEST_MAX_CHARS} 字被代码强制截断`, distillJobId: job.id, sessionId: job.sessionId })
+          const { digest: merged, truncated, overshoot } = await updateSessionLedger(prior?.digest ?? null, newTurns, deps.callLLM)
+          if (merged !== (prior?.digest ?? '')) {
+            await upsertSessionDigest(db, job.sessionId, merged, 'llm')
+          }
+          if (truncated && overshoot) {
+            await logDegradation(db, { kind: 'digest_truncated', detail: `切片压缩产出 ${overshoot.actual} 字超配额 ${overshoot.budget} 字，按行裁剪保留最新`, distillJobId: job.id, sessionId: job.sessionId })
           }
         } catch (e) {
           await logDegradation(db, { kind: 'digest_llm_failed', detail: String(e), distillJobId: job.id, sessionId: job.sessionId })

@@ -8,7 +8,7 @@ import { openDb, type DbClient } from '@/db/client'
 import { memoryDistillJobs, memoryDistillEvents, memoryDistillRuns, memories } from '@/db/schema'
 import { eq } from 'drizzle-orm'
 import { tick, sweepWaitingJobs, type TickDeps } from '@/scheduler'
-import { createCandidate, markFlush, upsertSessionEvent, getSessionDigest, setSessionOffset } from '@/memory/store'
+import { createCandidate, markFlush, upsertSessionEvent, getSessionDigest, setSessionOffset, upsertSessionDigest } from '@/memory/store'
 import { SESSION_FLUSH_TTL_MS } from '@/memory/threshold'
 import type { LLMCall } from '@/llm'
 import { mkdtempSync } from 'node:fs'
@@ -166,13 +166,31 @@ describe('tick 接线：priorContext/approvedTitles（spec §4.7）', () => {
   })
 })
 
-describe('滚动摘要接线（质量模式，spec §4.7）', () => {
-  test('distill 成功后 mergeRollingSummary 并入并 upsert', async () => {
+describe('滚动账本接线（质量模式，spec 2026-08-11-digest-ledger-redesign §4.1/§5.4）', () => {
+  // 大切片 fixture：5 长 turn -> 渲染后 1534 字 ≥ 1200 -> 走 LLM 压缩路径。
+  const longTurns = () => Array.from({ length: 5 }, (_, i) => ({ role: 'user' as const, content: `topic-${i} ` + 'x'.repeat(400) }))
+
+  test('distill 成功后小切片直追入账本（免 digest LLM 调用）', async () => {
     let n = 0
-    const dualLLM: LLMCall = async () => {
-      n += 1
-      if (n === 1) return JSON.stringify({ candidates: [] }) // distill
-      return '滚动摘要v1' // mergeRollingSummary
+    const spyLLM: LLMCall = async () => { n += 1; return JSON.stringify({ candidates: [] }) }
+    await db.insert(memoryDistillJobs).values({
+      id: 'j1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/proj',
+      sessionId: 's1', status: 'pending', attempts: 0, nextRunAt: 0, createdAt: 1, finishedAt: null,
+    })
+    const deps = tickDeps(spyLLM)
+    deps.loadJudgeConfig = () => QUALITY
+    deps.loadTranscript = async () => ({ turns: [{ role: 'user', content: '新内容' }], fullLength: 1, prefixTurns: [] })
+    await tick(db, deps)
+    expect(n).toBe(1) // 仅 distill；小切片直追不调 digest LLM
+    expect((await getSessionDigest(db, 's1'))?.digest).toBe('USER: 新内容')
+  })
+
+  test('大切片走 LLM 压缩；产出超配额 -> 按行裁剪 + digest_truncated 落表（含配额/实际）', async () => {
+    const dualLLM: LLMCall = async (sys) => {
+      if (sys.includes('compressor')) {
+        return Array.from({ length: 10 }, (_, i) => `fact-${i} ` + 'z'.repeat(190)).join('\n') // 1979 > budget 767
+      }
+      return JSON.stringify({ candidates: [] })
     }
     await db.insert(memoryDistillJobs).values({
       id: 'j1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/proj',
@@ -180,13 +198,47 @@ describe('滚动摘要接线（质量模式，spec §4.7）', () => {
     })
     const deps = tickDeps(dualLLM)
     deps.loadJudgeConfig = () => QUALITY
-    deps.loadTranscript = async () => ({ turns: [{ role: 'user', content: '新内容' }], fullLength: 1, prefixTurns: [] })
+    deps.loadTranscript = async () => ({ turns: longTurns(), fullLength: 5, prefixTurns: [] })
     await tick(db, deps)
-    expect((await getSessionDigest(db, 's1'))?.digest).toBe('滚动摘要v1')
+    const degs = await db.query.memoryDegradations.findMany()
+    const tr = degs.find((d) => d.kind === 'digest_truncated')
+    expect(tr).toBeDefined()
+    expect(tr!.detail).toContain('超配额 767')
+    expect(tr!.detail).toContain('1979')
+    const dig = await getSessionDigest(db, 's1')
+    expect(dig!.digest).toContain('fact-9')      // 最新保留
+    expect(dig!.digest).not.toContain('fact-0')  // 最旧被裁
   })
-  test('mergeRollingSummary 抛错 -> digest_llm_failed 落表 + job 仍 done', async () => {
-    // 判别滚动摘要调用：ROLLING_SUMMARY_SYSTEM_PROMPT 含 'compressor'
-    // （'conversation-digest compressor'），distill 系统 prompt 不含。
+
+  test('账本追加后超全局预算 -> 丢最旧行达标，不记 digest_truncated（设计内留存）', async () => {
+    // 20 行 × 299 字 + 19 换行 = 5999 字，行式（每行 ≤400）；追加分片后超 6000。
+    const prior = Array.from({ length: 20 }, (_, i) => `old-${String(i).padStart(2, '0')} ` + 'p'.repeat(292)).join('\n')
+    await upsertSessionDigest(db, 's1', prior, 'llm')
+    let digestLLMCalled = false
+    const spyLLM: LLMCall = async (sys) => {
+      if (sys.includes('compressor')) digestLLMCalled = true
+      return JSON.stringify({ candidates: [] })
+    }
+    await db.insert(memoryDistillJobs).values({
+      id: 'j1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/proj',
+      sessionId: 's1', status: 'pending', attempts: 0, nextRunAt: 0, createdAt: 1, finishedAt: null,
+    })
+    const deps = tickDeps(spyLLM)
+    deps.loadJudgeConfig = () => QUALITY
+    deps.loadTranscript = async () => ({ turns: [{ role: 'user', content: '新增' }], fullLength: 1, prefixTurns: [] })
+    await tick(db, deps)
+    expect(digestLLMCalled).toBe(false) // 小切片直追
+    const dig = await getSessionDigest(db, 's1')
+    expect(dig!.digest.length).toBeLessThanOrEqual(6000)
+    expect(dig!.digest).toContain('USER: 新增')
+    expect(dig!.digest).not.toContain('old-00') // 最旧整行丢弃
+    const degs = await db.query.memoryDegradations.findMany()
+    expect(degs.some((d) => d.kind === 'digest_truncated')).toBe(false)
+  })
+
+  test('digest LLM 抛错 -> digest_llm_failed 落表 + job 仍 done', async () => {
+    // 判别 digest 调用：sliceDigestSystemPrompt 含 'compressor'，distill 系统 prompt 不含。
+    // 必须用大切片：小切片直追不调 digest LLM，抛错路径不可达。
     const failLLM: LLMCall = async (sys) => {
       if (sys.includes('compressor')) throw new Error('ark 502')
       return JSON.stringify({ candidates: [] })
@@ -197,7 +249,7 @@ describe('滚动摘要接线（质量模式，spec §4.7）', () => {
     })
     const deps = tickDeps(failLLM)
     deps.loadJudgeConfig = () => QUALITY
-    deps.loadTranscript = async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] })
+    deps.loadTranscript = async () => ({ turns: longTurns(), fullLength: 5, prefixTurns: [] })
     await tick(db, deps)
     const [j] = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'j1'))
     expect(j!.status).toBe('done')

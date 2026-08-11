@@ -75,7 +75,7 @@ export function degradationKindLabel(kind: string): string {
     digest_read_failed: '摘要读取失败',
     titles_query_failed: '已审批查询失败',
     sweep_error: 'sweep异常',
-    digest_truncated: '摘要超长截断',
+    digest_truncated: '摘要压缩超限',
   }
   return map[kind] ?? kind
 }

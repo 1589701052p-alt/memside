@@ -685,17 +685,22 @@ test('e2e incremental: same-session second Stop distills only new turns', async 
   })
   // 第二次：偏移已从 3 推进到 5（核心不可让步断言之一）
   expect(await getSessionOffset(db, 'sess-e2e')).toBe(5)
-  // 第二次蒸馏的 prompt 只含新增 turn D/E，不含旧 turn A/B/C。
+  // 第二次蒸馏的 Transcript 只含新增 turn D/E，不含旧 turn A/B/C。
   // 注意取 [0]：tick 内 LLM 调用顺序固定为 distill(1次) -> dedup(短路不调)
   // -> judgeValue(最多 3 次重试)。distill 是第一次调用，其 user prompt 由
   // distiller.renderUserPrompt 拼成 `[user] ${content}`，含完整 transcript。
   // 取末次会是 valueFilter 的 retry prompt（含候选 title 而非 transcript），不含 turns。
+  // 账本重构（spec 2026-08-11-digest-ledger-redesign §4.1）：首停小切片直追把 turn
+  // A/B/C 原样入账本，二停 priorContext 来自该账本，背景节（## 背景）合法含旧 turn。
+  // 断言只锁 Transcript 节，避免把「正确上下文」误判为重复蒸馏；核心意图（只蒸馏
+  // 新增 D/E、偏移推进到 5）不变。
   const distillPrompt = distillInputTurns[0]!
-  expect(distillPrompt).toContain('turn D (new)')
-  expect(distillPrompt).toContain('turn E (new)')
-  expect(distillPrompt).not.toContain('turn A')
-  expect(distillPrompt).not.toContain('turn B')
-  expect(distillPrompt).not.toContain('turn C')
+  const transcriptSection = distillPrompt.split('Transcript:')[1] ?? distillPrompt
+  expect(transcriptSection).toContain('turn D (new)')
+  expect(transcriptSection).toContain('turn E (new)')
+  expect(transcriptSection).not.toContain('turn A')
+  expect(transcriptSection).not.toContain('turn B')
+  expect(transcriptSection).not.toContain('turn C')
 })
 
 test('e2e incremental: same-session second Stop with no new turns skips distill', async () => {

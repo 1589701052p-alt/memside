@@ -23,7 +23,7 @@ describe('degradationKindLabel', () => {
     expect(degradationKindLabel('digest_read_failed')).toBe('摘要读取失败')
     expect(degradationKindLabel('titles_query_failed')).toBe('已审批查询失败')
     expect(degradationKindLabel('sweep_error')).toBe('sweep异常')
-    expect(degradationKindLabel('digest_truncated')).toBe('摘要超长截断')
+    expect(degradationKindLabel('digest_truncated')).toBe('摘要压缩超限')
     expect(degradationKindLabel('whatever')).toBe('whatever')
   })
 })
