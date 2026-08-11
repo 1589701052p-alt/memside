@@ -87,7 +87,7 @@ test('listMemoriesPage: status inArray 过滤', async () => {
 
 test('listMemoriesPage: 空表 -> 空页无游标', async () => {
   const page = await listMemoriesPage(db, { statuses: ['candidate'], limit: 50 })
-  expect(page).toEqual({ items: [], hasMore: false, nextCursor: null })
+  expect(page).toEqual({ items: [], hasMore: false, nextCursor: null, total: 0 })
 })
 
 // --- Task 2: listDiscardsPage / listDistillRunsPage -------------------------
@@ -118,7 +118,7 @@ test('listDiscardsPage: 同毫秒批量翻页不重不漏 + hasMore', async () =
 })
 
 test('listDiscardsPage: 空表 -> 空页', async () => {
-  expect(await listDiscardsPage(db, { limit: 50 })).toEqual({ items: [], hasMore: false, nextCursor: null })
+  expect(await listDiscardsPage(db, { limit: 50 })).toEqual({ items: [], hasMore: false, nextCursor: null, total: 0 })
 })
 
 async function seedRun(jobId: string) {
