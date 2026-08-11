@@ -939,3 +939,28 @@ fix wave 对齐 spec §4.5 按值措辞后 scoped re-review ADDRESSED）。plan 
 5. 筛选标题 div 无 marginBottom，间距由说明行承担（spec §7.1 既定结构，视觉 polish）。
 6. 同一卡片两个「出处：」并存（origin chip + evidence 行，spec §6.1 已批准设计；后续
    若用户困惑可考虑 origin chip 改名「来源类型」）。
+
+## 滚动摘要职责反转：会话事实账本（2026-08-11）
+
+实测 4/4 `digest_truncated` 连环降级（单 session）+ 复现证明超预算是系统性偏差
+（11840 字输入 -> 3834 字产出，128% of budget，stop_reason=end_turn）。根治：
+LLM 只做按片压缩（配额 = 渲染长度/2，钳制 [600, 3000]），全局预算 6000 与留存
+（丢最旧、保最近，trimOldestLines 两模式共用）收归代码。spec / plan 见
+`docs/superpowers/specs|plans/2026-08-11-digest-ledger-redesign*`。
+
+1. `DIGEST_MAX_CHARS` 3000 -> 6000（用户确认；蒸馏 prompt 背景节占比增量 ~5%）。
+2. `contextDigest.ts` 抽出 `renderDigestLines` / `trimOldestLines`；
+   `buildDeterministicDigest` 重组，逐字节不变（既有测试为回归锁）。
+3. `rollingSummary.ts` 重写为 `updateSessionLedger`：小切片（渲染 <1200 字）直追
+   免 LLM；大切片 LLM 压缩（prompt 附账本最后 ≤5 行衔接）；产出超配额按行裁最旧
+   + `digest_truncated`（detail 含 actual/budget 数值）；追加后全局裁剪不记降级。
+4. 遗留 prose 摘要 `isLineStructured` 探测，首次合并一次性重整（满额预算），无迁移脚本。
+5. 删除 `mergeRollingSummary` / `ROLLING_SUMMARY_SYSTEM_PROMPT`；UI 标签改「摘要压缩超限」。
+6. `bun run typecheck && bun test` 918/918 全绿（75 files，2427 expect() calls）。
+
+### 上线后观测（硬要求，结论回填本节）
+
+- `digest_truncated` 24h 计数（预期近零；仍高频 -> sliceBudget 比例偏紧，纯函数一行可调）；
+- 账本长度分布（length(digest) 贴 6000 频率，评估预算再调）；
+- 跨片指代质量：候选与既有记忆重复率是否因「只看切片 + 尾 5 行衔接」上升；
+- 对照 2026-08-09 观测清单的 degradations kind 分布变化。
