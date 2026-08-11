@@ -333,7 +333,7 @@ test('listDiscardsPage: project/category 筛选参数拼在游标参数之后', 
   expect(called).toBe(`/api/discards?limit=20&project=${encodeURIComponent('C:/p/a')}&category=trap`)
 })
 
-test('getFacets: GET /api/facets 解析形状', async () => {
+test('getFacets: GET /api/facets?tab= 按 tab 圈定', async () => {
   let called = ''
   const fetchFn = (async (url: string) => {
     called = url
@@ -341,8 +341,8 @@ test('getFacets: GET /api/facets 解析形状', async () => {
       projects: [{ value: 'C:/x', count: 2 }], categories: [], slugs: [], valueClasses: [],
     }), { status: 200 })
   }) as any
-  const f = await getFacets(fetchFn)
-  expect(called).toBe('/api/facets')
+  const f = await getFacets(fetchFn, 'approved')
+  expect(called).toBe('/api/facets?tab=approved')
   expect(f.projects[0]).toEqual({ value: 'C:/x', count: 2 })
 })
 

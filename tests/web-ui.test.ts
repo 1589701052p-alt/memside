@@ -359,10 +359,13 @@ test('App.tsx 设置 tab 存在 + 区块恰一处挂载 + 数据流短路 (sourc
   expect((s.match(/isListTab\(/g) ?? []).length).toBeGreaterThanOrEqual(5)
 })
 
-// 2026-08-11 四维筛选（spec web-memory-filters §4.3）：筛选条 + 缓存作废 +
-// filterRef 防轮换闭包 + 筛选态空态/计数。React 组件不单测，源码文本断言锁
-// 接线锚点，refactor 删除即变红。
-test('App.tsx wires memory list filters (source text)', () => {
+// 2026-08-11 四维筛选按 tab 圈定（spec per-tab-memory-filters §4.4）：per-tab 独立
+// 筛选态 + per-tab facets 缓存 + 收窄缓存作废 + filterRef 防轮换闭包 + 筛选态空态/计数。
+// React 组件不单测，源码文本断言锁接线锚点，refactor 删除即变红。
+// 注意：web-memory-filters 时代的「四缓存全作废」锚点（setMemCache({candidate:…,
+// approved:…, rejected:…})）本轮**有意移除**——per-tab 独立态下其余 tab 缓存对应
+// 各自筛选，changeFilter 只作废当前 tab（spec per-tab §4.4-4），不要当回归改回去。
+test('App.tsx wires per-tab memory list filters (source text)', () => {
   expect(src).toContain('清除筛选')
   expect(src).toContain('没有符合当前筛选的记录')
   expect(src).toContain('符合当前筛选')
@@ -372,9 +375,12 @@ test('App.tsx wires memory list filters (source text)', () => {
   expect(src).toContain('getFacets')
   expect(src).toContain('projectDisplayName')
   expect(src).toContain('FilterSelect')
-  // 缓存作废（spec 失败模式 F2）：改筛选必须重置候选/已审批/已拒绝三个记忆 tab
-  // 缓存 + discards 缓存，否则 mergeRefreshPage 把旧筛选条目当「掉出第一页的老数据」
-  // 追加回新列表。refactor 收窄作废范围（只清当前 tab）即红。
-  expect(src).toContain('setMemCache({ candidate: emptyPage(), approved: emptyPage(), rejected: emptyPage() })')
+  // per-tab 独立筛选态 + per-tab facets 缓存（推翻跨 tab 共享）
+  expect(src).toContain('Record<FacetTab, MemoryFilter>')
+  expect(src).toContain('facetsByTab')
+  expect(src).toContain('isFilterTab')
+  // 缓存作废收窄到当前 tab（spec per-tab §4.4-4 / 失败模式 F2）：改筛选只清本 tab，
+  // 其余 tab 缓存对应各自筛选不受影响。refactor 改回全量作废或漏清当前 tab 即红。
+  expect(src).toContain('setMemCache((c) => ({ ...c, [tab]: emptyPage() }))')
   expect(src).toContain('setDiscards(emptyPage())')
 })
