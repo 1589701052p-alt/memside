@@ -277,11 +277,28 @@ export async function getRunDegradations(
   return (await res.json()) as { degradations: { id: string; ts: number; kind: string; detail: string | null }[] }
 }
 
+/** valueClass 筛「未评估」的 URL 哨兵值（= value_class IS NULL），与 store 常量同值。 */
+export const UNEVALUATED = 'unevaluated'
+
+export interface FacetValue { value: string; count: number }
+export interface Facets {
+  projects: FacetValue[]
+  categories: FacetValue[]
+  slugs: FacetValue[]
+  valueClasses: FacetValue[]
+}
+
+/** GET /api/facets — 四维筛选下拉选项（全局口径，随 3s 轮询刷新）。 */
+export async function getFacets(fetchFn: FetchLike = fetch): Promise<Facets> {
+  const res = await fetchFn('/api/facets')
+  return (await res.json()) as Facets
+}
+
 // --- 五 tab 无限滚动分页 client（spec 2026-08-07）--------------------------
 // 统一分页形状；旧 daemon 不认识 limit 时返回 { items } 旧形状，hasMore/nextCursor
 // 缺省降级 false/null（一页装全部，不崩）。
 
-export interface PageDto<T> { items: T[]; hasMore: boolean; nextCursor: { ts: number; id: string } | null }
+export interface PageDto<T> { items: T[]; hasMore: boolean; nextCursor: { ts: number; id: string } | null; total: number | null }
 
 export const WEB_PAGE_SIZE = 20
 
@@ -303,12 +320,13 @@ async function parsePage<T>(res: Response): Promise<PageDto<T>> {
     items: (data.items ?? []) as T[],
     hasMore: data.hasMore ?? false,
     nextCursor: data.nextCursor ?? null,
+    total: data.total ?? null, // 旧 daemon 无 total -> null，UI 降级回已加载条数
   }
 }
 
 export async function listMemoriesPage(
   fetchFn: FetchLike = fetch,
-  opts: { status: string } & PageOpts = { status: '' },
+  opts: { status: string; project?: string; slug?: string; category?: string; valueClass?: string } & PageOpts = { status: '' },
 ): Promise<PageDto<MemoryItem>> {
   const p = pageParams(opts)
   p.set('status', opts.status)
@@ -316,13 +334,22 @@ export async function listMemoriesPage(
   const qs = new URLSearchParams()
   qs.set('status', opts.status)
   for (const [k, v] of p) qs.set(k, v)
+  // 筛选参数在分页参数之后，非空才拼入（空串 = 不筛该维度）
+  if (opts.project) qs.set('project', opts.project)
+  if (opts.slug) qs.set('slug', opts.slug)
+  if (opts.category) qs.set('category', opts.category)
+  if (opts.valueClass) qs.set('valueClass', opts.valueClass)
   return parsePage<MemoryItem>(await fetchFn(`/api/memories?${qs}`))
 }
 
 export async function listDiscardsPage(
-  fetchFn: FetchLike = fetch, opts: PageOpts = {},
+  fetchFn: FetchLike = fetch,
+  opts: { project?: string; category?: string } & PageOpts = {},
 ): Promise<PageDto<DiscardItem>> {
-  return parsePage<DiscardItem>(await fetchFn(`/api/discards?${pageParams(opts)}`))
+  const qs = pageParams(opts)
+  if (opts.project) qs.set('project', opts.project)
+  if (opts.category) qs.set('category', opts.category)
+  return parsePage<DiscardItem>(await fetchFn(`/api/discards?${qs}`))
 }
 
 export async function listDistillRunsPage(
