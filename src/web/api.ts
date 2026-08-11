@@ -288,9 +288,13 @@ export interface Facets {
   valueClasses: FacetValue[]
 }
 
-/** GET /api/facets — 四维筛选下拉选项（全局口径，随 3s 轮询刷新）。 */
-export async function getFacets(fetchFn: FetchLike = fetch): Promise<Facets> {
-  const res = await fetchFn('/api/facets')
+/** 带筛选下拉的四个 tab；GET /api/facets?tab= 的参数（spec per-tab-memory-filters §4.3）。 */
+export type FacetTab = 'candidate' | 'approved' | 'rejected' | 'discards'
+
+/** GET /api/facets?tab= — 按 tab 圈定的下拉选项（随 3s 轮询刷新）。 */
+export async function getFacets(fetchFn: FetchLike = fetch, tab: FacetTab): Promise<Facets> {
+  const res = await fetchFn(`/api/facets?tab=${tab}`)
+  if (!res.ok) throw new Error(`facets ${res.status}`)
   return (await res.json()) as Facets
 }
 

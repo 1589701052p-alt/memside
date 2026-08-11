@@ -9,7 +9,7 @@ import {
   getFacets, UNEVALUATED,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
-  type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets,
+  type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
@@ -36,6 +36,11 @@ function priorityRank(vc: string | null | undefined): number {
 }
 
 type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'settings'
+
+/** 带筛选条的 tab 判定（spec 2026-08-11-per-tab-memory-filters §4.4）。 */
+function isFilterTab(t: TabKey): t is FacetTab {
+  return t === 'candidate' || t === 'approved' || t === 'rejected' || t === 'discards'
+}
 
 /**
  * 每 tab 的分页缓存形状（spec 2026-08-07 tab 列表分页）。items=已加载条目，
@@ -70,10 +75,17 @@ export default function App() {
   // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
   // (对齐重构前的初始 loading=true 行为)。
   const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false })
-  // 四维筛选（spec 2026-08-11-web-memory-filters §4.3）：跨 tab 共享单一 state；
-  // 空串 = 不筛该维度。facets = /api/facets 下拉选项（null = 尚未加载成功）。
-  const [filter, setFilter] = useState<MemoryFilter>(EMPTY_MEMORY_FILTER)
-  const [facets, setFacets] = useState<Facets | null>(null)
+  // 四维筛选 per-tab 独立态（spec 2026-08-11-per-tab-memory-filters §4.4）：切 tab
+  // 不携带筛选；空串 = 不筛该维度。facetsByTab = 每 tab 下拉选项缓存（SWR：切回
+  // 立显本 tab 选项；undefined = 首访尚未加载成功）。filter/facets 是按当前 tab 的
+  // 派生视图，JSX 标识符不变。
+  const [filters, setFilters] = useState<Record<FacetTab, MemoryFilter>>({
+    candidate: EMPTY_MEMORY_FILTER, approved: EMPTY_MEMORY_FILTER,
+    rejected: EMPTY_MEMORY_FILTER, discards: EMPTY_MEMORY_FILTER,
+  })
+  const [facetsByTab, setFacetsByTab] = useState<Partial<Record<FacetTab, Facets>>>({})
+  const filter = isFilterTab(tab) ? filters[tab] : EMPTY_MEMORY_FILTER
+  const facets = isFilterTab(tab) ? facetsByTab[tab] ?? null : null
   const filterRef = useRef<MemoryFilter>(filter)
   const [status, setStatus] = useState<MemsideStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -94,11 +106,11 @@ export default function App() {
         const [pg, st, fc] = await Promise.all([
           listDiscardsPage(fetch, { limit: WEB_PAGE_SIZE, project: f.project, category: f.category }),
           getStatus(),
-          getFacets().catch(() => null), // facets 失败不拖垮列表刷新（spec 失败模式 F6）
+          getFacets(fetch, target as FacetTab).catch(() => null), // facets 失败不拖垮列表刷新（spec 失败模式 F6）
         ])
         setDiscards((d) => ({ ...mergeRefreshPage(d, pg, (x) => x.id), total: pg.total ?? null }))
         setStatus(st)
-        if (fc) setFacets(fc)
+        if (fc) setFacetsByTab((m) => ({ ...m, [target as FacetTab]: fc }))
       } else if (target === 'runs') {
         const [pg, st] = await Promise.all([listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus(fetch)])
         setRuns((r) => ({ ...mergeRefreshPage(r, pg, (x) => x.distillJobId), total: r.total }))
@@ -110,14 +122,14 @@ export default function App() {
             project: f.project, slug: f.slug, category: f.category, valueClass: f.valueClass,
           }),
           getStatus(),
-          getFacets().catch(() => null),
+          getFacets(fetch, target as FacetTab).catch(() => null),
         ])
         setMemCache((c) => ({
           ...c,
           [target as MemoryTabKey]: { ...mergeRefreshPage(c[target as MemoryTabKey], pg, (x) => x.id), total: pg.total ?? null },
         }))
         setStatus(st)
-        if (fc) setFacets(fc)
+        if (fc) setFacetsByTab((m) => ({ ...m, [target as FacetTab]: fc }))
       }
       setLoaded((l) => ({ ...l, [target]: true }))
       setError(null)
@@ -286,13 +298,15 @@ export default function App() {
     void refresh('candidate')
   }
 
-  // 筛选变化：四个记忆 tab 缓存全部作废（筛选跨 tab 共享；只清当前 tab 会让
-  // mergeRefreshPage 把旧筛选条目当「掉出第一页的老数据」追加回来，spec 失败模式 F2），
-  // 立即按新筛选重拉，不等下个 3s 轮询周期。
+  // 筛选变化（per-tab 独立态，spec 2026-08-11-per-tab-memory-filters §4.4-4）：只作废
+  // 当前 tab 缓存——其余 tab 缓存对应各自筛选，与本 tab 筛选变化无涉（推翻共享态
+  // 时代的四缓存全作废）。仍须作废当前 tab：否则 mergeRefreshPage 把旧筛选条目当
+  // 「掉出第一页的老数据」追加回来（spec 失败模式 F2）。立即按新筛选重拉，不等轮询。
   function changeFilter(next: MemoryFilter) {
-    setFilter(next)
-    setMemCache({ candidate: emptyPage(), approved: emptyPage(), rejected: emptyPage() })
-    setDiscards(emptyPage())
+    if (!isFilterTab(tab)) return
+    setFilters((fs) => ({ ...fs, [tab]: next }))
+    if (tab === 'discards') setDiscards(emptyPage())
+    else setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
     void refresh(tab, next)
   }
 
@@ -432,7 +446,7 @@ export default function App() {
           可用；runs/settings 不渲染。选项来自 /api/facets（随 3s 轮询刷新，新 slug/
           项目无静默窗口）；facets 未就绪 -> 下拉禁用 + 灰字，不静默。discards tab
           只渲染有对应列的两维（项目/分类）。 */}
-      {tab === 'candidate' || tab === 'approved' || tab === 'rejected' || tab === 'discards' ? (
+      {isFilterTab(tab) ? (
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16, padding: 10, border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa' }}>
           <FilterSelect label="项目" disabled={facets === null} value={filter.project}
             onChange={(v) => changeFilter({ ...filter, project: v })}

@@ -8,7 +8,7 @@ import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memor
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor, type MemoryListFilter } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor, type MemoryListFilter, type FacetScope } from '@/memory/store'
 import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listRecentDegradations, listDegradationsForJob } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
@@ -667,9 +667,20 @@ export function createApp(deps: AppDeps) {
     return c.json({ items })
   })
 
-  // 四维筛选下拉选项（spec 2026-08-11-web-memory-filters §4.2）：全局口径，
-  // Web 筛选条随 3s 轮询刷新（新 distill 产出新 slug/项目无静默窗口）。
-  app.get('/api/facets', async (c) => c.json(await listFacets(deps.db)))
+  // 四维筛选下拉选项按 tab 圈定（spec 2026-08-11-per-tab-memory-filters §4.2）。
+  // tab→statuses 映射与 web memoryTabFilter 一致：保证下拉选到的值在本 tab 列表必命中。
+  // 缺失/非法 tab -> 400（client catch -> null -> 灰字降级，不崩）。
+  const FACET_TAB_SCOPES: Record<string, FacetScope> = {
+    candidate: { kind: 'memories', statuses: ['candidate'] },
+    approved: { kind: 'memories', statuses: ['approved', 'archived', 'superseded'] },
+    rejected: { kind: 'memories', statuses: ['rejected'] },
+    discards: { kind: 'discards' },
+  }
+  app.get('/api/facets', async (c) => {
+    const scope = FACET_TAB_SCOPES[c.req.query('tab') ?? '']
+    if (!scope) return c.json({ error: 'invalid tab' }, 400)
+    return c.json(await listFacets(deps.db, scope))
+  })
 
   app.post('/api/discards/:id/promote', async (c) => {
     try {

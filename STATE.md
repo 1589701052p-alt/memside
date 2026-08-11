@@ -870,3 +870,25 @@ Approved；deferred minor 见 sdd ledger）。`bun run typecheck && bun test`
 5. 空串 query 参数无显式测试（代码经 truthiness 正确处理）。
 6. 「筛选选项加载失败」文案在首次 facets 正常加载期间也显示（brief 既定
    JSX；失败与加载中同一降级表现）。
+
+## 记忆列表筛选按 tab 圈定（2026-08-11，修订 PR #56）
+
+PR #56 上线后用户反馈：所有 tab 的筛选看起来都是候选审批 tab 的。根因是两个设计
+决策——facets 全局口径（旧 spec 决策 D2）+ 筛选状态跨 tab 共享——在 live 数据极端
+分布下（candidate 574 / approved 7 / rejected 2554 / discards 691）全面暴露：小 tab
+下拉里全是本 tab 不存在的值、计数不属于本 tab、共享选择跨 tab 携带即空。设计
+spec / 计划见 `docs/superpowers/specs|plans/2026-08-11-per-tab-memory-filters*`。
+
+1. `listFacets(db, scope)`：scope = `{kind:'memories', statuses}` | `{kind:'discards'}`；
+   废除两表 UNION 全局口径，每 tab 只数自己的数据；discards scope 的 slugs/
+   valueClasses 恒空（表无对应列）。排序 / FACET_LIST_CAP / unevaluated 桶不变。
+2. `GET /api/facets?tab=candidate|approved|rejected|discards`：tab→statuses 映射与
+   `memoryTabFilter` 一致（approved 含 archived/superseded 三态）；缺失/非法 -> 400。
+3. App.tsx：筛选态改 per-tab `Record<FacetTab, MemoryFilter>`（切 tab 不携带）；
+   facets 按 tab 缓存 `facetsByTab`（SWR：切回立显，首访未载灰字禁用）；changeFilter
+   收窄为只作废当前 tab 缓存（四缓存全作废是共享态配套，随共享态废除）；filterRef
+   防轮换闭包模式不变。
+4. 注入链路 / distiller / scheduler / 状态机零改动，无 schema 迁移。
+
+执行：subagent-driven（2 实现 task 各 implementer + reviewer，全部 Approved 零发现）。
+`bun run typecheck && bun test` 865/865 全绿。
