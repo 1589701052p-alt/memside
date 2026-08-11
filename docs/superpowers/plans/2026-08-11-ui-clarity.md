@@ -86,7 +86,7 @@ test('categoryInfo: 10 标准分类 -> 中文名 + 非空 tip', () => {
 
 test('categoryInfo: 大小写不敏感 + trim', () => {
   expect(categoryInfo('CONVENTION')!.name).toBe('团队约定')
-  expect(categoryInfo('  trap  ')!.name).toBe('避坑教训')
+  expect(categoryInfo('  invariant  ')!.name).toBe('业务铁律')
 })
 
 test('categoryInfo: 幻觉值兜底 -> 原值 + 非标准 tip', () => {
@@ -173,8 +173,8 @@ test('stripCategoryPrefix: 大小写不敏感', () => {
   expect(stripCategoryPrefix('[CATEGORY:trap] 标题')).toBe('标题')
 })
 
-test('stripCategoryPrefix: 多前缀全剥', () => {
-  expect(stripCategoryPrefix('[category:a] 中 [category:b] 段')).toBe('中 段')
+test('stripCategoryPrefix: 多前缀全剥（病态输入保留内部双空格，浏览器渲染自然折叠）', () => {
+  expect(stripCategoryPrefix('[category:a] 中 [category:b] 段')).toBe('中  段')
 })
 
 test('stripCategoryPrefix: 无前缀原样返回', () => {
