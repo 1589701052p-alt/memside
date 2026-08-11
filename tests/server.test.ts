@@ -1073,12 +1073,51 @@ test('GET /api/discards?limit project/category 筛选 + total', async () => {
   expect(none.body.total).toBe(0)
 })
 
-test('GET /api/facets 形状 + 数据驱动', async () => {
+async function seedDiscardRowForFacets(id: string, title: string, sourceCwd: string) {
+  const now = Date.now()
+  await db.insert(memoryDistillJobs).values({
+    id: `job-${id}`, debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code',
+    cwd: '/p', sessionId: null, sourceAgentId: null, scopeResolvedJson: null,
+    status: 'done', attempts: 0, nextRunAt: now, lastError: null, createdAt: now, finishedAt: now,
+  })
+  await db.insert(memoryDiscards).values({
+    id, distillJobId: `job-${id}`, title, bodyMd: 'db', reason: 'public-knowledge', ts: now,
+    scopeType: 'project', scopeId: sourceCwd,
+    sourceCwd, runtime: 'claude-code', sourceKind: 'conversation',
+    promotedMemoryId: null,
+  })
+}
+
+test('GET /api/facets?tab= 按 tab 圈定统计（混播状态互相隔离）', async () => {
   await seedMemFull({ ts: 1000, sourceCwd: 'C:/p/a', slug: 's1', valueClass: 'decision' })
-  const r = await req('/api/facets')
+  await seedMemFull({ ts: 2000, sourceCwd: 'C:/p/a', slug: 's2', valueClass: null, status: 'rejected' })
+  const cand = await req('/api/facets?tab=candidate')
+  expect(cand.status).toBe(200)
+  expect(cand.body.projects).toEqual([{ value: 'C:/p/a', count: 1 }])
+  expect(cand.body.slugs).toEqual([{ value: 's1', count: 1 }])
+  expect(cand.body.categories).toEqual([{ value: 'convention', count: 1 }])
+  expect(cand.body.valueClasses).toEqual([{ value: 'decision', count: 1 }])
+  const rej = await req('/api/facets?tab=rejected')
+  expect(rej.body.projects).toEqual([{ value: 'C:/p/a', count: 1 }])
+  expect(rej.body.slugs).toEqual([{ value: 's2', count: 1 }])
+  expect(rej.body.valueClasses).toEqual([{ value: 'unevaluated', count: 1 }])
+})
+
+test('GET /api/facets?tab=discards 只查 discards 表，memories scope 不含 discard 行', async () => {
+  await seedMemFull({ ts: 1000, sourceCwd: 'C:/p/mem', slug: 's1', valueClass: 'decision' })
+  await seedDiscardRowForFacets('df1', '[category:trap] D1', 'C:/p/dis')
+  await seedDiscardRowForFacets('df2', '[category:trap] D2', 'C:/p/dis')
+  const r = await req('/api/facets?tab=discards')
   expect(r.status).toBe(200)
-  expect(r.body.projects).toEqual([{ value: 'C:/p/a', count: 1 }])
-  expect(r.body.slugs).toEqual([{ value: 's1', count: 1 }])
-  expect(r.body.categories).toEqual([{ value: 'convention', count: 1 }])
-  expect(r.body.valueClasses).toEqual([{ value: 'decision', count: 1 }])
+  expect(r.body.projects).toEqual([{ value: 'C:/p/dis', count: 2 }])
+  expect(r.body.categories).toEqual([{ value: 'trap', count: 2 }])
+  expect(r.body.slugs).toEqual([])
+  expect(r.body.valueClasses).toEqual([])
+  const cand = await req('/api/facets?tab=candidate')
+  expect(cand.body.projects).toEqual([{ value: 'C:/p/mem', count: 1 }])
+})
+
+test('GET /api/facets 缺失/非法 tab -> 400', async () => {
+  expect((await req('/api/facets')).status).toBe(400)
+  expect((await req('/api/facets?tab=runs')).status).toBe(400)
 })

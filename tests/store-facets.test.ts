@@ -1,12 +1,14 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { memoryDistillJobs } from '@/db/schema'
-import { createCandidate, logDiscards, listFacets, VALUE_CLASS_UNEVALUATED, FACET_LIST_CAP } from '@/memory/store'
+import { memories, memoryDistillJobs } from '@/db/schema'
+import { createCandidate, logDiscards, listFacets, VALUE_CLASS_UNEVALUATED, FACET_LIST_CAP, type FacetScope } from '@/memory/store'
 
-// 回归锁定：/api/facets 数据面（spec 2026-08-11-web-memory-filters §4.1 决策 D1/D2）。
-// 项目/分类 UNION memories+discards 两表；value_class NULL 聚未评估桶；count 降序。
+// 回归锁定：listFacets 按 tab scope 统计（spec 2026-08-11-per-tab-memory-filters §4.1）。
+// 推翻 2026-08-11-web-memory-filters 的全局口径（两表 UNION）：memories scope 只数
+// 给定 statuses 的行；discards scope 只查 memory_discards（slugs/valueClasses 恒空）。
 const root = join(import.meta.dir, '.tmp-store-facets')
 let dir = ''
 let db: ReturnType<typeof openDb>
@@ -22,13 +24,22 @@ beforeEach(() => {
 })
 afterEach(() => { db.$client.close() })
 
-async function seedMem(title: string, opts: { sourceCwd?: string | null; slug?: string | null; valueClass?: 'decision' | 'trap' | null } = {}) {
-  return createCandidate(db, {
+const CANDIDATE: FacetScope = { kind: 'memories', statuses: ['candidate'] }
+const APPROVED: FacetScope = { kind: 'memories', statuses: ['approved', 'archived', 'superseded'] }
+const REJECTED: FacetScope = { kind: 'memories', statuses: ['rejected'] }
+const DISCARDS: FacetScope = { kind: 'discards' }
+
+async function seedMem(title: string, opts: { sourceCwd?: string | null; slug?: string | null; valueClass?: 'decision' | 'trap' | null; status?: 'candidate' | 'approved' | 'rejected' } = {}) {
+  const m = await createCandidate(db, {
     scopeType: 'global', scopeId: null, title, bodyMd: 'b',
     tags: [], sourceKind: 'manual', runtime: null,
     sourceCwd: opts.sourceCwd ?? null, subjectSlug: opts.slug ?? null,
     valueClass: opts.valueClass ?? null,
   })
+  if (opts.status && opts.status !== 'candidate') {
+    await db.update(memories).set({ status: opts.status }).where(eq(memories.id, m.id))
+  }
+  return m
 }
 
 function seedDiscardJob() {
@@ -38,64 +49,72 @@ function seedDiscardJob() {
   }).run()
 }
 
-test('projects UNION 两表：discard 独有项目必须出现，同值合并计数', async () => {
+test('memories scope: projects 只数 scope statuses 内的行（混播状态互相隔离）', async () => {
   await seedMem('[category:trap] A', { sourceCwd: 'C:/p/a' })
-  await seedMem('[category:trap] B', { sourceCwd: null }) // NULL 不进选项
-  seedDiscardJob()
-  await logDiscards(db, 'job-f', [
-    { title: '[category:trap] C', bodyMd: 'b', reason: 'fleeting' as const, scopeType: 'project' as const, scopeId: 'C:/p/only-discard', sourceCwd: 'C:/p/only-discard', runtime: null, sourceKind: 'conversation' as const },
-    { title: '[category:trap] D', bodyMd: 'b', reason: 'fleeting' as const, scopeType: 'project' as const, scopeId: 'C:/p/a', sourceCwd: 'C:/p/a', runtime: null, sourceKind: 'conversation' as const },
-  ])
-  const f = await listFacets(db)
-  expect(f.projects).toEqual([
-    { value: 'C:/p/a', count: 2 },            // 1 memory + 1 discard 合并
-    { value: 'C:/p/only-discard', count: 1 }, // 只在 discards 里（决策 D1）
+  await seedMem('[category:trap] B', { sourceCwd: 'C:/p/a', status: 'rejected' })
+  await seedMem('[category:trap] C', { sourceCwd: 'C:/p/b', status: 'rejected' })
+  await seedMem('[category:trap] D', { sourceCwd: null }) // NULL 不进选项
+  expect((await listFacets(db, CANDIDATE)).projects).toEqual([{ value: 'C:/p/a', count: 1 }])
+  expect((await listFacets(db, REJECTED)).projects).toEqual([
+    { value: 'C:/p/a', count: 1 }, // 同 count 按 value 字母序
+    { value: 'C:/p/b', count: 1 },
   ])
 })
 
-test('categories 两表 title 解析计数（幻觉分类也收录，数据驱动）', async () => {
-  await seedMem('[category:invariant] X')
-  await seedMem('[category:invariant] Y')
-  await seedMem('[category:test-pattern] Z') // 幻觉值也必须出现
-  seedDiscardJob()
-  await logDiscards(db, 'job-f', [
-    { title: '[category:invariant] W', bodyMd: 'b', reason: 'fleeting' as const, scopeType: 'global' as const, scopeId: null, sourceCwd: null, runtime: null, sourceKind: 'conversation' as const },
-  ])
-  const f = await listFacets(db)
-  expect(f.categories).toEqual([
-    { value: 'invariant', count: 3 },   // 2 memories + 1 discard
+test('memories scope: approved scope 覆盖 approved/archived/superseded 三态', async () => {
+  await seedMem('[category:trap] A', { sourceCwd: 'C:/p/a', status: 'approved' })
+  const b = await seedMem('[category:trap] B', { sourceCwd: 'C:/p/a' })
+  await db.update(memories).set({ status: 'archived' }).where(eq(memories.id, b.id))
+  await seedMem('[category:trap] C', { sourceCwd: 'C:/p/a' }) // candidate，不应出现
+  expect((await listFacets(db, APPROVED)).projects).toEqual([{ value: 'C:/p/a', count: 2 }])
+})
+
+test('memories scope: categories/slugs/valueClasses 同样按 scope（未评估桶只数 scope 内 NULL）', async () => {
+  await seedMem('[category:invariant] X', { slug: 'refund-policy', valueClass: 'decision' })
+  await seedMem('[category:invariant] Y', { slug: 'refund-policy', valueClass: null, status: 'rejected' })
+  await seedMem('[category:test-pattern] Z', { slug: 'a-b', valueClass: null, status: 'rejected' })
+  const f = await listFacets(db, CANDIDATE)
+  expect(f.categories).toEqual([{ value: 'invariant', count: 1 }])
+  expect(f.slugs).toEqual([{ value: 'refund-policy', count: 1 }])
+  expect(f.valueClasses).toEqual([{ value: 'decision', count: 1 }])
+  const r = await listFacets(db, REJECTED)
+  expect(r.categories).toEqual([
+    { value: 'invariant', count: 1 },    // 同 count 按 value 字母序
     { value: 'test-pattern', count: 1 },
   ])
-})
-
-test('slugs 排除 NULL；valueClasses 含未评估桶；count 降序 + 同 count 字母序', async () => {
-  await seedMem('[category:trap] 1', { slug: 'refund-policy', valueClass: 'decision' })
-  await seedMem('[category:trap] 2', { slug: 'refund-policy', valueClass: 'decision' })
-  await seedMem('[category:trap] 3', { slug: 'a-b', valueClass: null })
-  await seedMem('[category:trap] 4', { slug: null, valueClass: 'trap' })
-  const f = await listFacets(db)
-  expect(f.slugs).toEqual([
-    { value: 'refund-policy', count: 2 },
-    { value: 'a-b', count: 1 },
+  expect(r.slugs).toEqual([
+    { value: 'a-b', count: 1 },            // 同 count 按 value 字母序：a-b < refund-policy
+    { value: 'refund-policy', count: 1 },
   ])
-  expect(f.valueClasses).toEqual([
-    { value: 'decision', count: 2 },
-    { value: 'trap', count: 1 },                    // 同 count 字母序：t < u
-    { value: VALUE_CLASS_UNEVALUATED, count: 1 },
+  expect(r.valueClasses).toEqual([{ value: VALUE_CLASS_UNEVALUATED, count: 2 }])
+})
+
+test('discards scope: 只查 memory_discards，slugs/valueClasses 恒空；memories scope 不含 discard 行', async () => {
+  await seedMem('[category:trap] A', { sourceCwd: 'C:/p/mem-only', slug: 's1', valueClass: 'decision' })
+  seedDiscardJob()
+  await logDiscards(db, 'job-f', [
+    { title: '[category:trap] C', bodyMd: 'b', reason: 'fleeting' as const, scopeType: 'project' as const, scopeId: 'C:/p/d', sourceCwd: 'C:/p/d', runtime: null, sourceKind: 'conversation' as const },
+    { title: '[category:trap] D', bodyMd: 'b', reason: 'fleeting' as const, scopeType: 'project' as const, scopeId: 'C:/p/d', sourceCwd: 'C:/p/d', runtime: null, sourceKind: 'conversation' as const },
   ])
+  const f = await listFacets(db, DISCARDS)
+  expect(f.projects).toEqual([{ value: 'C:/p/d', count: 2 }])
+  expect(f.categories).toEqual([{ value: 'trap', count: 2 }])
+  expect(f.slugs).toEqual([])
+  expect(f.valueClasses).toEqual([])
+  expect((await listFacets(db, CANDIDATE)).projects).toEqual([{ value: 'C:/p/mem-only', count: 1 }])
 })
 
-test('空表 -> 四个空数组', async () => {
-  expect(await listFacets(db)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [] })
+test('空表 -> 四个空数组（任何 scope）', async () => {
+  expect(await listFacets(db, CANDIDATE)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [] })
+  expect(await listFacets(db, DISCARDS)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [] })
 })
 
-// 回归锁定（spec 2026-08-11-web-memory-filters §4.1）：listFacets 的 slugs 下拉
-// 必须服务端截到 FACET_LIST_CAP（200），否则超大海量 slug 会把整个 facets
-// 响应打爆、下拉渲染卡死。seed 201 个互不相同的 subject_slug，断言只回 200。
-test('slugs 截断到 FACET_LIST_CAP（201 个不同 slug -> 200 个）', async () => {
+// 回归锁定（spec web-memory-filters §4.1 + per-tab spec §2 G3）：
+// FACET_LIST_CAP（200）截断在 scope 化后仍必须成立。
+test('slugs 截断到 FACET_LIST_CAP（201 个不同 slug -> 200）', async () => {
   for (let i = 0; i < 201; i++) {
     await seedMem('[category:trap] s' + i, { slug: 'slug-' + i })
   }
-  const f = await listFacets(db)
+  const f = await listFacets(db, CANDIDATE)
   expect(f.slugs.length).toBe(FACET_LIST_CAP)
 })

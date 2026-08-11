@@ -902,7 +902,7 @@ export async function listDistillRunsPage(
 }
 
 // ---------------------------------------------------------------------------
-// 四维筛选下拉选项（spec 2026-08-11-web-memory-filters §4.1）
+// 四维筛选下拉选项，按 tab scope（spec 2026-08-11-per-tab-memory-filters §4.1）
 // ---------------------------------------------------------------------------
 
 export interface FacetValue { value: string; count: number }
@@ -914,6 +914,16 @@ export interface Facets {
 }
 export const FACET_LIST_CAP = 200
 
+/**
+ * facets 统计范围：kind='memories' 只统计给定 statuses 的行；kind='discards'
+ * 只查 memory_discards 表（该表无 slug/value_class 列，两组返回空）。
+ * 推翻 2026-08-11-web-memory-filters 决策 D2 的全局口径（两表 UNION）：
+ * 每个 tab 的下拉只列本 tab 数据里真实存在的值。
+ */
+export type FacetScope =
+  | { kind: 'memories'; statuses: MemoryStatus[] }
+  | { kind: 'discards' }
+
 function sortFacets(m: Map<string, number>): FacetValue[] {
   return [...m.entries()]
     .map(([value, count]) => ({ value, count }))
@@ -922,37 +932,48 @@ function sortFacets(m: Map<string, number>): FacetValue[] {
 }
 
 /**
- * 四维筛选的下拉选项：全局口径（不按 tab/status 切分，决策 D2）；项目与分类
- * UNION memories+discards 两表（决策 D1：discard 行不在 memories 表）；
- * value_class NULL 聚成 VALUE_CLASS_UNEVALUATED 桶。各组 count 降序、
- * 同 count 按 value 字母序，截 FACET_LIST_CAP。
+ * 四维筛选的下拉选项（按 scope）：value_class NULL 聚成 VALUE_CLASS_UNEVALUATED 桶；
+ * 各组 count 降序、同 count 按 value 字母序，截 FACET_LIST_CAP。
+ * 调用方保证 memories scope 的 statuses 非空（server 层校验非法/缺失 tab -> 400）。
  */
-export async function listFacets(db: DbClient): Promise<Facets> {
+export async function listFacets(db: DbClient, scope: FacetScope): Promise<Facets> {
   const bump = (m: Map<string, number>, v: string, n: number) => m.set(v, (m.get(v) ?? 0) + n)
 
+  if (scope.kind === 'discards') {
+    const projects = new Map<string, number>()
+    const disProj = await db.select({ v: memoryDiscards.sourceCwd, n: sql<number>`COUNT(*)` })
+      .from(memoryDiscards).where(isNotNull(memoryDiscards.sourceCwd)).groupBy(memoryDiscards.sourceCwd).all()
+    for (const r of disProj) if (r.v) bump(projects, r.v, Number(r.n))
+    const cats = new Map<string, number>()
+    const disTitles = await db.select({ t: memoryDiscards.title }).from(memoryDiscards).all()
+    for (const r of disTitles) {
+      const c = categoryFromTitle(r.t)
+      if (c) bump(cats, c, 1)
+    }
+    return { projects: sortFacets(projects), categories: sortFacets(cats), slugs: [], valueClasses: [] }
+  }
+
+  const statusCond = inArray(memories.status, scope.statuses)
   const projects = new Map<string, number>()
   const memProj = await db.select({ v: memories.sourceCwd, n: sql<number>`COUNT(*)` })
-    .from(memories).where(isNotNull(memories.sourceCwd)).groupBy(memories.sourceCwd).all()
-  const disProj = await db.select({ v: memoryDiscards.sourceCwd, n: sql<number>`COUNT(*)` })
-    .from(memoryDiscards).where(isNotNull(memoryDiscards.sourceCwd)).groupBy(memoryDiscards.sourceCwd).all()
-  for (const r of [...memProj, ...disProj]) if (r.v) bump(projects, r.v, Number(r.n))
+    .from(memories).where(and(isNotNull(memories.sourceCwd), statusCond)).groupBy(memories.sourceCwd).all()
+  for (const r of memProj) if (r.v) bump(projects, r.v, Number(r.n))
 
   const cats = new Map<string, number>()
-  const memTitles = await db.select({ t: memories.title }).from(memories).all()
-  const disTitles = await db.select({ t: memoryDiscards.title }).from(memoryDiscards).all()
-  for (const r of [...memTitles, ...disTitles]) {
+  const memTitles = await db.select({ t: memories.title }).from(memories).where(statusCond).all()
+  for (const r of memTitles) {
     const c = categoryFromTitle(r.t)
     if (c) bump(cats, c, 1)
   }
 
   const slugs = new Map<string, number>()
   const slugRows = await db.select({ v: memories.subjectSlug, n: sql<number>`COUNT(*)` })
-    .from(memories).where(isNotNull(memories.subjectSlug)).groupBy(memories.subjectSlug).all()
+    .from(memories).where(and(isNotNull(memories.subjectSlug), statusCond)).groupBy(memories.subjectSlug).all()
   for (const r of slugRows) if (r.v) bump(slugs, r.v, Number(r.n))
 
   const vcs = new Map<string, number>()
   const vcRows = await db.select({ v: memories.valueClass, n: sql<number>`COUNT(*)` })
-    .from(memories).groupBy(memories.valueClass).all()
+    .from(memories).where(statusCond).groupBy(memories.valueClass).all()
   for (const r of vcRows) bump(vcs, r.v ?? VALUE_CLASS_UNEVALUATED, Number(r.n))
 
   return {
