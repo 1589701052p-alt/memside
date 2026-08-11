@@ -405,3 +405,9 @@ test('App.tsx 旧缩写文案退场（反向断言：高·/中· 拼接格式不
   expect(src).not.toContain('高·')
   expect(src).not.toContain('中·')
 })
+
+test('App.tsx DiscardCard 可理解性：标题剥离 + 拒绝理由前缀 + 元信息字段化 (source text)', () => {
+  expect(src).toContain('stripCategoryPrefix(d.title)')
+  expect(src).toContain('拒绝理由:')
+  expect(src).toContain('拒绝于:')
+})

@@ -1080,12 +1080,21 @@ function DiscardCard({ d, onPromote }: { d: DiscardItem; onPromote: () => void }
   const time = formatMemoryTime(d.ts)
   return (
     <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16, marginBottom: 12 }}>
-      <strong>{d.title}</strong>
-      <span style={{ marginLeft: 8, fontSize: 12, color: '#c00' }}>{discardReasonLabel(d.reason)}</span>
+      <strong>{stripCategoryPrefix(d.title)}</strong>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '6px 0' }}>
+        {(() => { const cat = categoryInfo(categoryFromTitle(d.title)); return cat ? (
+          <span title={cat.tip} style={{ ...CHIP_STYLE, color: '#444' }}>分类：{cat.name}</span>
+        ) : null })()}
+        <span title="AI 自动拒绝候选的理由。想找回可点「提升为候选」。" style={{ ...CHIP_STYLE, color: '#c00' }}>拒绝理由: {discardReasonLabel(d.reason)}</span>
+      </div>
       {d.bodyMd && <p style={{ color: '#555' }}>{d.bodyMd}</p>}
       <small>
-        {d.scopeType ?? '未知 scope'} · 来源: <span title={d.sourceCwd ?? ''}>{sourceLabel}</span>
-        {time ? ` · ${time}` : ''}
+        {(() => { const s = scopeInfo(d.scopeType ?? null); return (
+          <span title={s.tip}>范围: {s.name}</span>
+        ) })()}
+        {' · '}
+        <span>源项目: <span title={d.sourceCwd ?? ''}>{sourceLabel}</span></span>
+        {time ? <>{' · '}<span title="AI 自动拒绝这条候选的时间">拒绝于: {time}</span></> : null}
       </small>
       <div style={{ marginTop: 8 }}>
         {promoted ? (
