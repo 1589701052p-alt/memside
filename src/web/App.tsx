@@ -437,38 +437,47 @@ export default function App() {
       {/* 筛选条（spec 2026-08-11-web-memory-filters §4.3）：四个记忆 tab（含 discards）
           可用；runs/settings 不渲染。选项来自 /api/facets（随 3s 轮询刷新，新 slug/
           项目无静默窗口）；facets 未就绪 -> 下拉禁用 + 灰字，不静默。discards tab
-          只渲染有对应列的两维（项目/分类）。 */}
+          只渲染有对应列的两维（项目/分类）。
+          2026-08-11 ui-clarity：加标题/说明 + 维度改名 + 分类/价值选项中文化（映射走 ui-utils）。 */}
       {isFilterTab(tab) ? (
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16, padding: 10, border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa' }}>
-          <FilterSelect label="项目" disabled={facets === null} value={filter.project}
-            onChange={(v) => changeFilter({ ...filter, project: v })}
-            options={(facets?.projects ?? []).map((p) => ({
-              value: p.value,
-              label: `${projectDisplayName(p.value, (facets?.projects ?? []).map((x) => x.value))} (${p.count})`,
-              title: p.value,
-            }))} />
-          <FilterSelect label="分类" disabled={facets === null} value={filter.category}
-            onChange={(v) => changeFilter({ ...filter, category: v })}
-            options={(facets?.categories ?? []).map((p) => ({ value: p.value, label: `${p.value} (${p.count})` }))} />
-          {tab !== 'discards' ? (
-            <>
-              <FilterSelect label="slug" disabled={facets === null} value={filter.slug}
-                onChange={(v) => changeFilter({ ...filter, slug: v })}
-                options={(facets?.slugs ?? []).map((p) => ({ value: p.value, label: `${p.value} (${p.count})` }))} />
-              <FilterSelect label="价值筐" disabled={facets === null} value={filter.valueClass}
-                onChange={(v) => changeFilter({ ...filter, valueClass: v })}
-                options={(facets?.valueClasses ?? []).map((p) => {
-                  const v = valueClassInfo(p.value === UNEVALUATED ? null : p.value)
-                  return { value: p.value, label: `${v.name}${v.priority ? ` · ${v.priority}优先` : ''} (${p.count})` }
-                })} />
-            </>
-          ) : null}
-          {facets === null ? (
-            <span style={{ fontSize: 12, color: '#888' }}>筛选选项加载失败，稍后自动重试</span>
-          ) : null}
-          {hasActiveFilter(filter) ? (
-            <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
-          ) : null}
+        <div style={{ display: 'flex', flexDirection: 'column', marginBottom: 16, padding: 10, border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa' }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>筛选</div>
+          <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>按以下条件缩小列表。每个 tab 的筛选相互独立。</div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <FilterSelect label="源项目" disabled={facets === null} value={filter.project}
+              onChange={(v) => changeFilter({ ...filter, project: v })}
+              options={(facets?.projects ?? []).map((p) => ({
+                value: p.value,
+                label: `${projectDisplayName(p.value, (facets?.projects ?? []).map((x) => x.value))} (${p.count})`,
+                title: p.value,
+              }))} />
+            <FilterSelect label="分类" disabled={facets === null} value={filter.category}
+              onChange={(v) => changeFilter({ ...filter, category: v })}
+              options={(facets?.categories ?? []).map((p) => ({
+                value: p.value,
+                label: `${categoryInfo(p.value)?.name ?? p.value} (${p.count})`,
+                title: p.value,
+              }))} />
+            {tab !== 'discards' ? (
+              <>
+                <FilterSelect label="主题（slug）" disabled={facets === null} value={filter.slug}
+                  onChange={(v) => changeFilter({ ...filter, slug: v })}
+                  options={(facets?.slugs ?? []).map((p) => ({ value: p.value, label: `${p.value} (${p.count})` }))} />
+                <FilterSelect label="价值" disabled={facets === null} value={filter.valueClass}
+                  onChange={(v) => changeFilter({ ...filter, valueClass: v })}
+                  options={(facets?.valueClasses ?? []).map((p) => {
+                    const v = valueClassInfo(p.value === UNEVALUATED ? null : p.value)
+                    return { value: p.value, label: `${v.name}${v.priority ? ` · ${v.priority}优先` : ''} (${p.count})` }
+                  })} />
+              </>
+            ) : null}
+            {facets === null ? (
+              <span style={{ fontSize: 12, color: '#888' }}>筛选选项加载失败，稍后自动重试</span>
+            ) : null}
+            {hasActiveFilter(filter) ? (
+              <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
