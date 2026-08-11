@@ -346,6 +346,19 @@ test('getFacets: GET /api/facets 解析形状', async () => {
   expect(f.projects[0]).toEqual({ value: 'C:/x', count: 2 })
 })
 
+test('listMemoriesPage: before 游标 + 筛选参数共存，筛选排在分页参数之后', async () => {
+  let called = ''
+  const fetchFn = (async (url: string) => {
+    called = url
+    return new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null, total: 0 }), { status: 200 })
+  }) as any
+  await listMemoriesPage(fetchFn, {
+    status: 'candidate', limit: 20, project: 'C:/x', category: 'trap', before: { ts: 9, id: 'z' },
+  })
+  // 分页参数（limit/before/beforeId）在前，筛选参数（project/category）在其后
+  expect(called).toBe(`/api/memories?status=candidate&limit=20&before=9&beforeId=z&project=${encodeURIComponent('C:/x')}&category=trap`)
+})
+
 test('PageDto.total: 旧 daemon 无 total -> null（降级不崩）', async () => {
   const fetchFn = (async () =>
     new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null }), { status: 200 })) as any

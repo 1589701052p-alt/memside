@@ -372,4 +372,9 @@ test('App.tsx wires memory list filters (source text)', () => {
   expect(src).toContain('getFacets')
   expect(src).toContain('projectDisplayName')
   expect(src).toContain('FilterSelect')
+  // 缓存作废（spec 失败模式 F2）：改筛选必须重置候选/已审批/已拒绝三个记忆 tab
+  // 缓存 + discards 缓存，否则 mergeRefreshPage 把旧筛选条目当「掉出第一页的老数据」
+  // 追加回新列表。refactor 收窄作废范围（只清当前 tab）即红。
+  expect(src).toContain('setMemCache({ candidate: emptyPage(), approved: emptyPage(), rejected: emptyPage() })')
+  expect(src).toContain('setDiscards(emptyPage())')
 })

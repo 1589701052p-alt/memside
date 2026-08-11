@@ -3,7 +3,7 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
 import { memoryDistillJobs } from '@/db/schema'
-import { createCandidate, logDiscards, listFacets, VALUE_CLASS_UNEVALUATED } from '@/memory/store'
+import { createCandidate, logDiscards, listFacets, VALUE_CLASS_UNEVALUATED, FACET_LIST_CAP } from '@/memory/store'
 
 // 回归锁定：/api/facets 数据面（spec 2026-08-11-web-memory-filters §4.1 决策 D1/D2）。
 // 项目/分类 UNION memories+discards 两表；value_class NULL 聚未评估桶；count 降序。
@@ -87,4 +87,15 @@ test('slugs 排除 NULL；valueClasses 含未评估桶；count 降序 + 同 coun
 
 test('空表 -> 四个空数组', async () => {
   expect(await listFacets(db)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [] })
+})
+
+// 回归锁定（spec 2026-08-11-web-memory-filters §4.1）：listFacets 的 slugs 下拉
+// 必须服务端截到 FACET_LIST_CAP（200），否则超大海量 slug 会把整个 facets
+// 响应打爆、下拉渲染卡死。seed 201 个互不相同的 subject_slug，断言只回 200。
+test('slugs 截断到 FACET_LIST_CAP（201 个不同 slug -> 200 个）', async () => {
+  for (let i = 0; i < 201; i++) {
+    await seedMem('[category:trap] s' + i, { slug: 'slug-' + i })
+  }
+  const f = await listFacets(db)
+  expect(f.slugs.length).toBe(FACET_LIST_CAP)
 })
