@@ -42,3 +42,56 @@ export async function mergeRollingSummary(
   const truncated = trimmed.length > DIGEST_MAX_CHARS
   return { digest: truncated ? trimmed.slice(0, DIGEST_MAX_CHARS) : trimmed, truncated }
 }
+
+/** 切片压缩配额下限（spec §5.2）。 */
+export const SLICE_BUDGET_MIN = 600
+/** 直追阈值：渲染总长低于此值不调 LLM，rendered 行原样入账本（spec §4.1）。 */
+export const DIRECT_APPEND_MAX_CHARS = SLICE_BUDGET_MIN * 2
+/** 行化探测阈值：非空行 ≤ 此值视为已行化（账本行恒 ≤300，留 100 字余量，spec §5.2）。 */
+export const LEDGER_LINE_SHAPE_MAX = 400
+
+/**
+ * 切片压缩配额：约 2:1，下限 SLICE_BUDGET_MIN，上限账本一半（历史至少留一半）。
+ * 纯函数。spec §5.2。
+ */
+export function sliceBudget(renderedLen: number): number {
+  return Math.min(Math.max(Math.ceil(renderedLen / 2), SLICE_BUDGET_MIN), Math.floor(DIGEST_MAX_CHARS / 2))
+}
+
+/**
+ * 遗留 prose 探测（spec §6）：所有非空行 ≤ LEDGER_LINE_SHAPE_MAX 视为已行化。
+ * 现网 prose 段落体（单段数百至上千字）判假；行式账本判真。纯函数、永不抛。
+ */
+export function isLineStructured(digest: string): boolean {
+  return digest.split('\n').every((l) => l.length <= LEDGER_LINE_SHAPE_MAX)
+}
+
+/**
+ * LLM 产出行净化（spec §5.2）：按 \n 切、逐行压平空白、丢空行、单行超
+ * DIGEST_LINE_MAX_CHARS 截断（无后缀，与 renderDigestLines 约定一致）。
+ * 纯函数、永不抛。
+ */
+export function sanitizeLlmLines(raw: string): string[] {
+  return raw.split('\n')
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .filter((l) => l.length > 0)
+    .map((l) => l.slice(0, DIGEST_LINE_MAX_CHARS))
+}
+
+/**
+ * 切片压缩 system prompt（预算参数化，spec §5.3）。中立压缩：只压缩不评判。
+ * 硬约束：不得匹配 /keep|discard|保留重要|丢弃|取舍/i——取舍策略在代码层
+ * （trimOldestLines），不进 prompt，比旧设计更干净。
+ */
+export function sliceDigestSystemPrompt(budget: number): string {
+  return `You are a session-digest compressor for a memory sidecar.
+
+Convert the provided NEW conversation slice into compact fact lines for the session's rolling ledger.
+
+Rules:
+- Output ONLY the fact lines: no JSON, no markdown fences, no numbering, no commentary.
+- One fact per line, chronological order, plain declarative sentences.
+- Write in 简体中文 (technical terms may stay in English).
+- Compress mechanically: no opinions, no importance ranking, no advice.
+- Hard length budget: at most ${budget} characters in total.`
+}
