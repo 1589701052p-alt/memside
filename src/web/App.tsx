@@ -11,7 +11,7 @@ import {
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, SLUG_BADGE_TIP } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, SLUG_BADGE_TIP } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
 
 /**
@@ -1024,7 +1024,7 @@ function MemoryCard({
               <span title={s.tip}>范围: {s.name}</span>
             ) })()}
             {' · '}
-            <span title="产生这条记忆的会话所用的运行时工具">会话工具: {runtimeLabel(m.runtime)}</span>
+            <span title={runtimeTip(m.runtime)}>会话工具: {runtimeLabel(m.runtime)}</span>
             {' · '}
             <span>源项目: <span title={m.sourceCwd ?? ''}>{sourceLabel}</span></span>
             {time ? <>{' · '}<span title="AI 从会话提炼出这条记忆的时间">提炼于: {time}</span></> : null}

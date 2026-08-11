@@ -266,5 +266,13 @@ export function runtimeLabel(runtime: string | null | undefined): string {
   return runtime
 }
 
+/** runtime 悬停解释（按值措辞，spec §4.5）。未知值兜底通用文案。never-throw。 */
+export function runtimeTip(runtime: string | null | undefined): string {
+  if (runtime === 'claude-code') return '产生这条记忆的会话来自 Claude Code'
+  if (runtime === 'opencode') return '产生这条记忆的会话来自 opencode'
+  if (runtime == null) return '未限定来源工具（老数据）'
+  return '产生这条记忆的会话所用的运行时工具'
+}
+
 /** 主题 slug 徽章固定 tip（spec §4.4）。 */
 export const SLUG_BADGE_TIP = '主题分组标识。同主题的记忆共用一个 slug，注入新会话时合并为一节；可在编辑里修改。'

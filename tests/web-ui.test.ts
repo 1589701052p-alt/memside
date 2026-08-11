@@ -415,6 +415,11 @@ test('App.tsx DiscardCard 可理解性：标题剥离 + 拒绝理由前缀 + 元
 // Web UI 可理解性改造（2026-08-11 ui-clarity Task 4）：筛选栏标题/说明 + 维度改名
 // （项目→源项目、slug→主题（slug）、价值筐→价值）+ 分类选项中文化（categoryInfo）。
 // React 组件不单测，源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx runtime 字段悬停走按值文案（spec §4.5，终审 Minor #1）', () => {
+  expect(src).toContain('runtimeTip(')
+  expect(src).not.toContain('title="产生这条记忆的会话所用的运行时工具"')
+})
+
 test('App.tsx 筛选栏可理解性：标题/说明 + 维度改名 + 分类选项中文化 (source text)', () => {
   expect(src).toContain('按以下条件缩小列表')
   expect(src).toContain('每个 tab 的筛选相互独立')

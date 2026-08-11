@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import {
   categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo,
-  originBadge, scopeInfo, runtimeLabel, SLUG_BADGE_TIP,
+  originBadge, scopeInfo, runtimeLabel, runtimeTip, SLUG_BADGE_TIP,
 } from '@/web/ui-utils'
 import { categoryFromTitle as backendCategoryFromTitle } from '@/memory/pure'
 
@@ -104,6 +104,14 @@ test('runtimeLabel: claude-code/opencode/null/未知', () => {
   expect(runtimeLabel(null)).toBe('任意')
   expect(runtimeLabel(undefined)).toBe('任意')
   expect(runtimeLabel('weird')).toBe('weird')
+})
+
+test('runtimeTip: 按值措辞 + 未知值兜底（spec §4.5）', () => {
+  expect(runtimeTip('claude-code')).toBe('产生这条记忆的会话来自 Claude Code')
+  expect(runtimeTip('opencode')).toBe('产生这条记忆的会话来自 opencode')
+  expect(runtimeTip(null)).toBe('未限定来源工具（老数据）')
+  expect(runtimeTip(undefined)).toBe('未限定来源工具（老数据）')
+  expect(runtimeTip('weird')).toBe('产生这条记忆的会话所用的运行时工具')
 })
 
 // --- stripCategoryPrefix / categoryFromTitle(web 副本) ---

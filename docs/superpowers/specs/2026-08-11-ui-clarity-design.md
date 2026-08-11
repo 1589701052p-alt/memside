@@ -136,6 +136,9 @@ export function scopeInfo(scopeType: string | null | undefined): { name: string;
 /** runtime 文案。claude-code -> 'Claude Code'；opencode -> 'opencode'；null/undefined -> '任意'；
  *  未知值原样返回。 */
 export function runtimeLabel(runtime: string | null | undefined): string
+
+/** runtime 悬停解释（spec §4.5 按值措辞；未知值兜底通用文案）。never-throw。 */
+export function runtimeTip(runtime: string | null | undefined): string
 ```
 
 徽章文本拼接规则（渲染处组合，非纯函数职责）：
