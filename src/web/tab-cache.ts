@@ -103,12 +103,13 @@ export function tabTotalCount(
 
 /**
  * 该 tab 是否走列表数据流（refresh / loadMore / 轮询 / 无限滚动 / 列表尾部）。
- * settings/messages tab 无列表：不进这些入口——设置 tab 只在激活时挂载设置区块，
- * 区块自管理 fetch/保存/错误行；消息 tab（spec 2026-08-12 §5.10）同理自管理。
+ * settings tab 无列表：不进这些入口——设置 tab 只在激活时挂载设置区块，
+ * 区块自管理 fetch/保存/错误行；消息 tab（spec 2026-08-12 §5.10）自 Task 10 起
+ * 走标准列表数据流（分页 + 3s 轮询 + 无限滚动）。
  * 新增非列表 tab 时此函数是唯一需要改的判据。
  */
 export function isListTab(tab: string): boolean {
-  return tab !== 'settings' && tab !== 'messages'
+  return tab !== 'settings'
 }
 
 // --- 记忆列表筛选（spec 2026-08-11-web-memory-filters §4.3）----------------
