@@ -400,3 +400,27 @@ describe('distill-batching schema（spec §4.5）', () => {
     // （见本文件头部注释），rmSync 会 EBUSY。tmp 文件留在 tmpdir 无害，与 app_settings 测试同模式。
   })
 })
+
+test('notifications 表列齐全（spec 2026-08-12 §5.1）', () => {
+  db = openDb(join(dir, 'notif.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(notifications)').all() as { name: string }[]
+  const names = cols.map((c) => c.name)
+  for (const n of ['id', 'ts', 'kind', 'title', 'body', 'ref_type', 'ref_id', 'read_at']) {
+    expect(names).toContain(n)
+  }
+})
+
+test('memory_distill_runs 含 digest_ms/dedup_ms/judge_ms（spec §5.4）', () => {
+  db = openDb(join(dir, 'timing.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+  const names = cols.map((c) => c.name)
+  for (const n of ['digest_ms', 'dedup_ms', 'judge_ms']) expect(names).toContain(n)
+})
+
+test('notifications 索引存在', () => {
+  db = openDb(join(dir, 'notifidx.db'))
+  const idx = db.$client.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='notifications'").all() as { name: string }[]
+  const names = idx.map((i) => i.name)
+  expect(names).toContain('idx_notifications_ts')
+  expect(names).toContain('idx_notifications_read')
+})

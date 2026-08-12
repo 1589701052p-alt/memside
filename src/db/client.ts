@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations } from './schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications } from './schema'
 
 export type DbClient = ReturnType<typeof openDb>
 
@@ -11,7 +11,7 @@ export function openDb(path: string) {
   const raw = new Database(path)
   raw.exec('PRAGMA journal_mode=WAL')
   raw.exec('PRAGMA synchronous=NORMAL')
-  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations } })
+  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications } })
   // Schema bootstrap (idempotent). DDL lives here so tests need no migration runner.
   raw.exec(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -100,6 +100,9 @@ export function openDb(path: string) {
       discarded_count  INTEGER NOT NULL,
       duration_ms      INTEGER NOT NULL,
       error_message    TEXT,
+      digest_ms        INTEGER,
+      dedup_ms         INTEGER,
+      judge_ms         INTEGER,
       ts               INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS app_settings (
@@ -127,6 +130,18 @@ export function openDb(path: string) {
     );
     CREATE INDEX IF NOT EXISTS idx_degradations_ts ON memory_degradations(ts);
     CREATE INDEX IF NOT EXISTS idx_degradations_job ON memory_degradations(distill_job_id);
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      ts INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT,
+      ref_type TEXT,
+      ref_id TEXT,
+      read_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications(ts);
+    CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(read_at);
   `)
   // Idempotent migration: add source_cwd to pre-existing memories tables.
   // CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so a column
@@ -279,6 +294,15 @@ export function openDb(path: string) {
     if (!cols.some((c) => c.name === 'last_capture_at')) {
       raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN last_capture_at INTEGER')
     }
+  }
+  // Idempotent migration: add digest_ms/dedup_ms/judge_ms to memory_distill_runs.
+  // LLM 三阶段 24h 统计（spec 2026-08-12 §5.4）。无 backfill（老行 NULL = 未计量）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+    const have = (n: string) => cols.some((c) => c.name === n)
+    if (!have('digest_ms')) raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN digest_ms INTEGER')
+    if (!have('dedup_ms')) raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN dedup_ms INTEGER')
+    if (!have('judge_ms')) raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN judge_ms INTEGER')
   }
   return db
 }
