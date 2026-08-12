@@ -100,14 +100,18 @@ export interface MemsideStatus {
   rescan?: RescanState
   /** 未评估候选数（status='candidate' 且 valueClass 非保护类）；老 daemon 无此字段。 */
   unevaluatedCandidates?: number
-  /** 降级可见化（spec §4.9）：24h 降级计数 + 最新一条 + ack 时间；老 daemon 无此字段。 */
-  recentDegradations?: {
-    count24h: number
-    latest: { kind: string; detail: string | null; ts: number } | null
-    acknowledgedTs: number | null
-  }
   /** 累加中的 waiting job 数（spec §4.9：单列避免「pending 堆积」假象）；老 daemon 无此字段。 */
   waitingJobs?: number
+  /** LLM 实时活动（spec 2026-08-12 §5.8）；老 daemon 无此字段。 */
+  llmActivity?: { phase: string; detail: string | null; since: number } | null
+  /** 三阶段近 24h 次数与累计耗时；老 daemon 无此字段。 */
+  llmStats24h?: {
+    distill: { count: number; ms: number }
+    dedup: { count: number; ms: number }
+    judge: { count: number; ms: number }
+  }
+  /** 未读消息数（消息 tab 徽标 + 状态栏 🔔）；老 daemon 无此字段。 */
+  unreadNotifications?: number
 }
 
 /**
@@ -264,11 +268,6 @@ export async function getDistillRunSourceInput(
 
 // --- 降级可见化（spec §4.9）client --------------------------------------------
 
-/** POST /api/degradations/ack — 用户点「知道了」，ack ts = now 落 appSettings。 */
-export async function ackDegradations(fetchFn: FetchLike = fetch): Promise<void> {
-  await fetchFn('/api/degradations/ack', { method: 'POST' })
-}
-
 /** GET /api/distill-runs/:jobId/degradations — 该 job 的降级明细（modal 懒加载）。 */
 export async function getRunDegradations(
   jobId: string, fetchFn: FetchLike = fetch,
@@ -354,6 +353,40 @@ export async function listDiscardsPage(
   if (opts.project) qs.set('project', opts.project)
   if (opts.category) qs.set('category', opts.category)
   return parsePage<DiscardItem>(await fetchFn(`/api/discards?${qs}`))
+}
+
+// --- 消息中心 client（spec 2026-08-12）-----------------------------------------
+
+export interface NotificationItem {
+  id: string
+  ts: number
+  kind: 'degradation' | 'llm_error'
+  title: string
+  body: string | null
+  refType: string | null
+  refId: string | null
+  readAt: number | null
+}
+
+export async function listNotificationsPage(
+  fetchFn: FetchLike = fetch,
+  opts: { kind?: string; unreadOnly?: boolean; q?: string } & PageOpts = {},
+): Promise<PageDto<NotificationItem>> {
+  const p = pageParams(opts)
+  if (opts.kind) p.set('kind', opts.kind)
+  if (opts.unreadOnly) p.set('unread', '1')
+  if (opts.q) p.set('q', opts.q)
+  return parsePage<NotificationItem>(await fetchFn(`/api/notifications?${p}`))
+}
+
+/** POST /api/notifications/:id/read — no-throw 契约（与 promote/restore 同模式）。 */
+export async function markNotificationRead(id: string, fetchFn: FetchLike = fetch): Promise<void> {
+  await fetchFn(`/api/notifications/${id}/read`, { method: 'POST' })
+}
+
+/** POST /api/notifications/read-all — no-throw 契约。 */
+export async function markAllNotificationsRead(fetchFn: FetchLike = fetch): Promise<void> {
+  await fetchFn('/api/notifications/read-all', { method: 'POST' })
 }
 
 export async function listDistillRunsPage(

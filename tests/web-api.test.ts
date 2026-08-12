@@ -4,6 +4,7 @@ import {
   listDistillRuns, getDistillRun, getDistillRunSourceInput, getLlmSettings, saveLlmSettings, testLlmConnection, type MemoryItem,
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, WEB_PAGE_SIZE,
   getFacets, UNEVALUATED,
+  listNotificationsPage, markNotificationRead, markAllNotificationsRead, type MemsideStatus, type FetchLike,
 } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
@@ -371,4 +372,38 @@ test('PageDto.total: 旧 daemon 无 total -> null（降级不崩）', async () =
     new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null }), { status: 200 })) as any
   const page = await listMemoriesPage(fetchFn, { status: 'candidate' })
   expect(page.total).toBeNull()
+})
+
+// --- Task 8: notifications client (消息中心 + 状态栏新字段) ---
+// Locks the notification endpoint wrappers and MemsideStatus new fields.
+
+test('listNotificationsPage 序列化 kind/unread/q/cursor', async () => {
+  let url = ''
+  const fakeFetch: FetchLike = async (u) => { url = String(u); return new Response(JSON.stringify({ items: [], hasMore: false, nextCursor: null, total: 0 })) }
+  await listNotificationsPage(fakeFetch, { kind: 'degradation', unreadOnly: true, q: '摘要', before: { ts: 9, id: 'x' }, limit: 20 })
+  expect(url).toContain('/api/notifications?')
+  expect(url).toContain('kind=degradation')
+  expect(url).toContain('unread=1')
+  expect(url).toContain(`q=${encodeURIComponent('摘要')}`)
+  expect(url).toContain('before=9')
+  expect(url).toContain('beforeId=x')
+})
+
+test('markNotificationRead / markAllNotificationsRead 方法与路径', async () => {
+  const calls: { url: string; method?: string }[] = []
+  const fakeFetch: FetchLike = async (u, init) => { calls.push({ url: String(u), method: init?.method }); return new Response('{}') }
+  await markNotificationRead('n1', fakeFetch)
+  await markAllNotificationsRead(fakeFetch)
+  expect(calls[0]).toEqual({ url: '/api/notifications/n1/read', method: 'POST' })
+  expect(calls[1]).toEqual({ url: '/api/notifications/read-all', method: 'POST' })
+})
+
+test('MemsideStatus 新字段类型存在（编译期锁定）', () => {
+  const s: MemsideStatus = {
+    events: 0, jobs: {}, memories: {}, discards: 0, lastError: null,
+    llmActivity: { phase: 'distill', detail: null, since: 1 },
+    llmStats24h: { distill: { count: 1, ms: 2 }, dedup: { count: 0, ms: 0 }, judge: { count: 0, ms: 0 } },
+    unreadNotifications: 3,
+  }
+  expect(s.unreadNotifications).toBe(3)
 })

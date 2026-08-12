@@ -3,7 +3,7 @@ import {
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, WEB_PAGE_SIZE,
   promoteMemory, patchMemory, getStatus, getSourceInput,
   restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
-  getDistillRun, getDistillRunSourceInput, getRunDegradations, ackDegradations,
+  getDistillRun, getDistillRunSourceInput, getRunDegradations,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
   getFacets, UNEVALUATED,
@@ -396,19 +396,6 @@ export default function App() {
             {status.lastError ? (
               <div style={{ marginTop: 6, color: '#c00' }}>
                 最近错误: {String(status.lastError.error).slice(0, 160)}
-              </div>
-            ) : null}
-            {/* 降级横幅（spec §4.9 降级可见化）：数据走既有 status 轮询不新增 fetch；
-                只在 count24h>0 且（未 ack 或最新降级晚于 ack）时出现。「知道了」调
-                POST /api/degradations/ack（ack_ts 落 appSettings）；ack 失败横幅
-                自然留下（ack_ts 未落库），不静默吞错。 */}
-            {status.recentDegradations && status.recentDegradations.count24h > 0 &&
-             (status.recentDegradations.acknowledgedTs === null ||
-              (status.recentDegradations.latest && status.recentDegradations.latest.ts > status.recentDegradations.acknowledgedTs)) ? (
-              <div style={{ marginTop: 6, color: '#e65100' }}>
-                近 24h {status.recentDegradations.count24h} 次降级
-                {status.recentDegradations.latest ? `: ${degradationKindLabel(status.recentDegradations.latest.kind)}` : ''}
-                <button style={{ marginLeft: 8, fontSize: 12 }} onClick={() => { void ackDegradations().then(() => refresh(tab)).catch(() => {}) }}>知道了</button>
               </div>
             ) : null}
           </>
