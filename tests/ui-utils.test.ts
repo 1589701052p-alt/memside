@@ -1,5 +1,5 @@
-import { test, expect } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, formatToolCall, projectDisplayName } from '@/web/ui-utils'
+import { test, expect, describe } from 'bun:test'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, formatToolCall, projectDisplayName, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -227,4 +227,34 @@ test('projectDisplayName: 末段撞名升级 父/子', () => {
 test('projectDisplayName: 无父段 / 空输入回退原值，永不抛', () => {
   expect(projectDisplayName('solo', ['solo', 'x/solo'])).toBe('solo')
   expect(projectDisplayName('', [''])).toBe('')
+})
+
+describe('LLM 实况与消息文案（spec 2026-08-12 §5.11）', () => {
+  test('phaseLabel：digest 归蒸馏；未知原样兜底', () => {
+    expect(phaseLabel('distill')).toBe('蒸馏')
+    expect(phaseLabel('digest')).toBe('蒸馏')
+    expect(phaseLabel('dedup')).toBe('去重')
+    expect(phaseLabel('judge')).toBe('审查')
+    expect(phaseLabel('weird')).toBe('weird')
+  })
+
+  test('formatElapsed 边界：59s/60s/59分/60分', () => {
+    expect(formatElapsed(59_000)).toBe('59秒')
+    expect(formatElapsed(60_000)).toBe('1分')
+    expect(formatElapsed(3_599_000)).toBe('59分')
+    expect(formatElapsed(3_600_000)).toBe('1小时0分')
+    expect(formatElapsed(-5)).toBe('0秒')
+  })
+
+  test('formatPhaseStat：0 次不带耗时；正常「N次·X」', () => {
+    expect(formatPhaseStat(0, 123456)).toBe('0次')
+    expect(formatPhaseStat(19, 8 * 60_000)).toBe('19次·8分')
+    expect(formatPhaseStat(2, 45_000)).toBe('2次·45秒')
+  })
+
+  test('notificationTitle：降级走 degradationKindLabel；llm_error 固定文案；未知兜底', () => {
+    expect(notificationTitle({ kind: 'degradation', title: 'digest_truncated' })).toBe('摘要压缩超限')
+    expect(notificationTitle({ kind: 'degradation', title: 'unknown_kind' })).toBe('unknown_kind')
+    expect(notificationTitle({ kind: 'llm_error', title: 'llm_error' })).toBe('蒸馏 LLM 报错')
+  })
 })
