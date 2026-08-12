@@ -7,11 +7,13 @@ import {
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
   getFacets, UNEVALUATED,
+  listNotificationsPage, markNotificationRead, markAllNotificationsRead,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
+  type NotificationItem,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, SLUG_BADGE_TIP } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, SLUG_BADGE_TIP } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
 
 /**
@@ -27,7 +29,7 @@ const CHIP_STYLE = {
   fontSize: 12,
 }
 
-type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'settings'
+type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'settings' | 'messages'
 
 /** 带筛选条的 tab 判定（spec 2026-08-11-per-tab-memory-filters §4.4）。 */
 function isFilterTab(t: TabKey): t is FacetTab {
@@ -42,14 +44,15 @@ interface TabPage<T> { items: T[]; nextCursor: { ts: number; id: string } | null
 function emptyPage<T>(): TabPage<T> { return { items: [], nextCursor: null, hasMore: true, total: null } }
 
 /**
- * 5+1 tab 视图：候选审批 / 已审批 / 已拒绝 / AI自动拒绝 / 蒸馏记录 五个列表 tab
- * + 设置 tab（isListTab 判据区分，spec 2026-08-07 settings-tab）。顶部 tab 切换。每列表 tab
+ * 5+2 tab 视图：候选审批 / 已审批 / 已拒绝 / AI自动拒绝 / 蒸馏记录 五个列表 tab
+ * + 设置 tab + 消息 tab（isListTab 判据区分，spec 2026-08-07 settings-tab）。顶部 tab 切换。每列表 tab
  * 独立数据源 + 操作 + 3s 轮询;切 tab 清旧 interval 建新的(useEffect 依赖 tab)。
  * 候选 tab 仍同时拉 status;其余 tab 也拉 status(计数徽标 + 状态栏)。
  *
- * 状态栏(后台可见性)保持不动:已捕获事件 / distill 进行中 / 最近错误,让用户
- * 看到 daemon 在干活。fetch 失败显错误 banner,切 tab 显「加载中…」,空列表显
- * 对应文案,不静默 stall 出白页。
+ * 状态栏(后台可见性,spec 2026-08-12 §5.10):LLM 三阶段实况(蒸馏/去重/审查,
+ * phaseLabel 双向映射 active 判定) + 🔔 消息入口(unreadNotifications 计数) +
+ * 近24h 分阶段统计,让用户看到 daemon 在干活。fetch 失败显错误 banner,切 tab 显
+ * 「加载中…」,空列表显对应文案,不静默 stall 出白页。
  *
  * 操作契约:no-throw(Task 7 carried finding)。restoreMemory/archiveMemory/
  * unarchiveMemory/promoteDiscard 不检查 res.ok,server 404/409 时返回 undefined。
@@ -63,10 +66,10 @@ export default function App() {
   })
   const [discards, setDiscards] = useState<TabPage<DiscardItem>>(emptyPage())
   const [runs, setRuns] = useState<TabPage<DistillRunListItem>>(emptyPage())
-  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false })
+  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
   // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
   // (对齐重构前的初始 loading=true 行为)。
-  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false })
+  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
   // 四维筛选 per-tab 独立态（spec 2026-08-11-per-tab-memory-filters §4.4）：切 tab
   // 不携带筛选；空串 = 不筛该维度。facetsByTab = 每 tab 下拉选项缓存（SWR：切回
   // 立显本 tab 选项；undefined = 首访尚未加载成功）。filter/facets 是按当前 tab 的
@@ -84,8 +87,8 @@ export default function App() {
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
   const [rescanError, setRescanError] = useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false })
-  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null, settings: null })
+  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
+  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null, settings: null, messages: null })
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadMoreRef = useRef<(t: TabKey) => Promise<void>>(async () => {})
 
@@ -305,9 +308,8 @@ export default function App() {
   // 记忆列表按 createdAt 倒序(newest first)。memCache 在 candidate/approved/rejected
   // tab 分别是对应 status 的子集(server 已过滤),客户端再排一次保证顺序一致。
   const memItems = sortCandidatesByTime(memCache[tab as MemoryTabKey]?.items ?? [])
-  const jobs = status?.jobs ?? {}
-  const running = (jobs.running ?? 0) + (jobs.pending ?? 0)
-  const listEmpty = tab === 'discards' ? discards.items.length === 0
+  const listEmpty = tab === 'messages' ? false // 占位（Task 10 换真实列表真值）
+    : tab === 'discards' ? discards.items.length === 0
     : tab === 'runs' ? runs.items.length === 0
     : (memCache[tab as MemoryTabKey]?.items ?? []).length === 0
   const showLoading = shouldShowLoading(loaded, pending, tab)
@@ -323,6 +325,7 @@ export default function App() {
     { key: 'discards', label: 'AI自动拒绝', count: tabTotalCount(status, 'discards') ?? 0 },
     { key: 'runs', label: '蒸馏记录', count: tabTotalCount(status, 'runs') ?? 0 },
     { key: 'settings', label: '设置', count: null }, // 设置 tab 无计数徽标
+    { key: 'messages', label: '消息', count: status?.unreadNotifications ?? null },
   ]
 
   return (
@@ -370,32 +373,30 @@ export default function App() {
       >
         {status ? (
           <>
-            <span>
-              已捕获事件 <b>{status.events}</b>
-            </span>
-            {' · '}
-            <span>
-              distill: <b>{running > 0 ? `${running} 进行中` : '空闲'}</b>
-            </span>
-            {jobs.done ? (
-              <>
-                {' · '}
-                <span>完成 {jobs.done}</span>
-              </>
-            ) : null}
-            {jobs.failed ? (
-              <>
-                {' · '}
-                <span style={{ color: '#c00' }}>失败 {jobs.failed}</span>
-              </>
-            ) : null}
-            {' · '}
-            <span>
-              记忆: {status.memories.candidate ?? 0} 待审 / {status.memories.approved ?? 0} 已批准
-            </span>
-            {status.lastError ? (
-              <div style={{ marginTop: 6, color: '#c00' }}>
-                最近错误: {String(status.lastError.error).slice(0, 160)}
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+              {(['distill', 'dedup', 'judge'] as const).map((p) => {
+                const act = status.llmActivity
+                const active = act != null && phaseLabel(act.phase) === phaseLabel(p)
+                return (
+                  <span key={p} style={{ color: active ? '#1565c0' : '#999' }}>
+                    {phaseLabel(p)}{' '}
+                    <b>{active && act ? `进行中·${formatElapsed(Date.now() - act.since)}` : '空闲'}</b>
+                  </span>
+                )
+              })}
+              <button
+                style={{ marginLeft: 'auto', fontSize: 12 }}
+                onClick={() => setTab('messages')}
+                title="查看消息"
+              >
+                🔔 {(status.unreadNotifications ?? 0) > 0 ? `${status.unreadNotifications} 未读` : '已读完'}
+              </button>
+            </div>
+            {status.llmStats24h ? (
+              <div style={{ marginTop: 6, color: '#666' }}>
+                近24h 蒸馏 {formatPhaseStat(status.llmStats24h.distill.count, status.llmStats24h.distill.ms)}
+                {' │ '}去重 {formatPhaseStat(status.llmStats24h.dedup.count, status.llmStats24h.dedup.ms)}
+                {' │ '}审查 {formatPhaseStat(status.llmStats24h.judge.count, status.llmStats24h.judge.ms)}
               </div>
             ) : null}
           </>
@@ -477,6 +478,8 @@ export default function App() {
           <LlmSettings />
           <JudgeSettings />
         </>
+      ) : tab === 'messages' ? (
+        <p style={{ color: '#666' }}>消息列表加载中…</p>
       ) : error ? null : showLoading && listEmpty ? (
         <p>加载中…</p>
       ) : tab === 'candidate' ? (
