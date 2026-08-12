@@ -8,6 +8,7 @@ import {
   logDegradation, saveDistillRun, getDistillRun,
   NotificationNotFoundError, InvalidNotificationFilterError,
   NOTIFICATION_RETENTION_CAP,
+  type PageCursor,
 } from '@/memory/store'
 
 const root = join(import.meta.dir, '.tmp-store-notifications')
@@ -39,14 +40,29 @@ test('insertNotification 落库全字段；body 超 2000 截断', async () => {
 
 test('保留上限：第 501 条写入后总数恒 500，最旧被删', async () => {
   await insertNotification(db, { kind: 'degradation', title: 't0' })
-  await new Promise((r) => setTimeout(r, 20)) // 保证 t0 与后续写入落在不同 ts 桶，使最旧删除可预期
-  for (let i = 1; i <= NOTIFICATION_RETENTION_CAP; i++) {
+  await new Promise((r) => setTimeout(r, 20)) // t0 落在更旧 ts 桶
+  for (let i = 1; i < NOTIFICATION_RETENTION_CAP; i++) {
     await insertNotification(db, { kind: 'degradation', title: `t${i}` })
   }
+  await new Promise((r) => setTimeout(r, 20)) // t500 落在最新 ts 桶
+  await insertNotification(db, { kind: 'degradation', title: `t${NOTIFICATION_RETENTION_CAP}` })
+
   const pg = await listNotificationsPage(db, { limit: 1 })
   expect(pg.total).toBe(NOTIFICATION_RETENTION_CAP)
-  const all = await listNotificationsPage(db, { limit: NOTIFICATION_RETENTION_CAP })
-  expect(all.items.map((n) => n.title)).not.toContain('t0')         // 最旧被裁
+  expect(pg.items[0]!.title).toBe(`t${NOTIFICATION_RETENTION_CAP}`) // 最新在头部
+
+  // 游标翻页收齐全部 retained titles，验证 t0 被裁掉（t0 最旧，只会出现在最后一页）
+  const allTitles: string[] = []
+  let page = await listNotificationsPage(db, { limit: 200 })
+  allTitles.push(...page.items.map((n) => n.title))
+  let cursor: PageCursor | null = page.nextCursor
+  while (cursor) {
+    page = await listNotificationsPage(db, { limit: 200, before: cursor })
+    allTitles.push(...page.items.map((n) => n.title))
+    cursor = page.nextCursor
+  }
+  expect(allTitles.length).toBe(NOTIFICATION_RETENTION_CAP)
+  expect(allTitles).not.toContain('t0')
 })
 
 test('logDegradation 双写：审计行 + 消息行同时出现', async () => {
