@@ -1,6 +1,6 @@
 // tests/context-digest.test.ts
 import { describe, test, expect } from 'bun:test'
-import { DIGEST_MAX_CHARS, DIGEST_LINE_MAX_CHARS, buildDeterministicDigest } from '@/memory/contextDigest'
+import { DIGEST_MAX_CHARS, DIGEST_LINE_MAX_CHARS, buildDeterministicDigest, renderDigestLines, trimOldestLines } from '@/memory/contextDigest'
 import type { TranscriptTurn } from '@/memory/pure'
 
 const t = (role: TranscriptTurn['role'], content: string, toolName?: string): TranscriptTurn =>
@@ -8,7 +8,10 @@ const t = (role: TranscriptTurn['role'], content: string, toolName?: string): Tr
 
 describe('buildDeterministicDigest', () => {
   test('常量锁定', () => {
-    expect(DIGEST_MAX_CHARS).toBe(3000)
+    // DIGEST_MAX_CHARS 3000 -> 6000：2026-08-11 digest-ledger-redesign spec §2 G5（用户确认）。
+    // 依据：digest 仅是蒸馏 prompt 的背景一节，64k token 输入预算下增量 ~5%；
+    // 预算越大合并压缩比越小，超预算概率越低。
+    expect(DIGEST_MAX_CHARS).toBe(6000)
     expect(DIGEST_LINE_MAX_CHARS).toBe(300)
   })
   test('user/assistant 截断 300 字单行，换行压平', () => {
@@ -73,5 +76,36 @@ describe('buildDeterministicDigest', () => {
   test('tool 无 toolCall -> 保持 [tool: 名字]（兼容）', () => {
     const d = buildDeterministicDigest([t('tool', 'out', 'Read')])
     expect(d).toBe('[tool: Read]')
+  })
+})
+
+describe('renderDigestLines（行格式唯一权威，spec §5.1）', () => {
+  test('四种 role 格式 + system 跳过', () => {
+    expect(renderDigestLines([
+      t('user', 'a'), t('assistant', 'b'), t('thinking', 'c'), t('tool', 'out', 'Read'), t('system', 's'),
+    ])).toEqual(['USER: a', 'ASSISTANT: b', 'THINKING: c', '[tool: Read]'])
+  })
+  test('300 字 cap + 换行压平', () => {
+    const [line] = renderDigestLines([t('user', 'a\nb ' + 'x'.repeat(500))])
+    expect(line!.startsWith('USER: a b ')).toBe(true)
+    expect(line!.length).toBe('USER: '.length + DIGEST_LINE_MAX_CHARS)
+  })
+  test('空输入 -> 空数组', () => {
+    expect(renderDigestLines([])).toEqual([])
+  })
+})
+
+describe('trimOldestLines（最旧整行丢弃，经济/质量共用，spec §5.1）', () => {
+  test('丢最旧整行直到达标', () => {
+    expect(trimOldestLines(['aaaa', 'bbbb', 'cccc'], 9)).toEqual(['bbbb', 'cccc']) // 'bbbb\ncccc' = 9
+  })
+  test('恰好达标不动', () => {
+    expect(trimOldestLines(['aa', 'bb'], 5)).toEqual(['aa', 'bb'])
+  })
+  test('仅剩单行仍超 -> 原样返回（尾部切片归调用方）', () => {
+    expect(trimOldestLines(['x'.repeat(20)], 5)).toEqual(['x'.repeat(20)])
+  })
+  test('空数组 -> 空数组', () => {
+    expect(trimOldestLines([], 10)).toEqual([])
   })
 })

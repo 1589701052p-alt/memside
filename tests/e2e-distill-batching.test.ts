@@ -6,7 +6,7 @@
 // 1. openDb(':memory:') 在 bun 下 mkdirSync(dirname(':memory:')) 抛 EEXIST，
 //    改用临时文件库（对齐 tests/server-distill-batching.test.ts；Windows 不 rmSync 临时目录）。
 // 2. 钉经济模式（loadJudgeConfig = ECONOMY）：默认质量模式下每次成功 distill
-//    （含 empty_output）会追加 mergeRollingSummary 的滚动摘要 LLM 调用，llmCalls
+//    （含 empty_output）会追加 updateSessionLedger 的滚动摘要 LLM 调用，llmCalls
 //    就不再是纯 distill 计数。经济模式无此追加，0/0/1/1/2 语义成立
 //    （对齐 tests/scheduler-distill-batching.test.ts 的钉法）。
 // 3. 尾巴内容 .repeat(20)->.repeat(100)（约 1200 字符）：flush/TTL 路径的 sweep
