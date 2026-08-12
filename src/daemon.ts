@@ -16,6 +16,7 @@ import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
 import { OpencodeAdapter } from './adapter/opencode'
 import { installHooks } from './install'
+import { createActivityTracker } from './activity'
 
 export interface DaemonOpts {
   dbPath?: string
@@ -164,17 +165,20 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   // mid-tick would otherwise be invisible to the pending-only select in `tick`.
   sweepStuckRunning(db)
 
+  // LLM 实时活动单例（spec 2026-08-12 §5.7）：scheduler 侧置位，server 侧读出。
+  const tracker = createActivityTracker()
   const adapter = new ClaudeCodeAdapter(db)
   // opencode runtime adapter（Task 4 接线）：与 claude adapter 共享同一 db，
   // project 记忆跨 runtime 共享（spec §5，listApprovedByScope 已去 runtime 过滤）。
   // /hooks/opencode/inject 走它；capture 路由与 plugin 安装在 Task 5/6/7 落地。
   const opencodeAdapter = new OpencodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
-  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, callLLM: resolveCallLLM({}, db) })
+  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, tracker, callLLM: resolveCallLLM({}, db) })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
+    tracker,
     callLLM: resolveCallLLM({}, db),
     createCandidate,
     // 每 tick 现读 app_settings 的判定配置：UI 设置页改动即时生效，不重启 daemon
