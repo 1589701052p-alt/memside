@@ -964,3 +964,18 @@ LLM 只做按片压缩（配额 = 渲染长度/2，钳制 [600, 3000]），全�
 - 账本长度分布（length(digest) 贴 6000 频率，评估预算再调）；
 - 跨片指代质量：候选与既有记忆重复率是否因「只看切片 + 尾 5 行衔接」上升；
 - 对照 2026-08-09 观测清单的 degradations kind 分布变化。
+
+## 状态栏 LLM 实况 + 消息中心（2026-08-12）
+
+诊断：原顶部状态栏只有「已捕获事件 / distill 进行中 / 记忆计数 / 最近错误」，信息密度低、用户看不到 LLM 内部三阶段进展；降级与 LLM 报错混在状态栏里一闪而过，既吵又不人性化。本次重写状态栏并新增「消息」tab 作为统一收件箱。
+
+1. **状态栏 LLM 三阶段实况**：蒸馏(distill) / 去重(dedup) / 审查(judgeValue) 的进行中状态、各阶段耗时、24h 各阶段统计（次数/总耗时/平均耗时）。
+2. **`ActivityTracker` 单例注入 scheduler 与 server**：在 daemon 层用一个单例跟踪当前 job 各阶段起止时间，避免 scheduler/server 两端各自记状态导致漂移。
+3. **`memory_distill_runs` 三耗时列**：`distill_duration_ms` / `dedup_duration_ms` / `judge_duration_ms`，scheduler tick 接线写入。
+4. **统一消息收件箱**：新建 `notifications` 表，scheduler 双写降级(degradations)与 LLM 报错到通知表；Web UI 新增「消息」tab，支持未读计数徽标、筛选、搜索、逐条已读、全部已读；旧的 `ackDegradations` 端点退役。
+5. **`/api/status` 新字段**：`llm`、`messagesUnread` 等，驱动状态栏与消息入口。
+
+执行方式：subagent-driven（10 实现 task 各 implementer + reviewer；全部 Approved）。`bun run typecheck && bun test` 955/955 全绿。设计 spec / 计划见 `docs/superpowers/specs/2026-08-12-llm-status-and-message-center-design.md` 与 `docs/superpowers/plans/2026-08-12-llm-status-and-message-center.md`。
+
+### 终审 deferred minor（非阻塞）
+

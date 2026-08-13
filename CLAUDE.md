@@ -65,7 +65,7 @@ spec、plan 两份文件落档到 `docs/superpowers/specs/` 与 `docs/superpower
 memside 的 Web UI（`src/web/`）目前是轻量自绘样式（inline style + 少量约定结构）。新增 / 改动界面时：
 
 - **优先复用** `src/web/App.tsx` 里既有的样式风格与组件结构（`MemoryCard` 等），保持视觉与交互一致，不要为"快一点"引入新样式框架或重写既有 chrome。
-- **状态可见性**：涉及后台异步（distill / scheduler / 事件捕获）的改动，UI 必须让用户**感知后台状态**——参考 `GET /api/status` + 顶部状态栏（已捕获事件 / distill 进行中 / 记忆计数 / 最近错误）。**不得静默 stall 出空白页**：fetch 失败要显示错误横幅，加载中要显示进度，不得让用户对着空 UI 猜后台在不在跑。
+- **状态可见性**：涉及后台异步（distill / scheduler / 事件捕获）的改动，UI 必须让用户**感知后台状态**——参考 `GET /api/status` + 顶部状态栏（LLM 三阶段实况：蒸馏/去重/审查 进行中与耗时 + 近 24h 统计 + 未读消息入口；降级与 LLM 报错统一进「消息」tab，逐条已读 + 历史搜索）。**不得静默 stall 出空白页**：fetch 失败要显示错误横幅，加载中要显示进度，不得让用户对着空 UI 猜后台在不在跑。
 - **vite proxy 陷阱**：`vite.config.ts` 的 proxy 键用 `/api/`（带尾斜杠）而非 `/api`——后者会把 `App.tsx` 的 `import './api'`（即 `/api.ts` 模块请求）也转发给 daemon 而 404，导致整个模块图断裂、白屏。新增 proxy 前缀时同理避免与源码模块路径冲突。
 
 ## opencode / claude code 行为以源码为准
