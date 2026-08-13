@@ -401,9 +401,14 @@ test('App.tsx 卡片可理解性：标题剥离 + 徽章行 + 元信息字段化
   expect(src).toContain('提炼于:')
 })
 
+// 反向锁收窄说明（2026-08-12 llm-status Task 9）：旧锁禁裸子串 '高·'/'中·'，
+// 但新状态栏 spec §5.10  mandated 文案「进行中·12s」含 '中·'，属合法新用途。
+// 锁的原始意图是禁旧价值缩写（高·决策/中·陷阱 等六筐拼接），改为禁七个
+// 完整旧标签——任一复活仍红，不误伤新状态栏。
 test('App.tsx 旧缩写文案退场（反向断言：高·/中· 拼接格式不得复活）', () => {
-  expect(src).not.toContain('高·')
-  expect(src).not.toContain('中·')
+  for (const legacy of ['高·规矩', '高·决策', '高·约定', '中·偏好', '中·拓扑', '中·陷阱', '中·约定']) {
+    expect(src).not.toContain(legacy)
+  }
 })
 
 test('App.tsx DiscardCard 可理解性：标题剥离 + 拒绝理由前缀 + 元信息字段化 (source text)', () => {

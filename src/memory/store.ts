@@ -1,7 +1,7 @@
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lt, notInArray, or, sql } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations } from '@/db/schema'
+import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications } from '@/db/schema'
 import {
   canTransition,
   categoryFromTitle,
@@ -598,6 +598,8 @@ export interface DistillRunRecord {
   discardedCount: number
   durationMs: number
   errorMessage: string | null
+  dedupMs?: number | null
+  judgeMs?: number | null
 }
 
 export interface DistillRunRow {
@@ -613,6 +615,9 @@ export interface DistillRunRow {
   durationMs: number
   errorMessage: string | null
   ts: number
+  digestMs: number | null
+  dedupMs: number | null
+  judgeMs: number | null
 }
 
 export async function saveDistillRun(
@@ -626,13 +631,15 @@ export async function saveDistillRun(
     dedupedCount: record.dedupedCount, filteredCount: record.filteredCount,
     storedCount: record.storedCount, discardedCount: record.discardedCount,
     durationMs: record.durationMs, errorMessage: record.errorMessage, ts: now,
+    dedupMs: record.dedupMs ?? null, judgeMs: record.judgeMs ?? null,
   }).onConflictDoUpdate({
     target: memoryDistillRuns.distillJobId,
     set: { outcome: record.outcome, rawOutputJson, distilledCount: record.rawCount,
       acceptedCount: record.acceptedCount, dedupedCount: record.dedupedCount,
       filteredCount: record.filteredCount, storedCount: record.storedCount,
       discardedCount: record.discardedCount, durationMs: record.durationMs,
-      errorMessage: record.errorMessage, ts: now },
+      errorMessage: record.errorMessage, ts: now,
+      dedupMs: record.dedupMs ?? null, judgeMs: record.judgeMs ?? null },
   })
 }
 
@@ -646,6 +653,7 @@ function rowToRun(r: any): DistillRunRow {
     rawCount: r.distilledCount, acceptedCount: r.acceptedCount, dedupedCount: r.dedupedCount,
     filteredCount: r.filteredCount, storedCount: r.storedCount, discardedCount: r.discardedCount,
     durationMs: r.durationMs, errorMessage: r.errorMessage ?? null, ts: r.ts,
+    digestMs: r.digestMs ?? null, dedupMs: r.dedupMs ?? null, judgeMs: r.judgeMs ?? null,
   }
 }
 
@@ -1137,6 +1145,18 @@ export async function logDegradation(
     })
   } catch (e) {
     console.warn('memside: logDegradation failed (audit self-failure, console-only by design)', e)
+    return
+  }
+  // 消息双写（spec 2026-08-12 §5.2）：审计表 + 用户收件箱各一条。
+  // 与审计同契约：失败只 warn，不炸调用方。
+  try {
+    await insertNotification(db, {
+      kind: 'degradation', title: entry.kind, body: entry.detail ?? null,
+      refType: entry.distillJobId ? 'distill_job' : null,
+      refId: entry.distillJobId ?? null,
+    })
+  } catch (e) {
+    console.warn('memside: degradation notification insert failed', e)
   }
 }
 
@@ -1150,4 +1170,117 @@ export async function listDegradationsForJob(db: DbClient, jobId: string): Promi
   return db.select().from(memoryDegradations)
     .where(eq(memoryDegradations.distillJobId, jobId))
     .orderBy(desc(memoryDegradations.ts)).limit(50)
+}
+
+// ---------------------------------------------------------------------------
+// 消息中心（spec 2026-08-12 §5.1-5.3）：notifications 收件箱
+// ---------------------------------------------------------------------------
+
+export const NOTIFICATION_RETENTION_CAP = 500
+export const NOTIFICATION_BODY_CAP_CHARS = 2000
+export const NOTIFICATION_KINDS = ['degradation', 'llm_error'] as const
+export type NotificationKind = typeof NOTIFICATION_KINDS[number]
+
+export interface NotificationRow {
+  id: string; ts: number; kind: NotificationKind; title: string
+  body: string | null; refType: string | null; refId: string | null; readAt: number | null
+}
+
+export class NotificationNotFoundError extends Error {}
+export class InvalidNotificationFilterError extends Error {}
+
+/**
+ * 写一条消息并执行保留裁剪（spec §5.2）：超过 NOTIFICATION_RETENTION_CAP
+ * 删最旧。裁剪失败只 warn，不影响插入结果。
+ */
+export async function insertNotification(
+  db: DbClient,
+  input: { kind: NotificationKind; title: string; body?: string | null; refType?: string | null; refId?: string | null },
+): Promise<string> {
+  const id = ulid()
+  const body = input.body == null ? null : input.body.slice(0, NOTIFICATION_BODY_CAP_CHARS)
+  await db.insert(notifications).values({
+    id, ts: Date.now(), kind: input.kind, title: input.title, body,
+    refType: input.refType ?? null, refId: input.refId ?? null, readAt: null,
+  }).run()
+  try {
+    await db.run(sql`DELETE FROM notifications WHERE id NOT IN (SELECT id FROM notifications ORDER BY ts DESC, id DESC LIMIT ${NOTIFICATION_RETENTION_CAP})`)
+  } catch (e) { console.warn('memside: notification retention trim failed', e) }
+  return id
+}
+
+/** scheduler llm_error 路径专用（spec §5.2）：自身吞错只 warn，不炸蒸馏。 */
+export async function logLlmErrorNotification(db: DbClient, input: { jobId: string; message: string }): Promise<void> {
+  try {
+    await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: input.message, refType: 'distill_job', refId: input.jobId })
+  } catch (e) { console.warn('memside: llm_error notification insert failed', e) }
+}
+
+export interface NotificationListOpts {
+  limit?: number
+  before?: PageCursor
+  kind?: NotificationKind
+  unreadOnly?: boolean
+  q?: string
+}
+
+/** 消息分页（spec §5.3）：游标/排序/total 与 listDiscardsPage 同模式。 */
+export async function listNotificationsPage(
+  db: DbClient, opts: NotificationListOpts = {},
+): Promise<PageWithTotal<NotificationRow>> {
+  if (opts.kind && !(NOTIFICATION_KINDS as readonly string[]).includes(opts.kind)) {
+    throw new InvalidNotificationFilterError(`invalid notification kind: ${opts.kind}`)
+  }
+  const limit = clampPageLimit(opts.limit)
+  const baseConds: any[] = []
+  if (opts.kind) baseConds.push(eq(notifications.kind, opts.kind))
+  if (opts.unreadOnly) baseConds.push(isNull(notifications.readAt))
+  if (opts.q) baseConds.push(or(like(notifications.title, `%${opts.q}%`), like(notifications.body, `%${opts.q}%`)))
+  const conds = [...baseConds]
+  if (opts.before) {
+    conds.push(or(
+      lt(notifications.ts, opts.before.ts),
+      and(eq(notifications.ts, opts.before.ts), lt(notifications.id, opts.before.id)),
+    ))
+  }
+  const rows = await db.select().from(notifications)
+    .where(conds.length > 0 ? and(...conds) : undefined)
+    .orderBy(desc(notifications.ts), desc(notifications.id))
+    .limit(limit + 1).all()
+  const countRows = await db.select({ n: sql<number>`COUNT(*)` }).from(notifications)
+    .where(baseConds.length > 0 ? and(...baseConds) : undefined).all()
+  const hasMore = rows.length > limit
+  const pageRows = rows.slice(0, limit)
+  const last = pageRows[pageRows.length - 1]
+  return {
+    items: pageRows as NotificationRow[],
+    hasMore,
+    nextCursor: hasMore && last ? { ts: last.ts, id: last.id } : null,
+    total: Number(countRows[0]?.n ?? 0),
+  }
+}
+
+/** 标已读（spec §5.3）：已读行幂等成功；不存在抛 NotificationNotFoundError（server 404）。 */
+export async function markNotificationRead(db: DbClient, id: string): Promise<void> {
+  const rows = await db.update(notifications).set({ readAt: Date.now() })
+    .where(and(eq(notifications.id, id), isNull(notifications.readAt)))
+    .returning({ id: notifications.id })
+  if (rows.length === 0) {
+    const exists = await db.select({ id: notifications.id }).from(notifications)
+      .where(eq(notifications.id, id)).limit(1)
+    if (exists.length === 0) throw new NotificationNotFoundError(`notification ${id} not found`)
+  }
+}
+
+/** 全部已读（spec §5.3）：返回本次标记条数。 */
+export async function markAllNotificationsRead(db: DbClient): Promise<number> {
+  const rows = await db.update(notifications).set({ readAt: Date.now() })
+    .where(isNull(notifications.readAt)).returning({ id: notifications.id })
+  return rows.length
+}
+
+/** digest 耗时回填（spec §5.4）：run 行在 saveDistillRun 时已写，此处二次 UPDATE；无行 no-op。 */
+export async function updateDistillRunDigestMs(db: DbClient, jobId: string, ms: number): Promise<void> {
+  await db.update(memoryDistillRuns).set({ digestMs: ms })
+    .where(eq(memoryDistillRuns.distillJobId, jobId)).run()
 }

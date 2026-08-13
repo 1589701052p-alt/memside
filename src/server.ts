@@ -1,15 +1,15 @@
 import { Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
-import { and, count, desc, eq, gt, inArray, isNull, notInArray, or } from 'drizzle-orm'
+import { and, count, desc, eq, gt, inArray, isNull, notInArray, or, sql } from 'drizzle-orm'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns, appSettings } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns, notifications } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor, type MemoryListFilter, type FacetScope } from '@/memory/store'
-import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listRecentDegradations, listDegradationsForJob } from '@/memory/store'
+import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NotificationNotFoundError } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
@@ -22,6 +22,7 @@ import { testConnection as defaultTestConnection } from './anthropic'
 import { testConnection as openAiTestConnection, loadOpenAiUiCreds, type OpenAiCreds } from './openai'
 import { resolveCallLLMProtocol, type LLMProtocol, type LLMCall } from '@/llm'
 import { rescanCandidates, type RescanReport } from '@/memory/rescan'
+import type { ActivityTracker } from '@/activity'
 
 export interface AppDeps {
   db: DbClient
@@ -48,6 +49,8 @@ export interface AppDeps {
    * (组合根 resolveCallLLM)。缺省时 POST /api/rescan 回 503(不静默起假回扫);
    * 测试注入 mock。 */
   callLLM?: LLMCall
+  /** LLM 实时活动跟踪器（spec 2026-08-12 §5.7）：scheduler 置位，status 读出。 */
+  tracker?: ActivityTracker
 }
 
 /**
@@ -437,11 +440,19 @@ export function createApp(deps: AppDeps) {
       eq(memories.status, 'candidate'),
       or(isNull(memories.valueClass), notInArray(memories.valueClass, [...PROTECTED_VALUE_CLASSES])),
     )).all()
-    // 降级可见化（spec §4.9）：24h 计数 + 最新一条 + ack 状态。
-    const degrRows = await listRecentDegradations(deps.db, cutoff)
-    const ackRow = await deps.db.select().from(appSettings)
-      .where(eq(appSettings.key, 'degradations.ack_ts')).limit(1)
-    const acknowledgedTs = ackRow[0] ? Number(ackRow[0].value) : null
+    // LLM 实况与统计（spec 2026-08-12 §5.8）
+    const llmActivity = deps.tracker?.get() ?? null
+    const statsRows = await deps.db.select({
+      distillCount: sql<number>`SUM(CASE WHEN ${memoryDistillRuns.durationMs} > 0 THEN 1 ELSE 0 END)`,
+      distillMs: sql<number>`COALESCE(SUM(${memoryDistillRuns.durationMs}), 0) + COALESCE(SUM(${memoryDistillRuns.digestMs}), 0)`,
+      dedupCount: sql<number>`SUM(CASE WHEN ${memoryDistillRuns.dedupMs} IS NOT NULL THEN 1 ELSE 0 END)`,
+      dedupMs: sql<number>`COALESCE(SUM(${memoryDistillRuns.dedupMs}), 0)`,
+      judgeCount: sql<number>`SUM(CASE WHEN ${memoryDistillRuns.judgeMs} IS NOT NULL THEN 1 ELSE 0 END)`,
+      judgeMs: sql<number>`COALESCE(SUM(${memoryDistillRuns.judgeMs}), 0)`,
+    }).from(memoryDistillRuns).where(gt(memoryDistillRuns.ts, cutoff)).all()
+    const st = statsRows[0]
+    const unreadRows = await deps.db.select({ n: count() }).from(notifications)
+      .where(isNull(notifications.readAt)).all()
     // waiting 单列（spec §4.9）：累加中的 job 不是积压，避免 UI「pending 堆积」假象。
     const waitingCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
       .where(eq(memoryDistillJobs.status, 'waiting')).all()
@@ -460,23 +471,16 @@ export function createApp(deps: AppDeps) {
       distillRuns: { total: runGroups.reduce((s, g) => s + g.n, 0), byOutcome: runStats, allTime: runAllTime[0]?.n ?? 0 },
       lastError: errored ? { error: errored.lastError } : null,
       unevaluatedCandidates: unevalCount[0]?.n ?? 0,
-      recentDegradations: {
-        count24h: degrRows.length,
-        latest: degrRows[0] ? { kind: degrRows[0].kind, detail: degrRows[0].detail, ts: degrRows[0].ts } : null,
-        acknowledgedTs: Number.isFinite(acknowledgedTs) ? acknowledgedTs : null,
+      llmActivity,
+      llmStats24h: {
+        distill: { count: Number(st?.distillCount ?? 0), ms: Number(st?.distillMs ?? 0) },
+        dedup: { count: Number(st?.dedupCount ?? 0), ms: Number(st?.dedupMs ?? 0) },
+        judge: { count: Number(st?.judgeCount ?? 0), ms: Number(st?.judgeMs ?? 0) },
       },
+      unreadNotifications: unreadRows[0]?.n ?? 0,
       waitingJobs: waitingCount[0]?.n ?? 0,
       rescan: rescanState,
     })
-  })
-
-  // 降级 ack（spec §4.9）：用户点「知道了」，ack ts = now 落 appSettings（upsert）；
-  // 横幅只在 count24h>0 且（未 ack 或最新降级晚于 ack）时出现。
-  app.post('/api/degradations/ack', async (c) => {
-    const now = Date.now()
-    await deps.db.insert(appSettings).values({ key: 'degradations.ack_ts', value: String(now), updatedAt: now })
-      .onConflictDoUpdate({ target: appSettings.key, set: { value: String(now), updatedAt: now } }).run()
-    return c.json({ ok: true })
   })
 
   // 单 job 降级明细（spec §4.9）：蒸馏记录 modal 懒加载。
@@ -540,6 +544,42 @@ export function createApp(deps: AppDeps) {
     if (!Number.isFinite(ts)) return undefined
     return { ts, id: bid }
   }
+
+  // --- Notifications（消息中心，spec 2026-08-12 §5.8）------------------------
+  app.get('/api/notifications', async (c) => {
+    const kindParam = c.req.query('kind')
+    let kind: 'degradation' | 'llm_error' | undefined
+    if (kindParam !== undefined) {
+      if (kindParam !== 'degradation' && kindParam !== 'llm_error') {
+        return c.json({ error: `invalid kind: ${kindParam}` }, 400)
+      }
+      kind = kindParam
+    }
+    const limitParam = c.req.query('limit')
+    const page = await listNotificationsPage(deps.db, {
+      limit: limitParam !== undefined ? Number(limitParam) : undefined,
+      before: parseBefore(c),
+      kind,
+      unreadOnly: c.req.query('unread') === '1',
+      q: c.req.query('q') || undefined,
+    })
+    return c.json(page)
+  })
+
+  app.post('/api/notifications/read-all', async (c) => {
+    const marked = await markAllNotificationsRead(deps.db)
+    return c.json({ ok: true, marked })
+  })
+
+  app.post('/api/notifications/:id/read', async (c) => {
+    try {
+      await markNotificationRead(deps.db, c.req.param('id'))
+      return c.json({ ok: true })
+    } catch (e) {
+      if (e instanceof NotificationNotFoundError) return c.json({ error: 'not found' }, 404)
+      throw e
+    }
+  })
 
   app.get('/api/memories', async (c) => {
     const statusParam = c.req.query('status') ?? ''

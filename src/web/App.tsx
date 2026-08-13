@@ -3,15 +3,17 @@ import {
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, WEB_PAGE_SIZE,
   promoteMemory, patchMemory, getStatus, getSourceInput,
   restoreMemory, archiveMemory, unarchiveMemory, promoteDiscard,
-  getDistillRun, getDistillRunSourceInput, getRunDegradations, ackDegradations,
+  getDistillRun, getDistillRunSourceInput, getRunDegradations,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
   getFacets, UNEVALUATED,
+  listNotificationsPage, markNotificationRead, markAllNotificationsRead,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
+  type NotificationItem,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, SLUG_BADGE_TIP } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, SLUG_BADGE_TIP } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
 
 /**
@@ -27,7 +29,7 @@ const CHIP_STYLE = {
   fontSize: 12,
 }
 
-type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'settings'
+type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'settings' | 'messages'
 
 /** 带筛选条的 tab 判定（spec 2026-08-11-per-tab-memory-filters §4.4）。 */
 function isFilterTab(t: TabKey): t is FacetTab {
@@ -42,14 +44,15 @@ interface TabPage<T> { items: T[]; nextCursor: { ts: number; id: string } | null
 function emptyPage<T>(): TabPage<T> { return { items: [], nextCursor: null, hasMore: true, total: null } }
 
 /**
- * 5+1 tab 视图：候选审批 / 已审批 / 已拒绝 / AI自动拒绝 / 蒸馏记录 五个列表 tab
- * + 设置 tab（isListTab 判据区分，spec 2026-08-07 settings-tab）。顶部 tab 切换。每列表 tab
+ * 5+2 tab 视图：候选审批 / 已审批 / 已拒绝 / AI自动拒绝 / 蒸馏记录 五个列表 tab
+ * + 设置 tab + 消息 tab（isListTab 判据区分，spec 2026-08-07 settings-tab）。顶部 tab 切换。每列表 tab
  * 独立数据源 + 操作 + 3s 轮询;切 tab 清旧 interval 建新的(useEffect 依赖 tab)。
  * 候选 tab 仍同时拉 status;其余 tab 也拉 status(计数徽标 + 状态栏)。
  *
- * 状态栏(后台可见性)保持不动:已捕获事件 / distill 进行中 / 最近错误,让用户
- * 看到 daemon 在干活。fetch 失败显错误 banner,切 tab 显「加载中…」,空列表显
- * 对应文案,不静默 stall 出白页。
+ * 状态栏(后台可见性,spec 2026-08-12 §5.10):LLM 三阶段实况(蒸馏/去重/审查,
+ * phaseLabel 双向映射 active 判定) + 🔔 消息入口(unreadNotifications 计数) +
+ * 近24h 分阶段统计,让用户看到 daemon 在干活。fetch 失败显错误 banner,切 tab 显
+ * 「加载中…」,空列表显对应文案,不静默 stall 出白页。
  *
  * 操作契约:no-throw(Task 7 carried finding)。restoreMemory/archiveMemory/
  * unarchiveMemory/promoteDiscard 不检查 res.ok,server 404/409 时返回 undefined。
@@ -63,10 +66,18 @@ export default function App() {
   })
   const [discards, setDiscards] = useState<TabPage<DiscardItem>>(emptyPage())
   const [runs, setRuns] = useState<TabPage<DistillRunListItem>>(emptyPage())
-  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false })
+  const [msgs, setMsgs] = useState<TabPage<NotificationItem>>(emptyPage())
+  // 消息筛选（spec §5.10）：kind 空串 = 全部；unreadOnly；q 关键词（300ms debounce 后入此态）
+  const [msgFilter, setMsgFilter] = useState<{ kind: string; unreadOnly: boolean; q: string }>({ kind: '', unreadOnly: false, q: '' })
+  const msgFilterRef = useRef(msgFilter)
+  useEffect(() => { msgFilterRef.current = msgFilter })
+  const [qInput, setQInput] = useState('')
+  const qTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
   // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
   // (对齐重构前的初始 loading=true 行为)。
-  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false })
+  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
   // 四维筛选 per-tab 独立态（spec 2026-08-11-per-tab-memory-filters §4.4）：切 tab
   // 不携带筛选；空串 = 不筛该维度。facetsByTab = 每 tab 下拉选项缓存（SWR：切回
   // 立显本 tab 选项；undefined = 首访尚未加载成功）。filter/facets 是按当前 tab 的
@@ -84,12 +95,12 @@ export default function App() {
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
   const [rescanError, setRescanError] = useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false })
-  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null, settings: null })
+  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
+  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null, settings: null, messages: null })
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadMoreRef = useRef<(t: TabKey) => Promise<void>>(async () => {})
 
-  async function refresh(target: TabKey, filterOverride?: MemoryFilter) {
+  async function refresh(target: TabKey, filterOverride?: MemoryFilter, msgOverride?: { kind: string; unreadOnly: boolean; q: string }) {
     if (!isListTab(target)) return // settings tab 无列表数据流（spec settings-tab §3.2）
     const f = filterOverride ?? filterRef.current
     setPending((p) => ({ ...p, [target]: true }))
@@ -106,6 +117,19 @@ export default function App() {
       } else if (target === 'runs') {
         const [pg, st] = await Promise.all([listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus(fetch)])
         setRuns((r) => ({ ...mergeRefreshPage(r, pg, (x) => x.distillJobId), total: r.total }))
+        setStatus(st)
+      } else if (target === 'messages') {
+        const mf = msgOverride ?? msgFilterRef.current
+        const [pg, st] = await Promise.all([
+          listNotificationsPage(fetch, {
+            limit: WEB_PAGE_SIZE,
+            kind: mf.kind || undefined,
+            unreadOnly: mf.unreadOnly,
+            q: mf.q || undefined,
+          }),
+          getStatus(fetch),
+        ])
+        setMsgs((m) => ({ ...mergeRefreshPage(m, pg, (x) => x.id), total: pg.total ?? null }))
         setStatus(st)
       } else {
         const [pg, st, fc] = await Promise.all([
@@ -132,9 +156,9 @@ export default function App() {
     }
   }
 
-  // 当前 tab 分页读取 helper：discards/runs 独立 state，其余走 memCache。
-  function tabPageOf(target: TabKey): TabPage<MemoryItem> | TabPage<DiscardItem> | TabPage<DistillRunListItem> {
-    return target === 'discards' ? discards : target === 'runs' ? runs : memCache[target as MemoryTabKey]
+  // 当前 tab 分页读取 helper：discards/runs/messages 独立 state，其余走 memCache。
+  function tabPageOf(target: TabKey): TabPage<MemoryItem> | TabPage<DiscardItem> | TabPage<DistillRunListItem> | TabPage<NotificationItem> {
+    return target === 'discards' ? discards : target === 'runs' ? runs : target === 'messages' ? msgs : memCache[target as MemoryTabKey]
   }
 
   // 无限滚动加载下一页：守卫（首轮/加载中）-> 按游标拉下一页 -> mergeAppend 追加。
@@ -155,6 +179,15 @@ export default function App() {
       } else if (target === 'runs') {
         const pg = await listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE, before })
         setRuns((r) => ({ items: mergeAppend(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore, total: r.total }))
+      } else if (target === 'messages') {
+        const mf = msgFilterRef.current
+        const pg = await listNotificationsPage(fetch, {
+          limit: WEB_PAGE_SIZE, before,
+          kind: mf.kind || undefined,
+          unreadOnly: mf.unreadOnly,
+          q: mf.q || undefined,
+        })
+        setMsgs((m) => ({ items: mergeAppend(m.items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore, total: m.total }))
       } else {
         const pg = await listMemoriesPage(fetch, {
           status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE, before,
@@ -269,6 +302,37 @@ export default function App() {
     void refresh(tab)
   }
 
+  // 点开未读消息：本地乐观标已读 + 服务端 read + status 刷新（徽标即时归位）。
+  // no-throw：read 失败靠 3s 轮询自愈（未读会重新出现，不静默吞状态）。
+  function openMessage(id: string) {
+    setExpandedId((cur) => (cur === id ? null : id))
+    const n = msgs.items.find((x) => x.id === id)
+    if (n && n.readAt === null) {
+      setMsgs((m) => ({ ...m, items: m.items.map((x) => (x.id === id ? { ...x, readAt: Date.now() } : x)) }))
+      void markNotificationRead(id).then(() => getStatus(fetch).then(setStatus)).catch(() => {})
+    }
+  }
+
+  async function markAllRead() {
+    setMsgs((m) => ({ ...m, items: m.items.map((x) => (x.readAt === null ? { ...x, readAt: Date.now() } : x)) }))
+    await markAllNotificationsRead()
+    void refresh('messages')
+  }
+
+  // 筛选变化：作废缓存重置页 1，立即按新筛选重拉（changeFilter 同构）。
+  function changeMsgFilter(next: { kind: string; unreadOnly: boolean; q: string }) {
+    setMsgFilter(next)
+    setMsgs(emptyPage())
+    void refresh('messages', undefined, next)
+  }
+
+  // 关键词输入 300ms debounce 后进筛选。
+  function onQChange(v: string) {
+    setQInput(v)
+    if (qTimerRef.current) clearTimeout(qTimerRef.current)
+    qTimerRef.current = setTimeout(() => changeMsgFilter({ ...msgFilterRef.current, q: v.trim() }), 300)
+  }
+
   // 存量回扫(Task 7):POST /api/rescan fire-and-forget,进度经 /api/status 轮询
   // (status.rescan)。失败显错误行不静默;409(已在跑)由 startRescan 内部吞掉。
   async function rescan() {
@@ -305,9 +369,8 @@ export default function App() {
   // 记忆列表按 createdAt 倒序(newest first)。memCache 在 candidate/approved/rejected
   // tab 分别是对应 status 的子集(server 已过滤),客户端再排一次保证顺序一致。
   const memItems = sortCandidatesByTime(memCache[tab as MemoryTabKey]?.items ?? [])
-  const jobs = status?.jobs ?? {}
-  const running = (jobs.running ?? 0) + (jobs.pending ?? 0)
-  const listEmpty = tab === 'discards' ? discards.items.length === 0
+  const listEmpty = tab === 'messages' ? msgs.items.length === 0
+    : tab === 'discards' ? discards.items.length === 0
     : tab === 'runs' ? runs.items.length === 0
     : (memCache[tab as MemoryTabKey]?.items ?? []).length === 0
   const showLoading = shouldShowLoading(loaded, pending, tab)
@@ -323,6 +386,7 @@ export default function App() {
     { key: 'discards', label: 'AI自动拒绝', count: tabTotalCount(status, 'discards') ?? 0 },
     { key: 'runs', label: '蒸馏记录', count: tabTotalCount(status, 'runs') ?? 0 },
     { key: 'settings', label: '设置', count: null }, // 设置 tab 无计数徽标
+    { key: 'messages', label: '消息', count: status?.unreadNotifications ?? null },
   ]
 
   return (
@@ -370,45 +434,30 @@ export default function App() {
       >
         {status ? (
           <>
-            <span>
-              已捕获事件 <b>{status.events}</b>
-            </span>
-            {' · '}
-            <span>
-              distill: <b>{running > 0 ? `${running} 进行中` : '空闲'}</b>
-            </span>
-            {jobs.done ? (
-              <>
-                {' · '}
-                <span>完成 {jobs.done}</span>
-              </>
-            ) : null}
-            {jobs.failed ? (
-              <>
-                {' · '}
-                <span style={{ color: '#c00' }}>失败 {jobs.failed}</span>
-              </>
-            ) : null}
-            {' · '}
-            <span>
-              记忆: {status.memories.candidate ?? 0} 待审 / {status.memories.approved ?? 0} 已批准
-            </span>
-            {status.lastError ? (
-              <div style={{ marginTop: 6, color: '#c00' }}>
-                最近错误: {String(status.lastError.error).slice(0, 160)}
-              </div>
-            ) : null}
-            {/* 降级横幅（spec §4.9 降级可见化）：数据走既有 status 轮询不新增 fetch；
-                只在 count24h>0 且（未 ack 或最新降级晚于 ack）时出现。「知道了」调
-                POST /api/degradations/ack（ack_ts 落 appSettings）；ack 失败横幅
-                自然留下（ack_ts 未落库），不静默吞错。 */}
-            {status.recentDegradations && status.recentDegradations.count24h > 0 &&
-             (status.recentDegradations.acknowledgedTs === null ||
-              (status.recentDegradations.latest && status.recentDegradations.latest.ts > status.recentDegradations.acknowledgedTs)) ? (
-              <div style={{ marginTop: 6, color: '#e65100' }}>
-                近 24h {status.recentDegradations.count24h} 次降级
-                {status.recentDegradations.latest ? `: ${degradationKindLabel(status.recentDegradations.latest.kind)}` : ''}
-                <button style={{ marginLeft: 8, fontSize: 12 }} onClick={() => { void ackDegradations().then(() => refresh(tab)).catch(() => {}) }}>知道了</button>
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+              {(['distill', 'dedup', 'judge'] as const).map((p) => {
+                const act = status.llmActivity
+                const active = act != null && phaseLabel(act.phase) === phaseLabel(p)
+                return (
+                  <span key={p} style={{ color: active ? '#1565c0' : '#999' }}>
+                    {phaseLabel(p)}{' '}
+                    <b>{active && act ? `进行中·${formatElapsed(Date.now() - act.since)}` : '空闲'}</b>
+                  </span>
+                )
+              })}
+              <button
+                style={{ marginLeft: 'auto', fontSize: 12 }}
+                onClick={() => setTab('messages')}
+                title="查看消息"
+              >
+                🔔 {(status.unreadNotifications ?? 0) > 0 ? `${status.unreadNotifications} 未读` : '已读完'}
+              </button>
+            </div>
+            {status.llmStats24h ? (
+              <div style={{ marginTop: 6, color: '#666' }}>
+                近24h 蒸馏 {formatPhaseStat(status.llmStats24h.distill.count, status.llmStats24h.distill.ms)}
+                {' │ '}去重 {formatPhaseStat(status.llmStats24h.dedup.count, status.llmStats24h.dedup.ms)}
+                {' │ '}审查 {formatPhaseStat(status.llmStats24h.judge.count, status.llmStats24h.judge.ms)}
               </div>
             ) : null}
           </>
@@ -490,6 +539,79 @@ export default function App() {
           <LlmSettings />
           <JudgeSettings />
         </>
+      ) : tab === 'messages' ? (
+        <div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+            <select
+              value={msgFilter.kind}
+              onChange={(e) => changeMsgFilter({ ...msgFilter, kind: e.target.value })}
+              style={{ fontSize: 13 }}
+            >
+              <option value="">全部类型</option>
+              <option value="degradation">降级</option>
+              <option value="llm_error">LLM错误</option>
+            </select>
+            <label style={{ fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={msgFilter.unreadOnly}
+                onChange={(e) => changeMsgFilter({ ...msgFilter, unreadOnly: e.target.checked })}
+              />{' '}
+              仅未读
+            </label>
+            <input
+              value={qInput}
+              onChange={(e) => onQChange(e.target.value)}
+              placeholder="搜索消息关键词…"
+              style={{ fontSize: 13, padding: '4px 8px', minWidth: 180 }}
+            />
+            <button onClick={() => { void markAllRead() }} style={{ fontSize: 12, marginLeft: 'auto' }}>全部已读</button>
+          </div>
+          {msgFilter.kind !== '' || msgFilter.unreadOnly || msgFilter.q !== '' ? (
+            <p style={{ color: '#666' }}>共 {msgs.total ?? msgs.items.length} 条消息符合当前筛选</p>
+          ) : null}
+          {msgs.items.map((n) => {
+            const unread = n.readAt === null
+            const expanded = expandedId === n.id
+            const chipColor = n.kind === 'degradation' ? '#e65100' : '#c00'
+            const time = new Date(n.ts)
+            const timeLabel = `${time.getMonth() + 1}/${time.getDate()} ${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`
+            return (
+              <div
+                key={n.id}
+                onClick={() => openMessage(n.id)}
+                style={{
+                  border: '1px solid #e0e0e0', borderRadius: 8, padding: 12, marginBottom: 8,
+                  background: unread ? '#fffdf0' : '#fff', cursor: 'pointer',
+                }}
+              >
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}>
+                  {unread ? <span style={{ color: '#e65100' }}>●</span> : <span style={{ color: '#ccc' }}>○</span>}
+                  <span style={{ ...CHIP_STYLE, color: chipColor, borderColor: chipColor }}>
+                    {n.kind === 'llm_error' ? 'LLM错误' : '降级'}
+                  </span>
+                  <b>{notificationTitle(n)}</b>
+                  <span style={{ marginLeft: 'auto', color: '#999', fontSize: 12 }}>{timeLabel}</span>
+                </div>
+                {n.body ? (
+                  <div style={{ marginTop: 6, fontSize: 12, color: '#666', whiteSpace: expanded ? 'pre-wrap' : 'nowrap', overflow: 'hidden', textOverflow: expanded ? undefined : 'ellipsis' }}>
+                    {n.body}
+                  </div>
+                ) : null}
+              </div>
+            )
+          })}
+          {msgs.items.length === 0 && showLoading ? (
+            <p style={{ color: '#666' }}>加载中…</p>
+          ) : null}
+          {msgs.items.length === 0 && !showLoading && (
+            msgFilter.kind !== '' || msgFilter.unreadOnly || msgFilter.q !== '' ? (
+              <p style={{ color: '#666' }}>没有匹配的消息</p>
+            ) : (
+              <p style={{ color: '#666' }}>暂无消息</p>
+            )
+          )}
+        </div>
       ) : error ? null : showLoading && listEmpty ? (
         <p>加载中…</p>
       ) : tab === 'candidate' ? (

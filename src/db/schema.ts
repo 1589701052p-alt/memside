@@ -142,6 +142,9 @@ export const memoryDistillRuns = sqliteTable(
     discardedCount: integer('discarded_count').notNull(),
     durationMs: integer('duration_ms').notNull(),
     errorMessage: text('error_message'),   // 新增：nullable；llm_error 时存错误描述，其余 null
+    digestMs: integer('digest_ms'),   // 摘要（滚动账本）压缩耗时；未计量 NULL（spec 2026-08-12 §5.4）
+    dedupMs: integer('dedup_ms'),     // 去重阶段耗时；未调 LLM NULL
+    judgeMs: integer('judge_ms'),     // 审查阶段耗时；未调 LLM NULL
     ts: integer('ts').notNull(),
   },
 )
@@ -183,5 +186,23 @@ export const memoryDegradations = sqliteTable(
   (t) => ({
     tsIdx: index('idx_degradations_ts').on(t.ts),
     jobIdx: index('idx_degradations_job').on(t.distillJobId),
+  }),
+)
+
+export const notifications = sqliteTable(
+  'notifications',
+  {
+    id: text('id').primaryKey(),
+    ts: integer('ts').notNull(),
+    kind: text('kind').notNull(),   // 'degradation' | 'llm_error'（spec 2026-08-12 §5.1）
+    title: text('title').notNull(), // degradation: kind 原值；llm_error: 'llm_error'；人话映射在 UI 层
+    body: text('body'),
+    refType: text('ref_type'),      // 'distill_job' | null
+    refId: text('ref_id'),
+    readAt: integer('read_at'),     // null = 未读
+  },
+  (t) => ({
+    tsIdx: index('idx_notifications_ts').on(t.ts),
+    readIdx: index('idx_notifications_read').on(t.readAt),
   }),
 )

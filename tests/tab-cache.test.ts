@@ -143,6 +143,11 @@ test('isListTab: 五个列表 tab 全 true，settings false', () => {
   expect(isListTab('settings')).toBe(false)
 })
 
+test('isListTab: messages 走列表数据流（spec 2026-08-12）', () => {
+  expect(isListTab('messages')).toBe(true)
+  expect(isListTab('settings')).toBe(false)
+})
+
 // --- 2026-08-11 记忆列表筛选（spec web-memory-filters §4.3）---
 
 test('hasActiveFilter: 全空 false，任一维非空 true', () => {

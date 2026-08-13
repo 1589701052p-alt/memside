@@ -276,3 +276,33 @@ export function runtimeTip(runtime: string | null | undefined): string {
 
 /** 主题 slug 徽章固定 tip（spec §4.4）。 */
 export const SLUG_BADGE_TIP = '主题分组标识。同主题的记忆共用一个 slug，注入新会话时合并为一节；可在编辑里修改。'
+
+/** LLM 阶段 -> 中文列名（spec 2026-08-12 §5.11）。digest（账本压缩）归「蒸馏」列。 */
+export function phaseLabel(phase: string): string {
+  if (phase === 'distill' || phase === 'digest') return '蒸馏'
+  if (phase === 'dedup') return '去重'
+  if (phase === 'judge') return '审查'
+  return phase
+}
+
+/** 耗时人话：<60s 显秒；<60分 显整分；>=1小时 显「N小时M分」。负值归 0。 */
+export function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  if (s < 60) return `${s}秒`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}分`
+  return `${Math.floor(m / 60)}小时${m % 60}分`
+}
+
+/** 24h 统计单元格：「19次·8分」；0 次省略耗时。 */
+export function formatPhaseStat(count: number, ms: number): string {
+  if (count <= 0) return '0次'
+  return `${count}次·${formatElapsed(ms)}`
+}
+
+/** 消息标题人话（spec §5.11）：degradation 复用降级 kind 映射；llm_error 固定文案。 */
+export function notificationTitle(n: { kind: string; title: string }): string {
+  if (n.kind === 'llm_error') return '蒸馏 LLM 报错'
+  if (n.kind === 'degradation') return degradationKindLabel(n.title)
+  return n.title
+}
