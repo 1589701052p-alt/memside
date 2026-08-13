@@ -10,6 +10,7 @@ import { memoryDistillJobs, memoryDistillRuns } from '@/db/schema'
 import { createActivityTracker } from '@/activity'
 
 const ECONOMY = { mode: 'economy', maxRounds: 30, timeBudgetS: 300 } as const
+const QUALITY = { mode: 'quality', maxRounds: 30, timeBudgetS: 300 } as const
 
 const root = join(import.meta.dir, '.tmp-sched-activity')
 let dir = ''
@@ -27,8 +28,8 @@ const ONE_CANDIDATE = JSON.stringify({
   candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }],
 })
 
-async function seedDueJob(cwd = '/proj/memside') {
-  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd, debounceKey: 'k', debounceMs: 0 })
+async function seedDueJob(cwd = '/proj/memside', sessionId?: string) {
+  const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd, debounceKey: 'k', debounceMs: 0, sessionId })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   return jobId
 }
@@ -99,4 +100,33 @@ test('降级经 logDegradation 也进消息（digest_llm_failed 之外的既有�
     tracker,
   })
   expect(tracker.get()).toBeNull()
+})
+
+test('quality 模式 digest 接线：相位含 digest，run 回填 digest_ms（spec §8 case #12）', async () => {
+  // digest 站点前置：!callThrew && quality && sessionId && 非 subagent。
+  // updateSessionLedger 仅当切片渲染 ≥ DIRECT_APPEND_MAX_CHARS(1200) 才调 LLM——
+  // renderDigestLines 单行封顶 ~306 字，故喂 5 条 300 字 user turn 触发压缩路径。
+  // cwd 用真实存在的 dir -> judge 走 judgeValueAgentic，fake 首发即 final  verdict 收官。
+  const jobId = await seedDueJob(dir, 's1')
+  const tracker = createActivityTracker()
+  const seen: string[] = []
+  const bigTurns = Array.from({ length: 5 }, () => ({ role: 'user' as const, content: 'x'.repeat(300) }))
+  await tick(db, {
+    loadTranscript: async () => ({ turns: bigTurns, fullLength: bigTurns.length, prefixTurns: [] }),
+    callLLM: async () => {
+      const act = tracker.get()
+      if (act) seen.push(act.phase)
+      if (act?.phase === 'distill') return ONE_CANDIDATE
+      if (act?.phase === 'judge') return JSON.stringify({ final: { verdicts: [{ index: 0, category: 'decision' }] } })
+      if (act?.phase === 'digest') return '用户讨论了退款规则\n助手确认 14 天窗口'
+      return JSON.stringify({})
+    },
+    createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
+    loadJudgeConfig: () => QUALITY,
+    tracker,
+  })
+  expect(tracker.get()).toBeNull()
+  expect(seen).toContain('digest')
+  const run = await getDistillRun(db, jobId)
+  expect(run!.digestMs).not.toBeNull()
 })
