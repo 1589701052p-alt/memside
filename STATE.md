@@ -969,13 +969,25 @@ LLM 只做按片压缩（配额 = 渲染长度/2，钳制 [600, 3000]），全�
 
 诊断：原顶部状态栏只有「已捕获事件 / distill 进行中 / 记忆计数 / 最近错误」，信息密度低、用户看不到 LLM 内部三阶段进展；降级与 LLM 报错混在状态栏里一闪而过，既吵又不人性化。本次重写状态栏并新增「消息」tab 作为统一收件箱。
 
-1. **状态栏 LLM 三阶段实况**：蒸馏(distill) / 去重(dedup) / 审查(judgeValue) 的进行中状态、各阶段耗时、24h 各阶段统计（次数/总耗时/平均耗时）。
+1. **状态栏 LLM 三阶段实况**：蒸馏(distill/digest) / 去重(dedup) / 审查(judge) 的进行中状态与耗时、近 24h 各阶段统计（次数 / 累计耗时）。
 2. **`ActivityTracker` 单例注入 scheduler 与 server**：在 daemon 层用一个单例跟踪当前 job 各阶段起止时间，避免 scheduler/server 两端各自记状态导致漂移。
-3. **`memory_distill_runs` 三耗时列**：`distill_duration_ms` / `dedup_duration_ms` / `judge_duration_ms`，scheduler tick 接线写入。
-4. **统一消息收件箱**：新建 `notifications` 表，scheduler 双写降级(degradations)与 LLM 报错到通知表；Web UI 新增「消息」tab，支持未读计数徽标、筛选、搜索、逐条已读、全部已读；旧的 `ackDegradations` 端点退役。
-5. **`/api/status` 新字段**：`llm`、`messagesUnread` 等，驱动状态栏与消息入口。
+3. **`memory_distill_runs` 三耗时列**：`digest_ms` / `dedup_ms` / `judge_ms`（均可空，NULL = 该阶段未调 LLM；既有 `duration_ms` 仍是 distill 阶段耗时），scheduler tick 接线写入。
+4. **统一消息收件箱**：新建 `notifications` 表，`logDegradation` 双写降级 + scheduler llm_error 路径写消息；Web UI 新增「消息」tab，支持未读计数徽标、筛选、搜索、逐条已读、全部已读；旧的 `/api/degradations/ack` 端点与 `recentDegradations` 状态字段退役（`memory_degradations` 审计表与按 job 明细端点保留）。
+5. **`/api/status` 新字段**：`llmActivity` / `llmStats24h` / `unreadNotifications`，驱动状态栏与消息入口。
 
 执行方式：subagent-driven（10 实现 task 各 implementer + reviewer；全部 Approved）。`bun run typecheck && bun test` 955/955 全绿。设计 spec / 计划见 `docs/superpowers/specs/2026-08-12-llm-status-and-message-center-design.md` 与 `docs/superpowers/plans/2026-08-12-llm-status-and-message-center.md`。
 
 ### 终审 deferred minor（非阻塞）
 
+全分支终审对 8 条任务级 deferred minor 的裁决：
+
+1. T1 `ActivityTracker.get()` 返回活引用——**接受**（plan-mandated，下游只读）。
+2. T2 无老库 ALTER 回归测试——**follow-up**（与既有迁移块同缺口，并入测试卫生 issue）。
+3. T3 吞错路径无负向测试 + 5ms sleep 单调性余量——**接受**（console-only 设计契约）。
+4. T4 waitingJobs 断言丢失 + clampPageLimit docstring（50 vs 实际 20，pre-existing）——**follow-up**（测试卫生 issue）。
+5. T5 scheduler-activity 未用 import / 测试 4 标题夸大 / catch 文案 stale——**接受**（并入测试卫生 issue 更佳）。
+6. T6 tracker 参数顺序迁就测试正则——**接受**（语义无差）。
+7. T9 反向锁收窄为七个完整旧标签 + 双处未读徽标——**接受**（锁意图保全；双徽标 brief mandated）。
+8. T10 首帧闪空态 + markAllRead 无 try/catch——**接受**（轮询自愈兜底）。
+
+follow-up 清单：scheduler digest 接线测试（spec §8 #12 缺口，quality 模式断言 digestMs 非 NULL + seen 含 'digest'）；llmStats24h 窗口外行回归；waitingJobs 断言补回；clampPageLimit docstring；listRecentDegradations 去留决策（现仅测试引用，生产无调用方）。
