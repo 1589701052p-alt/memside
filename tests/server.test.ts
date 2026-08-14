@@ -7,7 +7,8 @@ import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun, log
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns, notifications } from '@/db/schema'
+import { markAllNotificationsRead } from '@/memory/store'
 import type { MemoryStatus } from '@/memory/pure'
 import type { ValueClass } from '@/memory/valueFilter'
 
@@ -738,6 +739,42 @@ test('GET /api/status includes distillRuns counts', async () => {
 // （COUNT/GROUP BY）后语义必须不变——distillRuns 只计近 24h（严格 ts > 截止），
 // byOutcome 分桶一致。此前旧实现对 memory_distill_events（大 payload 表）
 // 做全表 SELECT * 仅为数行数，实测单请求 ~870ms。
+// --- status 按类未读计数（spec 2026-08-14 §3.2，T4）-------------------------
+test('GET /api/status 按类未读计数 + 最新未读 llm_error', async () => {
+  // 状态栏警示条的数据源：unreadLlmErrors / unreadDegradations 分别计数
+  // （已读的不计入），latestUnreadLlmError 返回最新一条未读 llm_error 的
+  // body/ts；unreadNotifications 总数保留不变。
+  const rows: (typeof notifications.$inferInsert)[] = [
+    { id: 'n-e1', ts: 1000, kind: 'llm_error', title: 'llm_error', body: 'Connection error. (old)', readAt: null },
+    { id: 'n-e2', ts: 2000, kind: 'llm_error', title: 'llm_error', body: 'Connection error. (new)', readAt: null },
+    { id: 'n-e3', ts: 3000, kind: 'llm_error', title: 'llm_error', body: 'already read', readAt: 9999 },
+    { id: 'n-d1', ts: 1001, kind: 'degradation', title: 'context_trim', body: null, readAt: null },
+    { id: 'n-d2', ts: 1002, kind: 'degradation', title: 'dedup_skip', body: null, readAt: null },
+    { id: 'n-d3', ts: 1003, kind: 'degradation', title: 'judge_skip', body: null, readAt: null },
+  ]
+  for (const row of rows) await db.insert(notifications).values(row)
+
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.unreadLlmErrors).toBe(2)
+  expect(r.body.unreadDegradations).toBe(3)
+  expect(r.body.latestUnreadLlmError).toEqual({ body: 'Connection error. (new)', ts: 2000 })
+  expect(r.body.unreadNotifications).toBe(5)
+})
+
+test('GET /api/status 全部已读后按类计数归零、latestUnreadLlmError 为 null', async () => {
+  await db.insert(notifications).values({ id: 'n-r1', ts: 1000, kind: 'llm_error', title: 'llm_error', body: 'boom', readAt: null })
+  await db.insert(notifications).values({ id: 'n-r2', ts: 1001, kind: 'degradation', title: 'context_trim', body: null, readAt: null })
+  await markAllNotificationsRead(db)
+
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.unreadLlmErrors).toBe(0)
+  expect(r.body.unreadDegradations).toBe(0)
+  expect(r.body.latestUnreadLlmError).toBeNull()
+  expect(r.body.unreadNotifications).toBe(0)
+})
+
 test('GET /api/status 聚合语义不变：24h 外的 run 不计入 distillRuns', async () => {
   await seedRunRow('job-recent', 'produced')
   await seedRunRow('job-stale', 'produced')

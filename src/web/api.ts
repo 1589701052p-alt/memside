@@ -112,6 +112,12 @@ export interface MemsideStatus {
   }
   /** 未读消息数（消息 tab 徽标 + 状态栏 🔔）；老 daemon 无此字段。 */
   unreadNotifications?: number
+  /** 未读 llm_error 计数（警示条）；老 daemon 无此字段（spec 2026-08-14 §3.2）。 */
+  unreadLlmErrors?: number
+  /** 未读 degradation 计数（警示条）；老 daemon 无此字段。 */
+  unreadDegradations?: number
+  /** 最新一条未读 llm_error（警示条「最近：xxx」）；无则 null；老 daemon 无此字段。 */
+  latestUnreadLlmError?: { body: string | null; ts: number } | null
 }
 
 /**
