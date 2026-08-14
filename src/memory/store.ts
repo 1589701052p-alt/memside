@@ -1195,7 +1195,8 @@ export class InvalidNotificationFilterError extends Error {}
  *
  * 同内容折叠（spec 2026-08-14 §3.3）：插入前查最新一条未读同内容通知——
  * llm_error 按裁剪后 body 匹配，degradation 按 title 匹配；命中则不新插，
- * 只把该行 ts 刷新为 Date.now() 并返回原 id（跳过保留裁剪）。已读的相同
+ * 只把该行 ts 刷新为 MAX(Date.now(), 全表 MAX(ts)+1)（防同毫秒撞车保证浮顶）
+ * 并返回原 id（跳过保留裁剪）。已读的相同
  * 内容不折叠（用户已处置，新的发生是新事件）。折叠路径不吞错：DB 失败沿
  * 调用方（logDegradation / logLlmErrorNotification）的 try/catch 契约 warn。
  */
