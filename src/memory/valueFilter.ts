@@ -41,11 +41,23 @@ Drop categories (assign only when the stated test passes):
    conversation, could one re-derive this entry's content? ("the token mask retains the
    first 6 and last 4 chars" -> yes; "the credential chain puts UI first because stale
    env vars once caused a 401 outage" -> no - the code shows the order, not the why.)
+   "Docs" includes this project's own rulebooks and specs (CLAUDE.md, README,
+   STATE.md, docs/, and test files that grep-guard a rule): a standing rule already
+   written there is derivable even when it also reads as a convention or process
+   norm - assign derivable, not convention. ("tests must run with bun test, per
+   CLAUDE.md" -> derivable; "reviewers here prefer merge commits over squash,
+   nowhere written down" -> convention.)
    HARD RULE: never assign derivable to a candidate whose origin is user-stated or
    user-confirmed.
 9. fleeting - TEST: in a brand-new session three months from now, would this entry
    still bind or inform? ("let's stop here for today" -> no; "every change lands via
-   branch + PR" -> yes.)`
+   branch + PR" -> yes.)
+   HARD RULE: fleeting is ONLY for session logistics (scheduling, "for today",
+   "after lunch") and for guidance the entry itself marks as superseded. A standing
+   rule, workflow, or quality gate of this project - however small - still binds
+   three months from now by definition; never assign fleeting to one. ("never commit
+   directly to master" -> not fleeting; "we'll merge PR #58 after lunch" ->
+   fleeting.)`
 const VALUE_JUDGE_OUTPUT_SECTION = `
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
