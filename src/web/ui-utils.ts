@@ -306,3 +306,16 @@ export function notificationTitle(n: { kind: string; title: string }): string {
   if (n.kind === 'degradation') return degradationKindLabel(n.title)
   return n.title
 }
+
+/**
+ * 状态栏警示条「最近：<body>」文案截断（spec 2026-08-14 §3.5）。
+ * - null（无未读 LLM 报错的详情）-> '（无详情）'
+ * - 长度 <= max -> 原样返回
+ * - 超长 -> 截到 max 字 + '…'
+ * 纯函数，可单测。
+ */
+export function truncateAlertBody(body: string | null, max = 40): string {
+  if (body === null) return '（无详情）'
+  if (body.length <= max) return body
+  return body.slice(0, max) + '…'
+}

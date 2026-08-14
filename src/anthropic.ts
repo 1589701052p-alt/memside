@@ -16,7 +16,7 @@ export interface AnthropicDeps {
  * This is the **fallback** used when the user has not configured a haiku model.
  * The user's `ANTHROPIC_DEFAULT_HAIKU_MODEL` (or `ANTHROPIC_MODEL`) env var /
  * `~/.claude/settings.json` `env` value takes precedence via `loadClaudeCreds`
- * and is passed straight through to `messages.create`; `DISTILL_MODEL` only
+ * and is passed straight through to `messages.stream`; `DISTILL_MODEL` only
  * applies when no such override is present (e.g. the official
  * `ANTHROPIC_API_KEY` path with no model env). When routing through a proxy
  * (Volcengine Ark) the resolved model is typically a non-Anthropic id like
@@ -48,6 +48,13 @@ export const DISTILL_MODEL = 'claude-haiku-4-5-20251001'
  * top-level try/catch degrades that to "no candidates this round" and records
  * `lastError` on the job, so a misconfigured daemon never crashes the loop.
  *
+ * 流式化说明（2026-08-14 根因修复）：调用走 `messages.stream` + `finalMessage()`，
+ * 不用非流式 `messages.create`。实测当前 LLM 端点对生成超过约 60s 的非流式请求
+ * 准时断连（非流式期间响应方向零字节，必撞 TTFB 墙）；流式字节持续流动，同载荷
+ * 可稳定完成。`timeout: 600_000` 是 10 分钟硬上限兜底（正常流式 170-210s），
+ * `maxRetries` 保留 SDK 默认（连接错误自动重试）。返回值语义与非流式一致，
+ * 调用方零感知。
+ *
  * UI 配置经由 `deps.loadUiConfig` 注入：每次调用先读一次（读到的值原样传给
  * `loadClaudeCreds`），UI 级整级短路语义见 `creds.ts`。
  */
@@ -62,12 +69,16 @@ export function makeLLMCall(deps: AnthropicDeps = {}): LLMCall {
       apiKey: creds.apiKey,
       ...(creds.baseURL ? { baseURL: creds.baseURL } : {}),
     })
-    const msg = await client.messages.create({
-      model: creds.model ?? DISTILL_MODEL,
-      max_tokens: opts?.maxTokens ?? DEFAULT_LLM_MAX_TOKENS,
-      system,
-      messages: [{ role: 'user', content: user }],
-    })
+    const stream = client.messages.stream(
+      {
+        model: creds.model ?? DISTILL_MODEL,
+        max_tokens: opts?.maxTokens ?? DEFAULT_LLM_MAX_TOKENS,
+        system,
+        messages: [{ role: 'user', content: user }],
+      },
+      { timeout: 600_000 },
+    )
+    const msg = await stream.finalMessage()
     // extract text from content blocks (TextBlock has type:'text' + text:string;
     // ToolUseBlock is silently dropped). The `ContentBlock` union doesn't narrow
     // through `.filter` without a type predicate, so narrow explicitly.

@@ -991,3 +991,21 @@ LLM 只做按片压缩（配额 = 渲染长度/2，钳制 [600, 3000]），全�
 8. T10 首帧闪空态 + markAllRead 无 try/catch——**接受**（轮询自愈兜底）。
 
 follow-up 清单：scheduler digest 接线测试（spec §8 #12 缺口，quality 模式断言 digestMs 非 NULL + seen 含 'digest'）；llmStats24h 窗口外行回归；waitingJobs 断言补回；clampPageLimit docstring；listRecentDegradations 去留决策（现仅测试引用，生产无调用方）。
+
+## 蒸馏 LLM 流式化 + 失败可见性（2026-08-14）
+
+诊断：2026-08-13 起蒸馏 LLM 调用持续失败（`Connection error.`，单次失败耗时 448-566s），但设置页「测试连接」始终报成功，用户未察觉故障（去重/审查计数连日为 0 才暴露）。systematic-debugging 一次性脚本实测结论（完整对照表见 spec §1）：当前 LLM 端点（kimi coding）对**生成时长超过约 60 秒的非流式请求准时断连**（60s 整 Connection error，代理 7897 与直连同现，排除本地代理因素；60s 整的特征指向端点/网关的 TTFB 类限制）；同载荷流式请求（字节持续流动）170-203s 稳定完成；「测试连接」成功是假象——max_tokens=1 的秒级探针永远碰不到 60s 墙。设计 spec / 计划见 `docs/superpowers/specs/2026-08-14-llm-streaming-and-failure-visibility-design.md`。
+
+1. **`makeLLMCall` 流式化**（`src/anthropic.ts`）：`messages.create` 改为 `messages.stream` + `finalMessage()`，显式 `timeout: 600_000`（10 分钟硬上限兜底，正常流式 170-210s）；文本提取与返回值语义不变，distiller / dedup / judge 调用方零感知；`maxRetries` 保留 SDK 默认。
+2. **通知同内容折叠**（`insertNotification`，`src/memory/store.ts`）：插入前查最新未读同内容通知——llm_error 按裁剪后 body、degradation 按 title 匹配；命中则不新插，只刷新该行 ts 保持浮顶并返回原 id（跳过保留裁剪）。折叠刷新 ts 用 `MAX(Date.now(), MAX(ts)+1)` 决胜，防快速连插时同毫秒撞车被 ULID 更大的填充行压顶。已读同内容不折叠。
+3. **status 三新字段**（`GET /api/status`）：`unreadLlmErrors` / `unreadDegradations`（notifications 按 kind 分组未读计数）、`latestUnreadLlmError`（最新一条未读 llm_error 的 body/ts，无则 null）；既有 `unreadNotifications` 总数保留。
+4. **状态栏警示条**（`src/web/App.tsx`）：`unreadLlmErrors > 0` 渲染红条「⚠️ 蒸馏 LLM 报错 ×N（最近：<body 截断 40 字>）→ 点击查看」，`unreadDegradations > 0` 渲染琥珀条「⚠️ 降级 ×N → 点击查看」，点击均 `setTab('messages')`；两条可同时存在（红条在上），无独立关闭按钮，未读清零后自动消失。截断走新纯函数 `truncateAlertBody`（`src/web/ui-utils.ts`，null → `'（无详情）'`）。
+5. **🔔 三态变色**：未读 LLM 报错 → 红色加粗；仅降级未读 → 琥珀色；都无保持默认。
+6. **设置页测试连接语义澄清**：按钮下方加灰色小字「仅验证端点可达；长蒸馏请求可能仍失败，失败会在状态栏警示条提示」，消除「测试绿 = 蒸馏必成」错觉；探测方式不变（仍是 max_tokens=1 非流式小探针，测的就是可达性）。
+
+执行：subagent-driven（5 实现 task 各 implementer + reviewer，全部 Approved）。`bun run typecheck && bun test` 979/979 全绿。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-14-llm-streaming-and-failure-visibility*`。
+
+### 终审 deferred minor（非阻塞）
+
+1. **T3（status 字段）**：`tests/server.test.ts` 新增用例的注释块排版与邻近风格不齐；status 新字段三次查询为顺序 await，可改 `Promise.all` 并行（现量级无压力）。
+2. **T5（警示条 UI）**：源码断言测试名超出实际保证（文本断言只锁源码含警示条分支 token，不锁渲染行为本身）；设置页语义澄清小字落在按钮下方（spec §3.4 原写「按钮旁」，实现为下方 marginTop 6px 行，语义等效）。

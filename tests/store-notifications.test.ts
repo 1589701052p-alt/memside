@@ -1,6 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { sql } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import {
   insertNotification, logLlmErrorNotification, listNotificationsPage,
@@ -120,6 +121,96 @@ test('markNotificationRead 幂等；未知 id 抛 NotificationNotFoundError；ma
   await insertNotification(db, { kind: 'llm_error', title: 'c' })
   expect(await markAllNotificationsRead(db)).toBe(2)
   expect((await listNotificationsPage(db, { unreadOnly: true })).total).toBe(0)
+})
+
+// ---------------------------------------------------------------------------
+// 重复通知折叠（spec 2026-08-14 §3.3）：同内容未读不刷屏，已读照常新插
+// ---------------------------------------------------------------------------
+
+test('折叠 llm_error：同 body 未读 → 不新插、行数不变、ts 刷新、返回原 id', async () => {
+  const id1 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: '502 Bad Gateway', refId: 'j1' })
+  const ts1 = (await listNotificationsPage(db, {})).items[0]!.ts
+  await new Promise((r) => setTimeout(r, 20))
+  const id2 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: '502 Bad Gateway', refId: 'j2' })
+  expect(id2).toBe(id1)
+  const pg = await listNotificationsPage(db, {})
+  expect(pg.total).toBe(1)
+  expect(pg.items[0]!.ts).toBeGreaterThan(ts1)
+  // refId 等字段保持原行的值，不被新输入覆盖
+  expect(pg.items[0]!.refId).toBe('j1')
+})
+
+test('折叠 llm_error：body 比较用裁剪后值（同 2000 前缀的长 body 也折叠）', async () => {
+  const long1 = 'x'.repeat(2000) + 'AAA'
+  const long2 = 'x'.repeat(2000) + 'BBB'
+  const id1 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: long1 })
+  const id2 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: long2 })
+  expect(id2).toBe(id1)
+  const pg = await listNotificationsPage(db, {})
+  expect(pg.total).toBe(1)
+  expect(pg.items[0]!.body).toBe('x'.repeat(2000))
+})
+
+test('折叠 llm_error：不同 body → 新插；同 body 已读 → 新插', async () => {
+  const id1 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'err-A' })
+  const id2 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'err-B' })
+  expect(id2).not.toBe(id1)
+  expect((await listNotificationsPage(db, {})).total).toBe(2)
+  // 已读的相同内容不折叠（用户已处置，新发生是新事件）
+  await markNotificationRead(db, id1)
+  const id3 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'err-A' })
+  expect(id3).not.toBe(id1)
+  expect((await listNotificationsPage(db, {})).total).toBe(3)
+  // 但新插的未读 err-A 又成为新的折叠锚点
+  const id4 = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'err-A' })
+  expect(id4).toBe(id3)
+  expect((await listNotificationsPage(db, {})).total).toBe(3)
+})
+
+test('折叠 degradation：同 title 未读 → 折叠；不同 title → 新插', async () => {
+  const id1 = await insertNotification(db, { kind: 'degradation', title: 'digest_llm_failed', body: 'boom-1' })
+  await new Promise((r) => setTimeout(r, 20))
+  // 同 title 即折叠，body 不同也折叠（degradation 的折叠键是 title = 降级 kind）
+  const id2 = await insertNotification(db, { kind: 'degradation', title: 'digest_llm_failed', body: 'boom-2' })
+  expect(id2).toBe(id1)
+  const pg = await listNotificationsPage(db, {})
+  expect(pg.total).toBe(1)
+  expect(pg.items[0]!.body).toBe('boom-1')
+  const id3 = await insertNotification(db, { kind: 'degradation', title: 'sweep_error' })
+  expect(id3).not.toBe(id1)
+  expect((await listNotificationsPage(db, {})).total).toBe(2)
+})
+
+test('折叠跨 kind 不混：degradation title 与 llm_error body 内容相同也各自成键', async () => {
+  const idD = await insertNotification(db, { kind: 'degradation', title: 'same-text' })
+  const idL = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'same-text' })
+  expect(idL).not.toBe(idD)
+  expect((await listNotificationsPage(db, {})).total).toBe(2)
+})
+
+test('折叠命中不触发保留裁剪：cap 边界上行数不退化、原行保留', async () => {
+  // 第一条是折叠目标（最旧）；填满到 cap 后折叠命中，若误走插入+裁剪会把最旧行裁掉
+  const targetId = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'fold-target' })
+  for (let i = 1; i < NOTIFICATION_RETENTION_CAP; i++) {
+    await insertNotification(db, { kind: 'degradation', title: `t${i}` })
+  }
+  expect((await listNotificationsPage(db, { limit: 1 })).total).toBe(NOTIFICATION_RETENTION_CAP)
+
+  // 确定性同毫秒/更晚撞车：把一条填充行的 ts 直接抬到未来（超过折叠刷新时的
+  // Date.now()），若折叠刷新只写 Date.now()，ORDER BY ts DESC, id DESC 下该
+  // 填充行必压在折叠行之上——这里锁的是「折叠后目标行必在列表头」（MAX(ts)+1 决胜），
+  // 不依赖时序运气。
+  const bumpedTs = Date.now() + 60_000
+  const filler = (await listNotificationsPage(db, { limit: 1 })).items[0]!
+  await db.run(sql`UPDATE notifications SET ts = ${bumpedTs} WHERE id = ${filler.id}`)
+
+  const foldedId = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'fold-target' })
+  expect(foldedId).toBe(targetId)
+  const pg = await listNotificationsPage(db, { limit: 2 })
+  expect(pg.total).toBe(NOTIFICATION_RETENTION_CAP)
+  // 折叠把目标行 ts 刷到全表最新（> 被抬到未来的填充行），浮在列表顶部
+  expect(pg.items[0]!.id).toBe(targetId)
+  expect(pg.items[0]!.ts).toBeGreaterThan(bumpedTs)
 })
 
 test('updateDistillRunDigestMs 回填；无行 no-op', async () => {
