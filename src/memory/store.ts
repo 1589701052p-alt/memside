@@ -1218,8 +1218,11 @@ export async function insertNotification(
   const dup = await db.select({ id: notifications.id }).from(notifications)
     .where(foldConds).orderBy(desc(notifications.ts), desc(notifications.id)).limit(1).all()
   if (dup[0]) {
-    await db.update(notifications).set({ ts: Date.now() })
-      .where(eq(notifications.id, dup[0].id)).run()
+    // 刷新 ts 必须保证目标行成为全表最新（spec §3.3「浮在列表顶部」）：
+    // 快速连插时 Date.now() 可能与既有行撞同毫秒，ORDER BY ts DESC, id DESC
+    // 下 ULID 更大的填充行会压在折叠行之上，故按 MAX(ts)+1 决胜。
+    // SQLite 多参 MAX 是标量取大函数；表非空（目标行本身在表里），MAX(ts) 不为 NULL。
+    await db.run(sql`UPDATE notifications SET ts = MAX(${Date.now()}, (SELECT MAX(ts) FROM notifications) + 1) WHERE id = ${dup[0].id}`)
     return dup[0].id
   }
   const id = ulid()

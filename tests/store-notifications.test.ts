@@ -1,6 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { sql } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import {
   insertNotification, logLlmErrorNotification, listNotificationsPage,
@@ -195,11 +196,21 @@ test('折叠命中不触发保留裁剪：cap 边界上行数不退化、原行�
   }
   expect((await listNotificationsPage(db, { limit: 1 })).total).toBe(NOTIFICATION_RETENTION_CAP)
 
+  // 确定性同毫秒/更晚撞车：把一条填充行的 ts 直接抬到未来（超过折叠刷新时的
+  // Date.now()），若折叠刷新只写 Date.now()，ORDER BY ts DESC, id DESC 下该
+  // 填充行必压在折叠行之上——这里锁的是「折叠后目标行必在列表头」（MAX(ts)+1 决胜），
+  // 不依赖时序运气。
+  const bumpedTs = Date.now() + 60_000
+  const filler = (await listNotificationsPage(db, { limit: 1 })).items[0]!
+  await db.run(sql`UPDATE notifications SET ts = ${bumpedTs} WHERE id = ${filler.id}`)
+
   const foldedId = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'fold-target' })
   expect(foldedId).toBe(targetId)
-  expect((await listNotificationsPage(db, { limit: 1 })).total).toBe(NOTIFICATION_RETENTION_CAP)
-  // 折叠把目标行 ts 刷到最新，浮在列表顶部
-  expect((await listNotificationsPage(db, { limit: 1 })).items[0]!.id).toBe(targetId)
+  const pg = await listNotificationsPage(db, { limit: 2 })
+  expect(pg.total).toBe(NOTIFICATION_RETENTION_CAP)
+  // 折叠把目标行 ts 刷到全表最新（> 被抬到未来的填充行），浮在列表顶部
+  expect(pg.items[0]!.id).toBe(targetId)
+  expect(pg.items[0]!.ts).toBeGreaterThan(bumpedTs)
 })
 
 test('updateDistillRunDigestMs 回填；无行 no-op', async () => {
