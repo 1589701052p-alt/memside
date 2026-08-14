@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'bun:test'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, formatToolCall, projectDisplayName, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle } from '@/web/ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, formatToolCall, projectDisplayName, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody } from '@/web/ui-utils'
 
 // 纯函数层测试（CLAUDE.md「首选可断言面」）：覆盖 App.tsx 抽出的时间格式化 +
 // 候选倒序排序。React 组件本身不单测，接线兜底见 tests/ui-sort-source.test.ts。
@@ -256,5 +256,35 @@ describe('LLM 实况与消息文案（spec 2026-08-12 §5.11）', () => {
     expect(notificationTitle({ kind: 'degradation', title: 'digest_truncated' })).toBe('摘要压缩超限')
     expect(notificationTitle({ kind: 'degradation', title: 'unknown_kind' })).toBe('unknown_kind')
     expect(notificationTitle({ kind: 'llm_error', title: 'llm_error' })).toBe('蒸馏 LLM 报错')
+  })
+})
+
+// --- truncateAlertBody ---
+// 状态栏警示条「最近：<body>」截断纯函数（spec 2026-08-14 §3.5，测试策略 T5）。
+describe('truncateAlertBody（spec 2026-08-14 §3.5）', () => {
+  test('null -> （无详情）', () => {
+    expect(truncateAlertBody(null)).toBe('（无详情）')
+  })
+
+  test('空串 -> 原样返回（<= max 不截断）', () => {
+    expect(truncateAlertBody('')).toBe('')
+  })
+
+  test('边界：恰 40 字 -> 原样返回；41 字 -> 截 40 字 + …', () => {
+    const exact = 'x'.repeat(40)
+    expect(truncateAlertBody(exact)).toBe(exact)
+    const over = 'x'.repeat(41)
+    expect(truncateAlertBody(over)).toBe('x'.repeat(40) + '…')
+  })
+
+  test('超长中文串 -> 截 40 字 + …', () => {
+    const long = '请求超时'.repeat(20) // 80 字
+    expect(truncateAlertBody(long)).toBe('请求超时'.repeat(10) + '…')
+    expect(truncateAlertBody(long)).toHaveLength(41)
+  })
+
+  test('自定义 max 生效', () => {
+    expect(truncateAlertBody('abcdef', 3)).toBe('abc…')
+    expect(truncateAlertBody('abc', 3)).toBe('abc')
   })
 })
