@@ -1192,13 +1192,37 @@ export class InvalidNotificationFilterError extends Error {}
 /**
  * 写一条消息并执行保留裁剪（spec §5.2）：超过 NOTIFICATION_RETENTION_CAP
  * 删最旧。裁剪失败只 warn，不影响插入结果。
+ *
+ * 同内容折叠（spec 2026-08-14 §3.3）：插入前查最新一条未读同内容通知——
+ * llm_error 按裁剪后 body 匹配，degradation 按 title 匹配；命中则不新插，
+ * 只把该行 ts 刷新为 Date.now() 并返回原 id（跳过保留裁剪）。已读的相同
+ * 内容不折叠（用户已处置，新的发生是新事件）。折叠路径不吞错：DB 失败沿
+ * 调用方（logDegradation / logLlmErrorNotification）的 try/catch 契约 warn。
  */
 export async function insertNotification(
   db: DbClient,
   input: { kind: NotificationKind; title: string; body?: string | null; refType?: string | null; refId?: string | null },
 ): Promise<string> {
-  const id = ulid()
   const body = input.body == null ? null : input.body.slice(0, NOTIFICATION_BODY_CAP_CHARS)
+  const foldConds = input.kind === 'llm_error'
+    ? and(
+        eq(notifications.kind, 'llm_error'),
+        isNull(notifications.readAt),
+        body === null ? isNull(notifications.body) : eq(notifications.body, body),
+      )
+    : and(
+        eq(notifications.kind, 'degradation'),
+        isNull(notifications.readAt),
+        eq(notifications.title, input.title),
+      )
+  const dup = await db.select({ id: notifications.id }).from(notifications)
+    .where(foldConds).orderBy(desc(notifications.ts), desc(notifications.id)).limit(1).all()
+  if (dup[0]) {
+    await db.update(notifications).set({ ts: Date.now() })
+      .where(eq(notifications.id, dup[0].id)).run()
+    return dup[0].id
+  }
+  const id = ulid()
   await db.insert(notifications).values({
     id, ts: Date.now(), kind: input.kind, title: input.title, body,
     refType: input.refType ?? null, refId: input.refId ?? null, readAt: null,
