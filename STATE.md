@@ -1034,6 +1034,16 @@ follow-up 清单：scheduler digest 接线测试（spec §8 #12 缺口，quality
 - 文档化规矩类候选判决是否收敛到 derivable（不再出现 convention/user-rule 留存版）；
 - convention 留存是否异常减少（"nowhere written down" 类被误丢的副作用信号）。
 
+### 终审 deferred minor（非阻塞）
+
+全分支终审 verdict=Ready to merge=Yes（0 Critical / 0 Important），2 条 Minor 经裁定 defer：
+
+1. `tests/value-filter-prompt.test.ts` 旧测试名承诺锁「stated 禁考硬规则」但断言只含泛
+   `'HARD RULE'` 子串（pre-existing，非本分支引入）；实际防护由字节锁兜底，无真实漏洞。
+2. fleeting 新 HARD RULE 口子措辞「the entry itself marks as superseded」与 agent 协议段
+   「被另一条取代判 fleeting」严格读有语义缝隙（spec 措辞核对单第 1 条已逐字批准该措辞）；
+   并入上线后观测，若实测 superseded 类候选判决异常再收紧。
+
 ### Follow-up
 
 1. 蒸馏器 origin 打标准确性（C16 类：正文写"用户明确要求"却标 agent-observed）——
