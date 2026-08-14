@@ -13,7 +13,7 @@ import {
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
   type NotificationItem,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, SLUG_BADGE_TIP } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody, SLUG_BADGE_TIP } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
 
 /**
@@ -446,7 +446,15 @@ export default function App() {
                 )
               })}
               <button
-                style={{ marginLeft: 'auto', fontSize: 12 }}
+                style={{
+                  marginLeft: 'auto',
+                  fontSize: 12,
+                  // 警示着色（spec 2026-08-14 §3.4）：未读 LLM 报错 -> 红色加粗；
+                  // 无 LLM 报错但有未读降级 -> 琥珀色；都无保持默认。
+                  color: (status.unreadLlmErrors ?? 0) > 0 ? '#c00'
+                    : (status.unreadDegradations ?? 0) > 0 ? '#b26a00' : undefined,
+                  fontWeight: (status.unreadLlmErrors ?? 0) > 0 ? 700 : undefined,
+                }}
                 onClick={() => setTab('messages')}
                 title="查看消息"
               >
@@ -459,6 +467,50 @@ export default function App() {
                 {' │ '}去重 {formatPhaseStat(status.llmStats24h.dedup.count, status.llmStats24h.dedup.ms)}
                 {' │ '}审查 {formatPhaseStat(status.llmStats24h.judge.count, status.llmStats24h.judge.ms)}
               </div>
+            ) : null}
+            {/* 警示条（spec 2026-08-14 §3.4）：未读 LLM 报错/降级醒目提示，整条可点跳消息 tab。
+                字段 optional（老 daemon 无），?? 0 兜底；未读清零后条件渲染自动消失，无独立关闭按钮。
+                llm_error 红条在上，degradation 琥珀条在下，可同时存在。 */}
+            {(status.unreadLlmErrors ?? 0) > 0 ? (
+              <button
+                onClick={() => setTab('messages')}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  marginTop: 8,
+                  padding: '6px 10px',
+                  background: '#d32f2f',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  fontSize: 13,
+                }}
+              >
+                ⚠️ 蒸馏 LLM 报错 ×{status.unreadLlmErrors}
+                （最近：{truncateAlertBody(status.latestUnreadLlmError?.body ?? null)}）→ 点击查看
+              </button>
+            ) : null}
+            {(status.unreadDegradations ?? 0) > 0 ? (
+              <button
+                onClick={() => setTab('messages')}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  marginTop: 8,
+                  padding: '6px 10px',
+                  background: '#ffb300',
+                  color: '#3e2723',
+                  border: 'none',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  fontSize: 13,
+                }}
+              >
+                ⚠️ 降级 ×{status.unreadDegradations} → 点击查看
+              </button>
             ) : null}
           </>
         ) : error ? (
@@ -916,6 +968,10 @@ function LlmSettings() {
         <button disabled={busy} onClick={() => void onClear()}>清除</button>
         {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
         {msg ? <span style={{ color: msg.startsWith('连接失败') || msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
+      </div>
+      {/* 测试连接语义澄清（spec 2026-08-14 §3.4 G4）：消除「测试绿 = 蒸馏必成」错觉。 */}
+      <div style={{ marginTop: 6, fontSize: 12, color: '#888' }}>
+        仅验证端点可达；长蒸馏请求可能仍失败，失败会在状态栏警示条提示
       </div>
     </section>
   )
