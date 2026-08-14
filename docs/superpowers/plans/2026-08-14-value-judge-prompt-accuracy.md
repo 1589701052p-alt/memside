@@ -185,7 +185,7 @@ Expected: PASS（3 个测试全过）。
 
 - [ ] **Step 5: 跑判定相关套件确认零回归**
 
-Run: `bun test tests/value-filter-prompt.test.ts tests/value-filter.test.ts tests/agent-judge.test.ts tests/scheduler.test.ts`
+Run: `bun test tests/value-filter-prompt.test.ts tests/valueFilter.test.ts tests/agent-judge.test.ts tests/scheduler.test.ts`
 Expected: PASS（这些套件 mock LLM 返回，不锁 prompt 文本；若有意外失败，停下上报，不得擅自改无关测试）。
 
 - [ ] **Step 6: Commit**

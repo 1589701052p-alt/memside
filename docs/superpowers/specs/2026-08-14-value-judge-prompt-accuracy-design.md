@@ -145,7 +145,7 @@ verdictsFromCategories 映射（不动）→ keep+valueClass / discard(reason)
 - **字节锁测试**：`tests/value-filter-prompt.test.ts` 的 ORIGINAL 字面量锁
   `VALUE_JUDGE_SYSTEM_PROMPT`（HEADER+RULES+输出段 拼接）全文，必须同步更新为
   新拼接结果。
-- 既有测试 `value-filter.test.ts` / `agent-judge.test.ts` 只 mock LLM 返回，
+- 既有测试 `valueFilter.test.ts` / `agent-judge.test.ts` 只 mock LLM 返回，
   不锁 prompt 文本，预期零改动全绿。
 
 ## 5. 失败模式
