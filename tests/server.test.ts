@@ -810,6 +810,23 @@ test('GET /api/status 全部已读后按类计数归零、latestUnreadLlmError �
   expect(r.body.unreadNotifications).toBe(0)
 })
 
+// Task 8（spec 2026-08-15 §5.7）：unreadLlmErrors / latestUnreadLlmError 字段名
+// 不变，语义扩为「覆盖 llm_error + parse_error」两类 LLM 类报错——解析失败不再
+// 假扮空产出而漏报。latestUnreadLlmError 取两类中 ts 最新的一条。
+test('GET /api/status: unreadLlmErrors 覆盖 parse_error；latestUnreadLlmError 取两类中最新', async () => {
+  const rows: (typeof notifications.$inferInsert)[] = [
+    { id: 'n-pe1', ts: 1000, kind: 'llm_error', title: 'llm_error', body: 'Connection error.', readAt: null },
+    { id: 'n-pe2', ts: 2000, kind: 'parse_error', title: 'parse_error', body: '不是合法 JSON：x', readAt: null },
+  ]
+  for (const row of rows) await db.insert(notifications).values(row)
+
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.unreadLlmErrors).toBe(2)
+  expect(r.body.latestUnreadLlmError).toEqual({ body: '不是合法 JSON：x', ts: 2000 })
+  expect(r.body.unreadNotifications).toBe(2)
+})
+
 test('GET /api/status 聚合语义不变：24h 外的 run 不计入 distillRuns', async () => {
   await seedRunRow('job-recent', 'produced')
   await seedRunRow('job-stale', 'produced')

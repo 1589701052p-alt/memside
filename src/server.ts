@@ -457,16 +457,17 @@ export function createApp(deps: AppDeps) {
     const st = statsRows[0]
     const unreadRows = await deps.db.select({ n: count() }).from(notifications)
       .where(isNull(notifications.readAt)).all()
-    // 按类未读计数 + 最新未读 llm_error（spec 2026-08-14 §3.2）：状态栏警示条
-    // 需要「LLM 报错 ×N（最近：xxx）」与「降级 ×N」分开展示；unreadNotifications
-    // 总数保留（铃铛徽标）。
+    // 按类未读计数 + 最新未读 LLM 类报错（spec 2026-08-14 §3.2，2026-08-15 §5.7）：
+    // 状态栏警示条需要「LLM 类报错 ×N（最近：xxx）」与「降级 ×N」分开展示。
+    // latestUnreadLlmError 覆盖 llm_error + parse_error 两类，取 ts 最新一条
+    // （字段名不变，语义扩为「LLM 类报错」）；unreadNotifications 总数保留（铃铛徽标）。
     const unreadKindRows = await deps.db.select({ kind: notifications.kind, n: count() })
       .from(notifications).where(isNull(notifications.readAt)).groupBy(notifications.kind).all()
     const unreadByKind: Record<string, number> = {}
     for (const r of unreadKindRows) unreadByKind[r.kind] = r.n
     const latestErrRows = await deps.db.select({ body: notifications.body, ts: notifications.ts })
       .from(notifications)
-      .where(and(eq(notifications.kind, 'llm_error'), isNull(notifications.readAt)))
+      .where(and(inArray(notifications.kind, ['llm_error', 'parse_error']), isNull(notifications.readAt)))
       .orderBy(desc(notifications.ts), desc(notifications.id)).limit(1).all()
     // waiting 单列（spec §4.9）：累加中的 job 不是积压，避免 UI「pending 堆积」假象。
     const waitingCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
@@ -493,7 +494,8 @@ export function createApp(deps: AppDeps) {
         judge: { count: Number(st?.judgeCount ?? 0), ms: Number(st?.judgeMs ?? 0) },
       },
       unreadNotifications: unreadRows[0]?.n ?? 0,
-      unreadLlmErrors: unreadByKind['llm_error'] ?? 0,
+      // spec 2026-08-15 §5.7：字段名不变，语义扩为「覆盖 llm_error + parse_error」。
+      unreadLlmErrors: (unreadByKind['llm_error'] ?? 0) + (unreadByKind['parse_error'] ?? 0),
       unreadDegradations: unreadByKind['degradation'] ?? 0,
       latestUnreadLlmError: latestErrRows[0] ?? null,
       waitingJobs: waitingCount[0]?.n ?? 0,
@@ -566,9 +568,9 @@ export function createApp(deps: AppDeps) {
   // --- Notifications（消息中心，spec 2026-08-12 §5.8）------------------------
   app.get('/api/notifications', async (c) => {
     const kindParam = c.req.query('kind')
-    let kind: 'degradation' | 'llm_error' | undefined
+    let kind: 'degradation' | 'llm_error' | 'parse_error' | undefined
     if (kindParam !== undefined) {
-      if (kindParam !== 'degradation' && kindParam !== 'llm_error') {
+      if (kindParam !== 'degradation' && kindParam !== 'llm_error' && kindParam !== 'parse_error') {
         return c.json({ error: `invalid kind: ${kindParam}` }, 400)
       }
       kind = kindParam

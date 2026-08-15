@@ -48,6 +48,19 @@ describe('GET /api/notifications', () => {
   test('非法 kind -> 400', async () => {
     expect((await app.request('/api/notifications?kind=bogus')).status).toBe(400)
   })
+
+  // Task 8（spec 2026-08-15 §5.7）：parse_error 通知 kind 合法，过滤只回 parse_error。
+  test('GET /api/notifications?kind=parse_error 合法且只回 parse_error；kind=foo 仍 400', async () => {
+    await insertNotification(db, { kind: 'parse_error', title: 'parse_error', body: '不是合法 JSON：x' })
+    await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'timeout' })
+    const ok = await app.request('/api/notifications?kind=parse_error')
+    expect(ok.status).toBe(200)
+    const data = await ok.json() as any
+    expect(data.items.every((n: any) => n.kind === 'parse_error')).toBe(true)
+    expect(data.items.length).toBeGreaterThanOrEqual(1)
+    const bad = await app.request('/api/notifications?kind=foo')
+    expect(bad.status).toBe(400)
+  })
 })
 
 describe('已读端点', () => {
