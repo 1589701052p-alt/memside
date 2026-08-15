@@ -1009,3 +1009,43 @@ follow-up 清单：scheduler digest 接线测试（spec §8 #12 缺口，quality
 
 1. **T3（status 字段）**：`tests/server.test.ts` 新增用例的注释块排版与邻近风格不齐；status 新字段三次查询为顺序 await，可改 `Promise.all` 并行（现量级无压力）。
 2. **T5（警示条 UI）**：源码断言测试名超出实际保证（文本断言只锁源码含警示条分支 token，不锁渲染行为本身）；设置页语义澄清小字落在按钮下方（spec §3.4 原写「按钮旁」，实现为下方 marginTop 6px 行，语义等效）。
+
+## 价值判定器 prompt 精度修复（2026-08-14）
+
+审计 live DB 最近 50 候选 + 50 自动丢弃（详见 spec §1）发现两个系统性 prompt 缺陷并修复
+（设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-14-value-judge-prompt-accuracy*`）：
+
+1. **fleeting 误用于永久规则**（实测 D17 prompt 中立硬约束 / D21 push 终验门槛 / D4 review
+   报告格式被误判丢弃）：fleeting 加 HARD RULE——只许用于会话性琐事与条目自身标明已被
+   取代的指导；长期项目规则 / 工作流 / 质量门槛永远不得判 fleeting。保留 superseded 口子
+   兼容 agent 协议段「被取代方判 fleeting」的合法用法。
+2. **derivable 边界跨批漂移**（TDD 规则 / STATE.md 追加顺序 / UI 文案照抄三组同事实相反
+   判决）：derivable 的 "docs" 显式钉死包含 CLAUDE.md / README / STATE.md / docs/ / 测试
+   守卫——已写进仓库文档的长期规矩一律 derivable（用户裁决方向：CLAUDE.md 每会话本就
+   注入，重复记忆是噪音）；stated 免疫 HARD RULE 一字不动。
+
+纯 prompt 文本改动：仅 `VALUE_JUDGE_RULES` 两处插入，agent 判定器经共享常量自动继承；
+映射代码 / taming / 失败兜底 / 输出段零改动。字节锁测试更新为新权威文本 + 两条意图断言
+回归锁。`bun run typecheck && bun test` 980/980 全绿。
+
+### 上线后观测（硬要求，结论回填本节）
+
+- 24–48h 内 `memory_discards` 新行 reason='fleeting' 是否仍命中长期规则措辞（预期近零）；
+- 文档化规矩类候选判决是否收敛到 derivable（不再出现 convention/user-rule 留存版）；
+- convention 留存是否异常减少（"nowhere written down" 类被误丢的副作用信号）。
+
+### 终审 deferred minor（非阻塞）
+
+全分支终审 verdict=Ready to merge=Yes（0 Critical / 0 Important），2 条 Minor 经裁定 defer：
+
+1. `tests/value-filter-prompt.test.ts` 旧测试名承诺锁「stated 禁考硬规则」但断言只含泛
+   `'HARD RULE'` 子串（pre-existing，非本分支引入）；实际防护由字节锁兜底，无真实漏洞。
+2. fleeting 新 HARD RULE 口子措辞「the entry itself marks as superseded」与 agent 协议段
+   「被另一条取代判 fleeting」严格读有语义缝隙（spec 措辞核对单第 1 条已逐字批准该措辞）；
+   并入上线后观测，若实测 superseded 类候选判决异常再收紧。
+
+### Follow-up
+
+1. 蒸馏器 origin 打标准确性（C16 类：正文写"用户明确要求"却标 agent-observed）——
+   考虑 distiller prompt 加 origin 硬规则，独立 spec。
+2. 存量误判条目（D4/D17/D21/D37）在 Web UI「AI自动拒绝」tab 手动提升，不重判。
