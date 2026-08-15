@@ -11,7 +11,7 @@ import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor, type MemoryListFilter, type FacetScope } from '@/memory/store'
 import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NotificationNotFoundError } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
-import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
+import { parseTranscriptFile, resolveSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
 import type { OpencodeMessage } from '@/opencode/transcript'
 import { enqueueWaitingJob, type EnqueueInput } from '@/scheduler'
@@ -81,11 +81,13 @@ export interface AppDeps {
  *      `PostToolUse` is skipped entirely (early-return 202 without
  *      parsing/enqueuing/broadcasting) - see the route handler. PostToolUse's
  *      transcript is a cumulative prefix of Stop's, so it would duplicate Stop.
- *      `SubagentStop` (round 7) is NOT skipped: it uses `loadSubagentTranscript`
- *      to read that subagent's own conversation file (double-fallback on
- *      `agent_id`), enqueues a one-off distill job tagged with `sourceAgentId`
+ *      `SubagentStop` (round 7) is NOT skipped: it uses `resolveSubagentTranscript`
+ *      to read that subagent's own conversation file (no main-session fallback),
+ *      enqueues a one-off distill job tagged with `sourceAgentId`
  *      (no `sessionId` - subagents don't update the main session offset), and
- *      persists/broadcasts like Stop. Error signals still surface via
+ *      persists/broadcasts like Stop. When the subagent file is missing/empty,
+ *      no enqueue/event happens — a `subagent_transcript_missing` degradation
+ *      (with forensic diag) is logged instead. Error signals still surface via
  *      detectErrorSignals on the Stop transcript.
  *
  * 2. Injector (`POST /inject`) - programmatic seam (the SessionStart hook
@@ -259,31 +261,33 @@ export function createApp(deps: AppDeps) {
       return c.json({ ok: true }, 202)
     }
 
-    // SubagentStop（第七轮）：不再早返回。payload 带 agent_id -> loadSubagentTranscript
-    // 定位该 subagent 自己的对话文件（双路兜底）-> 单独蒸馏成独立任务（与主会话互不可见）。
-    // subagent 一次性任务，不传 sessionId（不更新主会话偏移）；sourceAgentId 标来源。
+    // SubagentStop（spec 2026-08-15 §5.3）：只蒸馏 subagent 自有 transcript；
+    // 文件缺失/为空不再退回主会话（主会话内容由其自有累加 job 负责，兜底既重复
+    // 又把 origin 强制降级），改写 subagent_transcript_missing degradation 带取证现场。
     if (event === 'SubagentStop') {
       const agentId: string = body.agent_id ?? ''
       const transcriptPath: string = body.transcript_path ?? ''
       const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
       const debounceKey = `${cwd}:${event}`
-      const sourceKind = 'conversation'  // events.kind：对话型数据（subagent 区分在 job.source_agent_id）
-      // 失败模式可观测：payload 缺 agent_id 时 loadSubagentTranscript 只能退回 transcript_path
-      // 兜底。同步路径打 warn（不入 IIFE，即使后续 enqueue 失败也留信号），便于发现 claude
-      // code payload 变更悄悄禁用 subagent 蒸馏的情况。
-      if (!agentId) {
-        console.warn('memside: SubagentStop payload missing agent_id; falling back to transcript_path')
-      }
       void (async () => {
         try {
-          const turns = loadSubagentTranscript(transcriptPath, agentId)
-          const { jobId } = await deps.enqueueDistillJob(deps.db, {
-            sourceEventId, runtime: 'claude-code', cwd, debounceKey, sourceAgentId: agentId || null,
-          })
-          await deps.db.insert(memoryDistillEvents).values({
-            distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
-            kind: sourceKind, payload: JSON.stringify(turns),
-          })
+          const { turns, diag } = resolveSubagentTranscript(transcriptPath, agentId)
+          if (turns.length > 0) {
+            const { jobId } = await deps.enqueueDistillJob(deps.db, {
+              sourceEventId, runtime: 'claude-code', cwd, debounceKey, sourceAgentId: agentId || null,
+            })
+            await deps.db.insert(memoryDistillEvents).values({
+              distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
+              kind: 'conversation', payload: JSON.stringify(turns),
+            })
+          } else {
+            const detail = JSON.stringify({ ...diag, payloadKeys: Object.keys(body) })
+            await logDegradation(deps.db, {
+              kind: 'subagent_transcript_missing', detail,
+              sessionId: body.session_id ?? undefined,
+            })
+            console.warn('memside: subagent transcript missing, distill skipped', detail)
+          }
         } catch (e) {
           deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) })
         }

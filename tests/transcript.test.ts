@@ -1,7 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseTranscriptFile, extractText, subagentFilePathFromPayload, loadSubagentTranscript, resolveSubagentTranscript } from '@/claude/transcript'
+import { parseTranscriptFile, extractText, subagentFilePathFromPayload, resolveSubagentTranscript } from '@/claude/transcript'
 import { detectErrorSignals } from '@/memory/pure'
 
 /**
@@ -264,38 +264,6 @@ test('subagentFilePathFromPayload: non-jsonl transcriptPath -> null', () => {
 
 test('subagentFilePathFromPayload: empty transcriptPath -> null', () => {
   expect(subagentFilePathFromPayload('', 'ag')).toBeNull()
-})
-
-// --- loadSubagentTranscript double-fallback (Task 5) -------------------------
-
-test('loadSubagentTranscript: agent_id path hit -> parses subagent file', () => {
-  // 主会话 dir/sess-1.jsonl；subagent 文件 dir/sess-1/subagents/agent-AG.jsonl
-  mkdirSync(join(dir, 'sess-1', 'subagents'), { recursive: true })
-  const mainPath = join(dir, 'sess-1.jsonl')
-  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
-  const subPath = join(dir, 'sess-1', 'subagents', 'agent-AG.jsonl')
-  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT INTERNAL' } }) + '\n')
-  const turns = loadSubagentTranscript(mainPath, 'AG')
-  expect(turns.length).toBe(1)
-  expect(turns[0]!.content).toBe('SUBAGENT INTERNAL')
-  expect(turns[0]!.content).not.toBe('MAIN SESSION')
-})
-
-test('loadSubagentTranscript: agent_id path miss -> falls back to transcript_path', () => {
-  const mainPath = join(dir, 'sess-2.jsonl')
-  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'FALLBACK TO MAIN' } }) + '\n')
-  // 不建 subagents 目录 -> 推路径读不到 -> 退回 mainPath
-  const turns = loadSubagentTranscript(mainPath, 'NOPE')
-  expect(turns.length).toBe(1)
-  expect(turns[0]!.content).toBe('FALLBACK TO MAIN')
-})
-
-test('loadSubagentTranscript: both miss -> empty (no throw)', () => {
-  const turns = loadSubagentTranscript(join(dir, 'nope.jsonl'), 'AG')
-  expect(turns).toEqual([])
-  // agentId 空 + 无 transcript_path 也空
-  expect(loadSubagentTranscript('', 'AG')).toEqual([])
-  expect(loadSubagentTranscript(join(dir, 'x.jsonl'), '')).toEqual([])
 })
 
 // --- thinking 捕获（spec 2026-08-09 §4.1）---

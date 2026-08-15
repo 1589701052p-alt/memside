@@ -198,34 +198,6 @@ export function subagentFilePathFromPayload(
 }
 
 /**
- * Load a subagent's own transcript with double-fallback (spec 第一层):
- * 1. Try the path derived from (transcriptPath, agentId) via subagentFilePathFromPayload.
- * 2. If that yields no path or the file is absent, fall back to parseTranscriptFile(transcriptPath).
- * 3. If neither reads, return [].
- * Never throws - degrades to [] on any fs/parse error so the caller can still enqueue
- * (preserve capture signal, don't drop the event). The subagent file format matches the
- * main session's (verified), so parseTranscriptFile reads it directly.
- */
-export function loadSubagentTranscript(
-  transcriptPath: string,
-  agentId: string | null | undefined,
-): TranscriptTurn[] {
-  try {
-    const subPath = subagentFilePathFromPayload(transcriptPath, agentId)
-    if (subPath && existsSync(subPath)) {
-      const turns = parseTranscriptFile(subPath)
-      if (turns.length > 0) return turns
-    }
-    if (transcriptPath) {
-      return parseTranscriptFile(transcriptPath)
-    }
-    return []
-  } catch {
-    return []
-  }
-}
-
-/**
  * 解析 subagent 自有 transcript（spec 2026-08-15 §5.2）：不再有「退回主会话」兜底——
  * 主会话内容由其自有累加 job 蒸馏，兜底既重复又会把 origin 强制降级。
  * 文件缺失/为空一律空 turns + 取证 diag（供 subagent_transcript_missing degradation）。
