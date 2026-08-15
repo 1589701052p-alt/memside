@@ -5,7 +5,7 @@ import { basename, parse as parsePath } from 'node:path'
 import type { DbClient } from '@/db/client'
 import { memoryDistillJobs, memoryDistillEvents } from '@/db/schema'
 import { distillTranscript, type DistillCandidate } from '@/memory/distiller'
-import { listForDedupByScope, listApprovedByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, getSessionDigest, upsertSessionDigest, listWaitingJobs, consumeFlush, releaseWaitingJob, logDegradation, getSessionOffset, logLlmErrorNotification, updateDistillRunDigestMs, type DiscardRecord } from '@/memory/store'
+import { listForDedupByScope, listApprovedByScope, listSubjectSlugs, logDiscards, setSessionOffset, saveSourceInput, saveDistillRun, getSessionDigest, upsertSessionDigest, listWaitingJobs, consumeFlush, releaseWaitingJob, logDegradation, getSessionOffset, logLlmErrorNotification, logParseErrorNotification, updateDistillRunDigestMs, type DiscardRecord } from '@/memory/store'
 import { exactDedupCandidates } from '@/memory/exactDedup'
 import { judgeDuplicates } from '@/memory/dedup'
 import { judgeValue, type ValueClass, type ValueVerdict } from '@/memory/valueFilter'
@@ -17,6 +17,7 @@ import { updateSessionLedger } from '@/memory/rollingSummary'
 import type { AgentStep } from '@/memory/agentLoop'
 import type { MemoryInput, Memory } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
+import { capRawText } from '@/memory/pure'
 import type { LLMCall } from '@/llm'
 import type { ActivityTracker, LlmPhase } from '@/activity'
 
@@ -329,7 +330,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           approvedTitles,    // spec §4.7：已审批标题清单（禁止重复提炼）
         })
       } finally { pDistill.end() }
-      const { candidates, filteredTurns, rawOutput, rawCount, callThrew, errorMessage } = distillOut
+      const { candidates, filteredTurns, rawOutput, rawCount, callThrew, errorMessage, parseError, lastRawText } = distillOut
       const durationMs = Date.now() - t0
       // 逐字去重(spec §4.1):规范化逐字相同才合并,零语义判断;合并项走审计表。
       // 先于 LLM dedup,省调用;drops 不进后续任何 LLM 判定。
@@ -429,7 +430,13 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       try { await saveSourceInput(db, job.id, filteredTurns) }
       catch (e) { console.warn('memside: saveSourceInput failed', e) }
       // 运行记录：outcome + 计数链 + LLM 原始产出 + 错误描述。best-effort，与 logDiscards/saveSourceInput 同级。
-      const outcome = candidates.length === 0 ? (callThrew ? 'llm_error' : 'empty_output') : 'produced'
+      // spec 2026-08-15 §4 真值表：candidates 优先；callThrew -> llm_error；
+      // 未抛错但解析耗尽 -> parse_error；合法空 -> empty_output。
+      const outcome = candidates.length === 0
+        ? (callThrew ? 'llm_error' : parseError ? 'parse_error' : 'empty_output')
+        : 'produced'
+      const runErrorMessage = outcome === 'llm_error' ? errorMessage
+        : outcome === 'parse_error' ? parseError : null
       try {
         await saveDistillRun(db, job.id, {
           // spec §4: produced = accepted_count > 0 regardless of transient LLM
@@ -448,18 +455,24 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
             : rawOutput,
           rawCount, acceptedCount: candidates.length, dedupedCount: deduped.length,
           filteredCount: keepWithClass.length, storedCount: keepWithClass.length,
-          discardedCount: discarded.length + exact.drops.length, durationMs, errorMessage,
+          discardedCount: discarded.length + exact.drops.length, durationMs, errorMessage: runErrorMessage,
+          rawText: outcome === 'parse_error' ? capRawText(lastRawText) : null,
           dedupMs, judgeMs,
         })
       } catch (e) { console.warn('memside: saveDistillRun failed', e) }
-      // /api/status 修复（spec §scheduler）：llm_error 时把错误也写进 job.last_error，
-      // 顶部状态栏的 lastError 才能看到 LLM 错误（既有 lastError 查 j.lastError 非空）。
+      // /api/status 修复（spec §scheduler）：llm_error / parse_error 都把错误写进
+      // job.last_error 并发通知（spec 2026-08-15 §5.5），顶部状态栏的 lastError 才能
+      // 看到 LLM 错误（既有 lastError 查 j.lastError 非空）。
       // best-effort：失败只 warn，不阻塞 done。
-      if (outcome === 'llm_error' && errorMessage) {
+      if ((outcome === 'llm_error' || outcome === 'parse_error') && runErrorMessage) {
         try {
-          await db.update(memoryDistillJobs).set({ lastError: errorMessage })
+          await db.update(memoryDistillJobs).set({ lastError: runErrorMessage })
             .where(eq(memoryDistillJobs.id, job.id)).run()
-          await logLlmErrorNotification(db, { jobId: job.id, message: errorMessage })
+          if (outcome === 'parse_error') {
+            await logParseErrorNotification(db, { jobId: job.id, message: runErrorMessage })
+          } else {
+            await logLlmErrorNotification(db, { jobId: job.id, message: runErrorMessage })
+          }
         } catch (e) { console.warn('memside: set lastError failed', e) }
       }
       await db.update(memoryDistillJobs).set({ status: 'done', finishedAt: Date.now() }).where(eq(memoryDistillJobs.id, job.id)).run()
