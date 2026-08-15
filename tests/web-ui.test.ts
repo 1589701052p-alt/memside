@@ -434,3 +434,13 @@ test('App.tsx 筛选栏可理解性：标题/说明 + 维度改名 + 分类选�
   expect(src).not.toContain('label="价值筐"')
   expect(src).toContain('categoryInfo(p.value)')
 })
+
+// parse_error UI 呈现（spec 2026-08-15 §5.8）：消息中心加 parse_error 筛选项与
+// 三分支 chip；DistillRunModal 新增「模型原始输出」区，rawText 为 null 时显「（无留存）」。
+// React 组件不单测，源码文本断言锁锚点，refactor 删除即变红。
+test('App.tsx: 消息中心含 parse_error 筛选项与三分支 chip；modal 含「模型原始输出」区', () => {
+  expect(src).toContain('<option value="parse_error">解析失败</option>')
+  expect(src).toContain("n.kind === 'parse_error' ? '解析失败'")
+  expect(src).toContain('模型原始输出')
+  expect(src).toContain('（无留存）')
+})

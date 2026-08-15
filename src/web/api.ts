@@ -227,7 +227,7 @@ export async function promoteDiscard(id: string, fetchFn: FetchLike = fetch): Pr
 
 // --- Distill runs (工作记录透明化) client ------------------------------------
 
-export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced' | 'skipped_trivial'
+export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced' | 'skipped_trivial' | 'parse_error'
 
 export interface DistillRunListItem {
   distillJobId: string
@@ -251,6 +251,8 @@ export interface DistillRunListItem {
 
 export interface DistillRunDetail extends DistillRunListItem {
   rawOutput: unknown | null
+  /** parse_error 时详情端点带出的模型原始输出（截断存储）；其余 outcome 为 null/缺省。 */
+  rawText?: string | null
 }
 
 export async function listDistillRuns(fetchFn: FetchLike = fetch): Promise<DistillRunListItem[]> {
@@ -366,7 +368,7 @@ export async function listDiscardsPage(
 export interface NotificationItem {
   id: string
   ts: number
-  kind: 'degradation' | 'llm_error'
+  kind: 'degradation' | 'llm_error' | 'parse_error'
   title: string
   body: string | null
   refType: string | null

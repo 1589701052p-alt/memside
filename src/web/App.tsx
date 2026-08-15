@@ -602,6 +602,7 @@ export default function App() {
               <option value="">全部类型</option>
               <option value="degradation">降级</option>
               <option value="llm_error">LLM错误</option>
+              <option value="parse_error">解析失败</option>
             </select>
             <label style={{ fontSize: 13 }}>
               <input
@@ -640,7 +641,7 @@ export default function App() {
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}>
                   {unread ? <span style={{ color: '#e65100' }}>●</span> : <span style={{ color: '#ccc' }}>○</span>}
                   <span style={{ ...CHIP_STYLE, color: chipColor, borderColor: chipColor }}>
-                    {n.kind === 'llm_error' ? 'LLM错误' : '降级'}
+                    {n.kind === 'llm_error' ? 'LLM错误' : n.kind === 'parse_error' ? '解析失败' : '降级'}
                   </span>
                   <b>{notificationTitle(n)}</b>
                   <span style={{ marginLeft: 'auto', color: '#999', fontSize: 12 }}>{timeLabel}</span>
@@ -1535,6 +1536,20 @@ function DistillRunModal({ jobId, onClose }: { jobId: string; onClose: () => voi
                     {detail.errorMessage ? (
                       <pre style={{ background: '#fff4f4', color: '#c00', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap', borderLeft: '3px solid #c00' }}>{detail.errorMessage}</pre>
                     ) : <span style={{ color: '#999', marginLeft: 8 }}>（无错误描述）</span>}
+                  </div>
+                )
+                : detail.outcome === 'parse_error' ? (
+                  <div>
+                    <span style={{ color: '#c00' }}>模型输出解析失败（重试 3 次均未获合法 JSON）</span>
+                    {detail.errorMessage ? (
+                      <pre style={{ background: '#fff4f4', color: '#c00', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap', borderLeft: '3px solid #c00' }}>{detail.errorMessage}</pre>
+                    ) : <span style={{ color: '#999', marginLeft: 8 }}>（无错误描述）</span>}
+                    <div style={{ marginTop: 8 }}>
+                      <strong>模型原始输出</strong>
+                      {detail.rawText ? (
+                        <pre style={{ background: '#f7f7f7', padding: 8, margin: '4px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 320, overflow: 'auto', fontSize: 12 }}>{detail.rawText}</pre>
+                      ) : <span style={{ color: '#999', marginLeft: 8 }}>（无留存）</span>}
+                    </div>
                   </div>
                 )
                 : detail.outcome === 'skipped_no_new_turns' ? <span>该 job 无新 turn，未调用 LLM</span>
