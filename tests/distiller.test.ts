@@ -546,3 +546,63 @@ test('renderUserPrompt: tool 无 toolCall -> 保持单行 [tool:Name] content（
   expect(captured).not.toContain('调用:')
   expect(captured).not.toContain('结果:')
 })
+
+test('parseError: 三次返回非 JSON -> parseError 非空 + lastRawText=末次文本 + callThrew=false', async () => {
+  const raws = ['garbage-1', 'garbage-2', 'garbage-3']
+  let n = 0
+  const res = await distillTranscript({
+    turns: [{ role: 'user', content: '记住：部署前必须跑 bun test' }],
+    runtime: 'claude-code', cwd: '/r',
+    callLLM: async () => raws[Math.min(n++, 2)],
+    existingSlugs: [],
+  })
+  expect(res.candidates).toEqual([])
+  expect(res.callThrew).toBe(false)
+  expect(res.parseError).toContain('不是合法 JSON')
+  expect(res.lastRawText).toBe('garbage-3')
+})
+
+test('parseError: 合法 JSON 但 candidates 非数组且重试耗尽 -> parseError=校验错误', async () => {
+  const res = await distillTranscript({
+    turns: [{ role: 'user', content: 'x'.repeat(50) }],
+    runtime: 'claude-code', cwd: '/r',
+    callLLM: async () => '{"foo":1}',
+    existingSlugs: [],
+  })
+  expect(res.candidates).toEqual([])
+  expect(res.callThrew).toBe(false)
+  expect(res.parseError).not.toBeNull()
+  expect(res.lastRawText).toBe('{"foo":1}')
+})
+
+test('parseError 回归锁: attempt0 垃圾 + attempt1 合法 -> parseError=null（错误被成功覆盖）', async () => {
+  let n = 0
+  const res = await distillTranscript({
+    turns: [{ role: 'user', content: '记住：部署前必须跑 bun test' }],
+    runtime: 'claude-code', cwd: '/r',
+    callLLM: async () => (++n === 1
+      ? 'garbage'
+      : '{"candidates":[{"title":"[category:convention] 部署前必须跑 bun test","bodyMd":"用户明确陈述","scope":"project"}]}'),
+    existingSlugs: [],
+  })
+  expect(res.candidates.length).toBe(1)
+  expect(res.parseError).toBeNull()
+  expect(res.lastRawText).toBeNull()
+})
+
+test('parseError 回归锁: 合法 {"candidates":[]} 真空 -> parseError=null；全抛错 -> llm_error 路径 parseError=null', async () => {
+  const empty = await distillTranscript({
+    turns: [{ role: 'user', content: '今天天气不错' }], runtime: 'claude-code', cwd: '/r',
+    callLLM: async () => '{"candidates":[]}', existingSlugs: [],
+  })
+  expect(empty.candidates).toEqual([])
+  expect(empty.parseError).toBeNull()
+
+  const threw = await distillTranscript({
+    turns: [{ role: 'user', content: '记住：部署前必须跑 bun test' }], runtime: 'claude-code', cwd: '/r',
+    callLLM: async () => { throw new Error('Connection error.') }, existingSlugs: [],
+  })
+  expect(threw.callThrew).toBe(true)
+  expect(threw.parseError).toBeNull()
+  expect(threw.lastRawText).toBeNull()
+})

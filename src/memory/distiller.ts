@@ -124,6 +124,10 @@ export interface DistillResult {
   /** LLM 调用错误描述（最后一次 attempt 的错误 message）。仅 llm_error 时非 null；
    *  produced/empty_output/skipped 时 null。retry-success 时 null（错误被成功覆盖）。 */
   errorMessage: string | null
+  /** 解析失败描述（末次 attempt 的 parse/校验错误）。仅「调用未抛错但重试耗尽未获合法结构」时非 null。 */
+  parseError: string | null
+  /** 末次未抛错 attempt 的原始输出文本。仅解析失败路径非 null（供 raw_text 落盘）。 */
+  lastRawText: string | null
 }
 
 function renderUserPrompt(
@@ -199,6 +203,8 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     // filteredTurns 已与调用成败解耦（恒为过滤快照，见下方注释）。
     let callThrew = false
     let lastErrorMessage: string | null = null
+    let lastAttemptRaw: string | null = null
+    let lastAttemptError: string | null = null
     const wrappedCall: LLMCall = async (sys, user, opts) => {
       // reset per attempt: a prior failed attempt must not stain a later success.
       // callWithRetry re-invokes wrappedCall on throw; without this reset, an
@@ -218,13 +224,18 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
       system: DISTILLER_SYSTEM_PROMPT,
       user: userPrompt,
       shouldRetry: distillShouldRetry,
+      onAttempt: ({ raw, error }) => { lastAttemptRaw = raw; lastAttemptError = error },
     }) as { candidates?: unknown } | undefined
     const rawOutput: unknown = parsed ?? null
     if (!parsed || !Array.isArray(parsed.candidates)) {
       // filteredTurns 恒为过滤快照（调用前已算出，与调用成败无关）。
       // 历史 bug 曾在 callThrew 时清空 -> llm_error job 丢失 source input（spec §source input 修复）。
       return { candidates: [], filteredTurns: filtered, rawOutput, rawCount: 0, callThrew,
-        errorMessage: callThrew ? lastErrorMessage : null }
+        errorMessage: callThrew ? lastErrorMessage : null,
+        // 未抛错却拿不到合法结构 = 解析失败（spec 2026-08-15 §4）。callThrew 与 parseError
+        // 互斥：末次 attempt 非抛即报。防御兜底 '解析失败：无错误描述' 理论不可达。
+        parseError: callThrew ? null : (lastAttemptError ?? '解析失败：无错误描述'),
+        lastRawText: callThrew ? null : lastAttemptRaw }
     }
     const rawCount = parsed.candidates.length
     const out: DistillCandidate[] = []
@@ -262,12 +273,14 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
         subjectSlug: normalizeSubjectSlug(o.subjectSlug),
       })
     }
-    return { candidates: out, filteredTurns: filtered, rawOutput, rawCount, callThrew, errorMessage: null }
+    return { candidates: out, filteredTurns: filtered, rawOutput, rawCount, callThrew, errorMessage: null,
+      parseError: null, lastRawText: null }
   } catch (e) {
     // Never throw: distill failures degrade to "no candidates this round".
     // 顶层兜底（detectErrorSignals/filterTranscriptForDistill 等纯函数抛错时），
     // 不可达路径，errorMessage 仍透出异常 message 供诊断。
     return { candidates: [], filteredTurns: [], rawOutput: null, rawCount: 0, callThrew: true,
-      errorMessage: e instanceof Error ? e.message : String(e) }
+      errorMessage: e instanceof Error ? e.message : String(e),
+      parseError: null, lastRawText: null }
   }
 }
