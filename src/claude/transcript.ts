@@ -1,4 +1,4 @@
-import { readFileSync, statSync, existsSync } from 'node:fs'
+import { readFileSync, statSync, existsSync, readdirSync } from 'node:fs'
 import type { TranscriptTurn } from '@/memory/pure'
 import { captureToolCall } from '@/memory/pure'
 
@@ -222,5 +222,59 @@ export function loadSubagentTranscript(
     return []
   } catch {
     return []
+  }
+}
+
+/**
+ * 解析 subagent 自有 transcript（spec 2026-08-15 §5.2）：不再有「退回主会话」兜底——
+ * 主会话内容由其自有累加 job 蒸馏，兜底既重复又会把 origin 强制降级。
+ * 文件缺失/为空一律空 turns + 取证 diag（供 subagent_transcript_missing degradation）。
+ * 永不抛（collector 热路径契约同 parseTranscriptFile）。
+ */
+export interface SubagentResolveDiag {
+  agentId: string
+  transcriptPath: string
+  /** subagentFilePathFromPayload 推导结果；推不出为 null */
+  derivedPath: string | null
+  /** derivedPath 存在且为文件 */
+  derivedExists: boolean
+  /** 文件解析出的 turn 数（0 = 缺失或空/无有效 turn） */
+  derivedTurns: number
+  /** transcript_path 指向的主会话文件是否存在（不读内容） */
+  mainTranscriptExists: boolean
+  /** <base>/subagents/ 目录当时真实 basename（cap 30）；目录不存在/不可读为 [] */
+  subagentsDirEntries: string[]
+}
+
+export function resolveSubagentTranscript(
+  transcriptPath: string,
+  agentId: string | null | undefined,
+): { turns: TranscriptTurn[]; diag: SubagentResolveDiag } {
+  const diag: SubagentResolveDiag = {
+    agentId: agentId ?? '', transcriptPath,
+    derivedPath: null, derivedExists: false, derivedTurns: 0,
+    mainTranscriptExists: false, subagentsDirEntries: [],
+  }
+  try {
+    diag.mainTranscriptExists = !!transcriptPath && existsSync(transcriptPath)
+    const subPath = subagentFilePathFromPayload(transcriptPath, agentId)
+    diag.derivedPath = subPath
+    // 目录现场清单（抓「文件为什么不存在」的现行：命名漂移/目录缺失一目了然）
+    if (transcriptPath.endsWith('.jsonl')) {
+      const sep = transcriptPath.includes('\\') && !transcriptPath.includes('/') ? '\\' : '/'
+      const dir = `${transcriptPath.slice(0, -'.jsonl'.length)}${sep}subagents`
+      try {
+        if (existsSync(dir)) diag.subagentsDirEntries = readdirSync(dir).slice(0, 30)
+      } catch { /* 目录不可读保持 [] */ }
+    }
+    if (subPath && existsSync(subPath)) {
+      diag.derivedExists = true
+      const turns = parseTranscriptFile(subPath)
+      diag.derivedTurns = turns.length
+      return { turns, diag }
+    }
+    return { turns: [], diag }
+  } catch {
+    return { turns: [], diag }
   }
 }
