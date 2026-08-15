@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { sql } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import {
-  insertNotification, logLlmErrorNotification, listNotificationsPage,
+  insertNotification, logLlmErrorNotification, logParseErrorNotification, listNotificationsPage,
   markNotificationRead, markAllNotificationsRead, updateDistillRunDigestMs,
   logDegradation, saveDistillRun, getDistillRun,
   NotificationNotFoundError, InvalidNotificationFilterError,
@@ -225,4 +225,31 @@ test('updateDistillRunDigestMs 回填；无行 no-op', async () => {
   expect(run!.dedupMs).toBe(20)
   expect(run!.judgeMs).toBe(30)
   await updateDistillRunDigestMs(db, 'no-such-job', 1) // 不抛
+})
+
+// ---------------------------------------------------------------------------
+// parse_error 通知（spec 2026-08-15 §5.4）：kind 扩展 + 同 llm_error 的按 body 折叠
+// ---------------------------------------------------------------------------
+
+test('insertNotification: parse_error 按 body 折叠（同 llm_error 语义），已读不折叠', async () => {
+  const id1 = await insertNotification(db, { kind: 'parse_error', title: 'parse_error', body: 'Unexpected token' })
+  const id2 = await insertNotification(db, { kind: 'parse_error', title: 'parse_error', body: 'Unexpected token' })
+  expect(id2).toBe(id1)  // 折叠返回原 id
+  const id3 = await insertNotification(db, { kind: 'parse_error', title: 'parse_error', body: 'different error' })
+  expect(id3).not.toBe(id1)
+  // 已读的相同内容不折叠（用户已处置，新发生是新事件）
+  await markNotificationRead(db, id1)
+  const id4 = await insertNotification(db, { kind: 'parse_error', title: 'parse_error', body: 'Unexpected token' })
+  expect(id4).not.toBe(id1)
+  // 跨 kind 不混：llm_error 同 body 不折叠进 parse_error（折叠按各自 kind 成键）
+  const idL = await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: 'Unexpected token' })
+  expect(idL).not.toBe(id4)
+})
+
+test('logParseErrorNotification: 落库 kind=parse_error + refId=jobId', async () => {
+  await logParseErrorNotification(db, { jobId: 'J1', message: '不是合法 JSON：…' })
+  const page = await listNotificationsPage(db, { kind: 'parse_error' })
+  expect(page.items.length).toBe(1)
+  expect(page.items[0]!.kind).toBe('parse_error')
+  expect(page.items[0]!.refId).toBe('J1')
 })

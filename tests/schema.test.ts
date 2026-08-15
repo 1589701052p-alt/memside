@@ -417,6 +417,12 @@ test('memory_distill_runs 含 digest_ms/dedup_ms/judge_ms（spec §5.4）', () =
   for (const n of ['digest_ms', 'dedup_ms', 'judge_ms']) expect(names).toContain(n)
 })
 
+test('memory_distill_runs has raw_text column (spec 2026-08-15 §5.4)', () => {
+  db = openDb(join(dir, 'rawtext.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'raw_text')).toBe(true)
+})
+
 test('notifications 索引存在', () => {
   db = openDb(join(dir, 'notifidx.db'))
   const idx = db.$client.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='notifications'").all() as { name: string }[]
