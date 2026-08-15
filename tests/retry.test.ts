@@ -132,3 +132,45 @@ test('returns undefined when call throws on every attempt', async () => {
   expect(calls).toBe(3)
   expect(result).toBeUndefined()
 })
+
+test('onAttempt: parse失败/校验失败/通过三触发点 + 抛错不触发 + 回调抛错不影响流程', async () => {
+  const { callWithRetry } = await import('@/memory/retry')
+  // 三触发点
+  const seen: { raw: string; error: string | null }[] = []
+  let n = 0
+  const call = async () => {
+    n++
+    if (n === 1) return 'not json at all'
+    if (n === 2) return '{"foo":1}'
+    return '{"candidates":[]}'
+  }
+  const r = await callWithRetry({
+    call, system: 's', user: 'u',
+    shouldRetry: (p) => (p && typeof p === 'object' && Array.isArray((p as any).candidates) ? null : '形状不对'),
+    onAttempt: (info) => seen.push(info),
+  })
+  expect(r).toEqual({ candidates: [] })
+  expect(seen.length).toBe(3)
+  expect(seen[0].raw).toBe('not json at all')
+  expect(seen[0].error).toContain('不是合法 JSON')
+  expect(seen[1].raw).toBe('{"foo":1}')
+  expect(seen[1].error).toBe('形状不对')
+  expect(seen[2].error).toBeNull()
+
+  // 抛错 attempt 不触发
+  const seen2: unknown[] = []
+  await callWithRetry({
+    call: async () => { throw new Error('boom') }, system: 's', user: 'u',
+    shouldRetry: () => null, maxRetries: 0,
+    onAttempt: (i) => seen2.push(i),
+  })
+  expect(seen2.length).toBe(0)
+
+  // 回调抛错不影响返回
+  const r3 = await callWithRetry({
+    call: async () => '{"candidates":[]}', system: 's', user: 'u',
+    shouldRetry: () => null,
+    onAttempt: () => { throw new Error('observer exploded') },
+  })
+  expect(r3).toEqual({ candidates: [] })
+})
