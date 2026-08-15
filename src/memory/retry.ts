@@ -49,9 +49,9 @@ export async function callWithRetry(opts: RetryOpts): Promise<unknown> {
     try {
       parsed = JSON.parse(cleaned)
     } catch (e) {
-      if (attempt === maxRetries) return lastParsed
       const error = `不是合法 JSON：${e instanceof Error ? e.message : String(e)}`
       fireAttempt(opts, raw, error)
+      if (attempt === maxRetries) return lastParsed
       currentUser = `${opts.user}\n\n[修正] 你上次的回答有问题：${error}。${FEEDBACK_SUFFIX}`
       continue
     }
@@ -61,8 +61,8 @@ export async function callWithRetry(opts: RetryOpts): Promise<unknown> {
       fireAttempt(opts, raw, null)
       return parsed
     }
-    if (attempt === maxRetries) return lastParsed
     fireAttempt(opts, raw, retryError)
+    if (attempt === maxRetries) return lastParsed
     currentUser = `${opts.user}\n\n[修正] 你上次的回答有问题：${retryError}。${FEEDBACK_SUFFIX}`
   }
   return lastParsed

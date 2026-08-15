@@ -174,3 +174,39 @@ test('onAttempt: parse失败/校验失败/通过三触发点 + 抛错不触发 +
   })
   expect(r3).toEqual({ candidates: [] })
 })
+
+test('onAttempt: 末次 attempt 失败也触发（重试耗尽路径）', async () => {
+  // Parse 失败耗尽：默认 3 次 attempt 都应触发 onAttempt，包括最后一次。
+  const seen: { raw: string; error: string | null }[] = []
+  let calls = 0
+  const result = await callWithRetry({
+    call: async () => { calls++; return 'not json' },
+    system: 's', user: 'u',
+    shouldRetry: () => null,
+    onAttempt: (info) => seen.push(info),
+  })
+  expect(result).toBeUndefined()
+  expect(calls).toBe(3)
+  expect(seen.length).toBe(3)
+  seen.forEach((s) => {
+    expect(s.raw).toBe('not json')
+    expect(s.error).toContain('不是合法 JSON')
+  })
+
+  // 校验失败耗尽：每次 shouldRetry 返回错误，末次也应触发。
+  const seen2: { raw: string; error: string | null }[] = []
+  let calls2 = 0
+  const result2 = await callWithRetry({
+    call: async () => { calls2++; return '{"foo":1}' },
+    system: 's', user: 'u',
+    shouldRetry: () => '形状不对',
+    onAttempt: (info) => seen2.push(info),
+  })
+  expect(result2).toEqual({ foo: 1 })
+  expect(calls2).toBe(3)
+  expect(seen2.length).toBe(3)
+  seen2.forEach((s) => {
+    expect(s.raw).toBe('{"foo":1}')
+    expect(s.error).toBe('形状不对')
+  })
+})
