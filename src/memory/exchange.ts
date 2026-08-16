@@ -1,4 +1,4 @@
-import type { Memory } from './store'
+import type { Memory, MemoryInput } from './store'
 import type { MemoryScope, MemoryStatus, RuntimeTag } from './pure'
 import type { ValueClass } from './valueFilter'
 import type { DistillOrigin } from './distiller'
@@ -101,4 +101,98 @@ export function detectExchangeFormat(text: string): 'json' | 'markdown' {
     }
   } catch { /* fall through */ }
   return 'markdown'
+}
+
+/** 空值/非字符串 helper（Markdown 序列化用）。 */
+function tagsLine(tags: string[]): string | null {
+  if (!tags.length) return null
+  return `**标签**: ${tags.join(', ')}`
+}
+function slugLine(slug: string | null): string | null {
+  return slug ? `**主题**: ${slug}` : null
+}
+function cwdLine(cwd: string | null): string | null {
+  return cwd ? `**来源项目**: ${cwd}` : null
+}
+function scopeLine(scopeType: string, runtime: string | null): string {
+  const parts = [scopeType]
+  if (runtime) parts.push(runtime)
+  return `**范围**: ${parts.join(' · ')}`
+}
+
+/**
+ * Memory[] → markdown 文档（低保真，人类可读，spec §导出格式 §2）。
+ * exportedAt 缺省 0（纯函数不用 Date.now）；server 层传真实时间戳。
+ */
+export function serializeMemoriesMd(memories: Memory[], exportedAt?: number): string {
+  const lines: string[] = [
+    '# memside 记忆导出',
+    '',
+    `> 导出于 ${exportedAt ?? 0} · 共 ${memories.length} 条 · 来源:memside`,
+    '',
+  ]
+  for (const m of memories) {
+    lines.push('---', '')
+    lines.push(`## ${m.title}`, '')
+    lines.push(`- ${scopeLine(m.scopeType, m.runtime)}`)
+    const cl = cwdLine(m.sourceCwd ?? m.scopeId); if (cl) lines.push(`- ${cl}`)
+    const tl = tagsLine(m.tags); if (tl) lines.push(`- ${tl}`)
+    const sl = slugLine(m.subjectSlug); if (sl) lines.push(`- ${sl}`)
+    lines.push('', m.bodyMd, '')
+  }
+  return lines.join('\n')
+}
+
+const META_RE = /^-\s+\*\*(\S+)\*\*:\s*(.*)$/
+
+/**
+ * 解析 `## ` 小节 → MemoryInput（低保真，走 createCandidate，spec §Markdown 导入解析）。
+ * 小节边界 = 下一个行首 `## ` 或文档尾；`---` 独占行为元信息→正文过渡分隔符（被消费，
+ * 不进 bodyMd），已进入正文后的 `---` 视为普通正文，避免误切含 `---` 的 body。
+ */
+export function parseMemoriesMd(text: string): { inputs: MemoryInput[]; errors: string[] } {
+  const inputs: MemoryInput[] = []
+  const errors: string[] = []
+  const rawLines = text.split('\n')
+  // 跳到第一个 `## ` 小节；之后按小节切分。
+  let i = 0
+  while (i < rawLines.length && !rawLines[i]!.startsWith('## ')) i++
+  while (i < rawLines.length) {
+    if (!rawLines[i]!.startsWith('## ')) { i++; continue }
+    const title = rawLines[i]!.slice(3).trim()
+    i++
+    // 收集元信息行 + 正文，直到下一个 `## `
+    const meta: Record<string, string> = {}
+    const bodyLines: string[] = []
+    let inBody = false
+    while (i < rawLines.length && !rawLines[i]!.startsWith('## ')) {
+      const ln = rawLines[i]!
+      if (!inBody) {
+        const mm = META_RE.exec(ln)
+        if (mm) { meta[mm[1]!] = mm[2]!.trim(); i++; continue }
+        // `---` 独占行 = 显式元信息→正文过渡分隔符，消费掉不进 body
+        if (ln.trim() === '---') { inBody = true; i++; continue }
+        // 元信息之间的空行：跳过，不触发正文过渡（避免 title 后空行误切）
+        if (ln.trim() === '') { i++; continue }
+        // 非元信息非空行 -> 正文开始
+        inBody = true
+      }
+      bodyLines.push(ln)
+      i++
+    }
+    const scopeParts = (meta['范围'] ?? '').split('·').map((s) => s.trim()).filter(Boolean)
+    const scopeType: MemoryScope = scopeParts[0] === 'project' ? 'project' : 'global'
+    const runtime: RuntimeTag = scopeParts[1] === 'claude-code' || scopeParts[1] === 'opencode' ? scopeParts[1] : null
+    const scopeId = meta['来源项目'] ?? null
+    const tags = (meta['标签'] ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+    const subjectSlug = meta['主题'] ?? undefined
+    // bodyMd 去掉首尾空行
+    const bodyMd = bodyLines.join('\n').replace(/^\n+/, '').replace(/\n+$/, '')
+    if (!title && !bodyMd) { errors.push('empty section skipped'); continue }
+    inputs.push({
+      scopeType, scopeId, title, bodyMd, tags, sourceKind: 'manual', runtime,
+      sourceCwd: scopeId, subjectSlug: subjectSlug ?? undefined,
+    } as MemoryInput)
+  }
+  return { inputs, errors }
 }

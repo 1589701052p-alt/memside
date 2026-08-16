@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { serializeMemoriesJson, parseMemoriesJson, detectExchangeFormat, MEMSIDE_JSON_FORMAT } from '@/memory/exchange'
+import { serializeMemoriesJson, parseMemoriesJson, detectExchangeFormat, MEMSIDE_JSON_FORMAT, serializeMemoriesMd, parseMemoriesMd } from '@/memory/exchange'
 import type { Memory } from '@/memory/store'
 
 const mk = (over: Partial<Memory> = {}): Memory => ({
@@ -73,4 +73,97 @@ test('detectExchangeFormat: memside JSON → json', () => {
 test('detectExchangeFormat: 非法 JSON → markdown 兜底', () => {
   expect(detectExchangeFormat('# not json at all')).toBe('markdown')
   expect(detectExchangeFormat('{ malformed')).toBe('markdown')
+})
+
+test('serializeMemoriesMd 产出 markdown 结构', () => {
+  const text = serializeMemoriesMd([mk({ id: '1', scopeType: 'project', scopeId: '/repo', runtime: 'claude-code', subjectSlug: 'slug-a', tags: ['x', 'y'] })])
+  expect(text).toContain('# memside 记忆导出')
+  expect(text).toContain('## [category:convention] x')
+  expect(text).toContain('**范围**: project · claude-code')
+  expect(text).toContain('**来源项目**: /repo')
+  expect(text).toContain('**标签**: x, y')
+  expect(text).toContain('**主题**: slug-a')
+  expect(text).toContain('---')
+})
+
+test('serializeMemoriesMd 无标签/无 slug 不渲染对应行', () => {
+  const text = serializeMemoriesMd([mk({ id: '1', scopeType: 'global', scopeId: null, runtime: null, tags: [], subjectSlug: null, sourceCwd: null })])
+  expect(text).not.toContain('**标签**')
+  expect(text).not.toContain('**主题**')
+  expect(text).not.toContain('**来源项目**')
+  expect(text).toContain('**范围**: global')
+})
+
+test('parseMemoriesMd 往返基本场景', () => {
+  const md = serializeMemoriesMd([mk({ id: '1', scopeType: 'project', scopeId: '/repo', runtime: 'claude-code', subjectSlug: 's1', tags: ['a', 'b'], bodyMd: '正文内容' })])
+  const { inputs, errors } = parseMemoriesMd(md)
+  expect(errors).toEqual([])
+  expect(inputs.length).toBe(1)
+  expect(inputs[0]!.title).toBe('[category:convention] x')
+  expect(inputs[0]!.bodyMd).toBe('正文内容')
+  expect(inputs[0]!.scopeType).toBe('project')
+  expect(inputs[0]!.scopeId).toBe('/repo')
+  expect(inputs[0]!.runtime).toBe('claude-code')
+  expect(inputs[0]!.tags).toEqual(['a', 'b'])
+  expect(inputs[0]!.subjectSlug).toBe('s1')
+  expect(inputs[0]!.sourceKind).toBe('manual')
+})
+
+test('parseMemoriesMd 多条 + 标题无 category 前缀', () => {
+  const md = [
+    '# memside 记忆导出',
+    '> 导出于 ...',
+    '',
+    '---',
+    '',
+    '## [category:decision] 标题A',
+    '',
+    '- **范围**: global',
+    '',
+    '内容A',
+    '',
+    '---',
+    '',
+    '## 标题B（无 category）',
+    '',
+    '- **范围**: project · opencode',
+    '- **来源项目**: /r',
+    '',
+    '内容B 多行',
+    '第二行',
+  ].join('\n')
+  const { inputs, errors } = parseMemoriesMd(md)
+  expect(errors).toEqual([])
+  expect(inputs.length).toBe(2)
+  expect(inputs[0]!.title).toBe('[category:decision] 标题A')
+  expect(inputs[0]!.scopeType).toBe('global')
+  expect(inputs[1]!.title).toBe('标题B（无 category）')
+  expect(inputs[1]!.scopeType).toBe('project')
+  expect(inputs[1]!.runtime).toBe('opencode')
+  expect(inputs[1]!.bodyMd).toBe('内容B 多行\n第二行')
+})
+
+test('parseMemoriesMd bodyMd 含 --- 不被误切', () => {
+  const md = [
+    '# memside 记忆导出', '', '---', '',
+    '## [category:trap] X', '',
+    '- **范围**: global', '',
+    '正文',
+    '---',  // 独立行分隔
+    '正文继续',
+    '',
+    '## [category:trap] Y', '',
+    '- **范围**: global', '',
+    'B',
+  ].join('\n')
+  const { inputs, errors } = parseMemoriesMd(md)
+  expect(errors.length).toBe(0)
+  expect(inputs.length).toBe(2)
+  expect(inputs[0]!.title).toBe('[category:trap] X')
+  expect(inputs[1]!.title).toBe('[category:trap] Y')
+})
+
+test('parseMemoriesMd 空文档/无小节返回空', () => {
+  expect(parseMemoriesMd('').inputs).toEqual([])
+  expect(parseMemoriesMd('# memside 记忆导出\n\n无小节').inputs).toEqual([])
 })
