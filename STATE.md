@@ -1072,3 +1072,18 @@ follow-up 清单：scheduler digest 接线测试（spec §8 #12 缺口，quality
 1. 蒸馏器 origin 打标准确性（C16 类：正文写"用户明确要求"却标 agent-observed）——
    考虑 distiller prompt 加 origin 硬规则，独立 spec。
 2. 存量误判条目（D4/D17/D21/D37）在 Web UI「AI自动拒绝」tab 手动提升，不重判。
+
+## 真实 LLM e2e + AI-as-judge 门禁（2026-08-16）
+
+新增 `npm run test:live`（= `MEMSIDE_RUN_LIVE=1 bun test tests/live-*`）发版门禁：手动 opt-in 真打 distill/dedup/judgeValue 三阶段，默认 `bun test` 因双守卫（凭证 + MEMSIDE_RUN_LIVE env）全 skip 不真打模型。AI judge 在 evidence 真伪上场。4 条硬检查（①callThrew ②rawCount/candidates ③evidence AI judge ④三阶段形状）。不改任何 src/ 生产代码，只新增 tests/live-* + package.json script。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-16-live-llm-e2e-eval*`。
+
+### 已知盲区（终审 parked，非阻塞）
+
+1. **检查④虚设**：live-dedup/live-judge 的形状断言对模型幻觉产出无检测力——生产兜底（幻觉 category→keep+null/decision、非法 duplicateOfId→duplicate:false）使断言恒真。门禁对模型/凭证失败的检测力主要靠 live-distill 检查①（callThrew）。真跑实测：本机 401 失效凭证下 live-distill 正确红、live-dedup/live-judge 仍 pass（兜底吞错）。抓幻觉需在 callWithRetry raw parsed 层刺探，留独立 spec。
+2. **LIVE_GUARD 只查 apiKey 非空不验有效性**：失效凭证下门禁真跑并红（live-distill）。属环境+既有守卫设计，非本需求引入。后续可考虑凭证有效性预检。
+3. **plan 文本 import 路径笔误**：brief 写 DistillCandidate from @/memory/pure，实际 @/memory/distiller:85，实现均已修正。
+
+### 上线后观测（硬要求，结论回填本节）
+
+- 首次有有效凭证环境跑通 `npm run test:live`：三阶段耗时、候选数、evidence judge 判定结果。
+- 401/凭证失效在 live-distill 是否稳定抓到（检查①）。

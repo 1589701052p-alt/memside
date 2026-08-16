@@ -128,6 +128,8 @@ judgeValue(candidates, realCallLLM)   ← 真打模型
 - `judgeValue` 返回合法 verdicts（category ∈ 9 类）。
 - 命中即红：任一阶段模型产出形状完全不对（dedup verdicts 全乱、judge category 全在枚举外）。
 
+> **注意（终审纠正）**：检查④的 dedup/judge 形状断言对模型幻觉产出无检测力——生产兜底（`valueFilter.ts` verdictsFromCategories 把幻觉 category 转 keep+null/decision；`dedup.ts` 把非法 duplicateOfId 转 duplicate:false）使这些断言恒真。本检查仅锁「函数不崩 + verdicts 长度/index 结构合法」。模型幻觉 category/id 的真模型门禁留后续独立 spec（见 §10 #4）。live-distill 的检查①②③ 是门禁对模型/凭证失败的主要检测力来源。
+
 ## 6. 测试策略
 
 ### 6.1 文件布局
@@ -208,3 +210,4 @@ bun test 默认跑 `tests/**/*.test.ts`，会含 `tests/live-*.test.ts`。通过
 1. **agent 终审真模型门禁**（quality 模式 `judgeValueAgentic` 多轮协议）：最复杂，留独立 spec。
 2. **golden 基线退化预警**：本期砍掉，若发版后发现「产出量级静默退化」频发，再补。
 3. **CI 自动跑 live**：本期手动 opt-in，未来若 CI 有凭证可接。
+4. **judgeValue/judgeDuplicates 形状断言对幻觉产出无防护**：生产兜底使 §5 检查④的 dedup/judge 断言恒真。要抓模型幻觉 category / 非法 duplicateOfId，需在 `callWithRetry` 的 raw parsed 层刺探（`valueShouldRetry`/`dedupShouldRetry` 已验但内部不暴露给测试），或 test 自行直调 callLLM 复现 prompt 解析后检查 raw JSON。留独立 spec。
