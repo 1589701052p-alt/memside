@@ -118,6 +118,8 @@ export interface MemsideStatus {
   unreadDegradations?: number
   /** 最新一条未读 llm_error（警示条「最近：xxx」）；无则 null；老 daemon 无此字段。 */
   latestUnreadLlmError?: { body: string | null; ts: number } | null
+  /** 回收站条目数（spec 2026-08-16 回收站 tab 徽标）；老 daemon 无此字段。 */
+  trashCount?: number
 }
 
 /**
@@ -502,4 +504,91 @@ export async function saveJudgeConfig(patch: Partial<JudgeConfigDto>, fetchFn: F
   const data = (await res.json()) as JudgeConfigDto & { error?: string }
   if (!res.ok) throw new Error(data.error ?? 'save failed')
   return data
+}
+
+// --- 回收站 + 批量删除 + 导出/导入 client（spec 2026-08-16）----------------
+
+export interface TrashItem {
+  id: string
+  originalMemoryId: string
+  scopeType: string
+  scopeId: string | null
+  sourceCwd: string | null
+  runtime: string | null
+  deletedAt: number
+  title: string
+  valueClass: string | null
+  subjectSlug: string | null
+}
+
+/** POST /api/memories/bulk-delete — no-throw 契约（与 bulkRejectUnevaluated 同）。 */
+export async function bulkDelete(
+  ids: string[], fetchFn: FetchLike = fetch,
+): Promise<{ deleted: number; skipped: number }> {
+  const res = await fetchFn('/api/memories/bulk-delete', {
+    method: 'POST', body: JSON.stringify({ ids }), headers: { 'content-type': 'application/json' },
+  })
+  return (await res.json()) as { deleted: number; skipped: number }
+}
+
+/** POST /api/trash/empty — no-throw 契约。 */
+export async function emptyTrash(fetchFn: FetchLike = fetch): Promise<{ emptied: number }> {
+  const res = await fetchFn('/api/trash/empty', { method: 'POST' })
+  return (await res.json()) as { emptied: number }
+}
+
+/** POST /api/trash/:id/restore — no-throw 契约（与 restoreMemory 同模式，404/409 返回 undefined）。 */
+export async function restoreFromTrash(
+  id: string, fetchFn: FetchLike = fetch,
+): Promise<MemoryItem | undefined> {
+  const res = await fetchFn(`/api/trash/${id}/restore`, { method: 'POST' })
+  if (!res.ok) return undefined
+  const data = await res.json() as { memory?: MemoryItem }
+  return data.memory
+}
+
+/** GET /api/trash — 分页（与 listMemoriesPage 同形状）。 */
+export async function listTrashPage(
+  fetchFn: FetchLike = fetch,
+  opts: { project?: string; category?: string; slug?: string; valueClass?: string } & PageOpts = {},
+): Promise<PageDto<TrashItem>> {
+  const p = pageParams(opts)
+  if (opts.project) p.set('project', opts.project)
+  if (opts.category) p.set('category', opts.category)
+  if (opts.slug) p.set('slug', opts.slug)
+  if (opts.valueClass) p.set('valueClass', opts.valueClass)
+  return parsePage<TrashItem>(await fetchFn(`/api/trash?${p}`))
+}
+
+/** GET /api/trash/:id — 单条回收站详情（含恢复后的 memory 视图）。 */
+export async function getTrash(
+  id: string, fetchFn: FetchLike = fetch,
+): Promise<TrashItem & { memory: MemoryItem | null } | null> {
+  const res = await fetchFn(`/api/trash/${id}`)
+  if (!res.ok) return null
+  return (await res.json()) as TrashItem & { memory: MemoryItem | null }
+}
+
+/**
+ * POST /api/memories/export — 返回 Blob（JSON/markdown 统一下载触发）。UI 用
+ * URL.createObjectURL + <a download> 落盘（spec §Web UI §3）。
+ */
+export async function exportMemories(
+  opts: { scope: 'selected' | 'filter' | 'all'; ids?: string[]; filter?: { sourceCwd?: string; subjectSlug?: string; category?: string; valueClass?: string }; statuses?: string[]; format: 'json' | 'markdown' },
+  fetchFn: FetchLike = fetch,
+): Promise<Blob> {
+  const res = await fetchFn('/api/memories/export', {
+    method: 'POST', body: JSON.stringify(opts), headers: { 'content-type': 'application/json' },
+  })
+  return res.blob()
+}
+
+/** POST /api/memories/import?conflict= — multipart 上传单文件。 */
+export async function importMemories(
+  file: File, conflict: 'skip' | 'overwrite' | 'newid', fetchFn: FetchLike = fetch,
+): Promise<{ imported: number; skipped: number; overwritten: number; errors: string[] }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetchFn(`/api/memories/import?conflict=${conflict}`, { method: 'POST', body: form })
+  return (await res.json()) as { imported: number; skipped: number; overwritten: number; errors: string[] }
 }
