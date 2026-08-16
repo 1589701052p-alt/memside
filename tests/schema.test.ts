@@ -430,3 +430,17 @@ test('notifications 索引存在', () => {
   expect(names).toContain('idx_notifications_ts')
   expect(names).toContain('idx_notifications_read')
 })
+
+test('memory_trash table exists with required columns', () => {
+  db = openDb(join(dir, 'trash.db'))
+  const cols = db.$client.prepare('PRAGMA table_info(memory_trash)').all() as { name: string }[]
+  const names = cols.map((c) => c.name)
+  expect(names).toContain('id')
+  expect(names).toContain('memory_snapshot')
+  expect(names).toContain('original_memory_id')
+  expect(names).toContain('deleted_at')
+  expect(names).toContain('title')
+  // 索引存在
+  const idx = db.$client.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_trash'").all() as { name: string }[]
+  expect(idx.some((i) => i.name === 'idx_trash_deleted_at')).toBe(true)
+})
