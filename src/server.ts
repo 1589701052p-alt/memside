@@ -795,11 +795,13 @@ export function createApp(deps: AppDeps) {
     }
     const fmt = detectExchangeFormat(fileContent)
     if (fmt === 'json') {
-      const { memories: records } = parseMemoriesJson(fileContent)
+      const { memories: records, errors: parseErrors } = parseMemoriesJson(fileContent)
       if (records.length > 10_000) return c.json({ error: 'too many records (max 10000)' }, 400)
       const r = await importMemories(deps.db, records, { conflict })
       deps.broadcast({ type: 'memories.imported', imported: r.imported, skipped: r.skipped, overwritten: r.overwritten })
-      return c.json(r)
+      // 合并解析期错误（invalid record 在 parseMemoriesJson 阶段已过滤并计入 errors，
+      // 不进 importMemories；不合并会让客户端少报拒收，spec §失败模式 #4）
+      return c.json({ ...r, errors: [...r.errors, ...parseErrors] })
     }
     // markdown 低保真 -> createCandidate 循环
     const { inputs, errors: parseErrors } = parseMemoriesMd(fileContent)

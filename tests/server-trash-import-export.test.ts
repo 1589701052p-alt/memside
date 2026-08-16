@@ -96,6 +96,18 @@ test('POST /api/memories/export markdown Content-Disposition', async () => {
   expect(text).toContain('# memside 记忆导出')
 })
 
+test('POST /api/memories/export scope=filter + statuses 只导出匹配行（非全表）', async () => {
+  // 一条 approved + 一条 candidate；scope=filter+statuses=['approved'] 应只返
+  // approved 行，锁定 scope:'filter' 不再静默导出全表（spec §导出三档作用域）。
+  const cand = await mkCandidate()
+  const appr = await mkCandidate(); await promoteCandidate(db, appr.id, { action: 'approve' })
+  const { status, body } = await req('/api/memories/export', { method: 'POST', body: JSON.stringify({ scope: 'filter', statuses: ['approved'], format: 'json' }), headers: { 'content-type': 'application/json' } })
+  expect(status).toBe(200)
+  const ids = (body.memories as { id: string }[]).map((m) => m.id)
+  expect(ids).toContain(appr.id)
+  expect(ids).not.toContain(cand.id)
+})
+
 test('POST /api/memories/import JSON 高保真', async () => {
   const env = serializeMemoriesJson([mkMemory('IMP1')], Date.now())
   const form = new FormData(); form.append('file', new Blob([env]), 'm.json')

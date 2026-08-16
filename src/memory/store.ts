@@ -1433,8 +1433,13 @@ export async function importMemories(
         origin: rec.origin ?? null, evidence: rec.evidence ?? null,
       }
       if (exists && opts.conflict === 'overwrite') {
-        await db.delete(memories).where(eq(memories.id, rec.id)).run()
-        await db.insert(memories).values(values).run()
+        // 原子化 delete+insert（spec §失败模式 #4）：两条语句分立时若 insert 抛错，
+        // 旧行已删 -> 记忆丢失。包进单事务，任一失败整体回滚（与 bulkDeleteMemories
+        // 同模式：同步回调，无 await）。
+        db.transaction((tx) => {
+          tx.delete(memories).where(eq(memories.id, rec.id)).run()
+          tx.insert(memories).values(values).run()
+        })
         overwritten += 1
       } else {
         await db.insert(memories).values(values).run()
@@ -1459,8 +1464,13 @@ export async function restoreFromTrash(
   const snap = restoreFromSnapshot(rows[0]!.memorySnapshot)
   if (!snap) throw new MemoryConflictError(`trash ${id} snapshot corrupt`)
   const r = await importMemories(db, [snap], opts)
-  await db.delete(memoryTrash).where(eq(memoryTrash.id, id)).run()
-  // 返回恢复的记忆（按 originalMemoryId 取回）
+  // 只在实际写入了恢复行时删 trash 行（spec §失败模式 #4）：conflict='skip' 且
+  // snap.id 已存在时 importMemories 计 skipped、不写库，此时删 trash 会让快照
+  // 无端消失、无法再次恢复。保留 trash 行，下方按 snap.id 取回已存在的行返回。
+  if (r.imported > 0 || r.overwritten > 0) {
+    await db.delete(memoryTrash).where(eq(memoryTrash.id, id)).run()
+  }
+  // 返回恢复的记忆（按 snap.id 取回；skip 时库内既有行仍在）
   const restored = await db.select().from(memories).where(eq(memories.id, snap.id)).limit(1).all()
   if (restored.length === 0) throw new MemoryConflictError(`restore reported ${JSON.stringify(r)} but memory not found`)
   return rowToMemory(restored[0]!)

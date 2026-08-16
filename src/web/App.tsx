@@ -382,13 +382,17 @@ export default function App() {
   }
 
   // 回收站清空（spec 2026-08-16）：confirm 二次确认（清空后不可恢复），调
-  // emptyTrash() 后本地置空 + refresh 拉页 1。no-throw 契约：server 返回后信任
-  // emptied 数，UI 由 refresh 自然收敛。
+  // emptyTrash() 后本地置空 + refresh 拉页 1。emptyTrash 失败抛错（spec §失败可见），
+  // catch 显错误横幅不静默。
   async function emptyTrashClick() {
     if (!confirm('确认清空回收站？清空后不可恢复。')) return
-    await emptyTrash()
-    setTrash(emptyPage())
-    void refresh('trash')
+    try {
+      await emptyTrash()
+      setTrash(emptyPage())
+      void refresh('trash')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
   }
 
   // 回收站单条恢复（spec 2026-08-16）：no-throw 契约（restoreFromTrash 404/409
@@ -427,15 +431,20 @@ export default function App() {
 
   // 批量删除（spec 2026-08-16 task-10）：confirm 二次确认（可从回收站恢复），
   // bulkDelete 一次性软删，清选中 + 重置当前 tab 缓存防已删条目滞留 + refresh。
+  // bulkDelete 失败抛错（spec §失败可见），catch 显错误横幅不静默清选中。
   async function bulkDeleteSelected() {
     if (!isMemoryTab(tab)) return
     const ids = [...selectedIds[tab]]
     if (ids.length === 0) return
     if (!window.confirm(`确认将 ${ids.length} 条移入回收站？可从回收站恢复`)) return
-    await bulkDelete(ids)
-    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
-    setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
-    void refresh(tab)
+    try {
+      await bulkDelete(ids)
+      setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+      setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
+      void refresh(tab)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
   }
   // 批量批准/拒绝（复用 promoteMemory 逐条；no-throw swallow，失败的靠 refresh 收敛）。
   async function bulkApproveSelected() {
@@ -1072,7 +1081,7 @@ export default function App() {
           <div style={{ background: '#fff', padding: 24, borderRadius: 8, minWidth: 320 }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>导出记忆</h3>
             <p style={{ fontSize: 13, color: '#666' }}>选择导出范围与格式。memside JSON 高保真（保留状态）；Markdown 低保真（人类可读）。</p>
-            <ExportTrigger selectedIds={isMemoryTab(tab) ? [...selectedIds[tab]] : []} onDone={() => setExportOpen(false)} />
+            <ExportTrigger selectedIds={isMemoryTab(tab) ? [...selectedIds[tab]] : []} filter={filter} tab={tab as MemoryTabKey} onDone={() => setExportOpen(false)} />
           </div>
         </div>
       ) : null}
@@ -1980,16 +1989,29 @@ function FilterSelect({ label, value, onChange, options, disabled }: {
  * 导出触发器（spec 2026-08-16 task-10 §Web UI §3）。内部维护 scope + format 两个
  * 选择 + busy 态。doExport 调 exportMemories → 拿 Blob → URL.createObjectURL +
  * <a download> 触发浏览器下载 → revoke → onDone 关闭 modal。scope='selected' 时
- * 透传 ids（空数组时服务端返回空导出，安全）。
+ * 透传 ids（空数组时服务端返回空导出，安全）。scope='filter' 时透传当前 tab 的
+ * 四维筛选（project→sourceCwd 映射）+ tab 派生 statuses（memoryTabFilter(tab) 按
+ * 逗号拆），服务端 listMemoriesForExport 据此圈定当前 tab 筛选集——否则会静默导出
+ * 全表（spec §导出三档作用域 + §失败模式 #4）。
  */
-function ExportTrigger({ selectedIds, onDone }: { selectedIds: string[]; onDone: () => void }) {
+function ExportTrigger({ selectedIds, filter, tab, onDone }: {
+  selectedIds: string[]
+  filter: MemoryFilter
+  tab: MemoryTabKey
+  onDone: () => void
+}) {
   const [scope, setScope] = useState<'selected' | 'filter' | 'all'>('all')
   const [format, setFormat] = useState<'json' | 'markdown'>('json')
   const [busy, setBusy] = useState(false)
   async function doExport() {
     setBusy(true)
     try {
-      const blob = await exportMemories({ scope, format, ids: scope === 'selected' ? selectedIds : undefined })
+      const blob = await exportMemories({
+        scope, format,
+        ids: scope === 'selected' ? selectedIds : undefined,
+        filter: scope === 'filter' ? { sourceCwd: filter.project, subjectSlug: filter.slug, category: filter.category, valueClass: filter.valueClass } : undefined,
+        statuses: scope === 'filter' ? memoryTabFilter(tab).split(',') : undefined,
+      })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url

@@ -521,19 +521,21 @@ export interface TrashItem {
   subjectSlug: string | null
 }
 
-/** POST /api/memories/bulk-delete — no-throw 契约（与 bulkRejectUnevaluated 同）。 */
+/** POST /api/memories/bulk-delete — 失败抛错（与 patchMemory 同模式，spec §失败可见）。 */
 export async function bulkDelete(
   ids: string[], fetchFn: FetchLike = fetch,
 ): Promise<{ deleted: number; skipped: number }> {
   const res = await fetchFn('/api/memories/bulk-delete', {
     method: 'POST', body: JSON.stringify({ ids }), headers: { 'content-type': 'application/json' },
   })
+  if (!res.ok) throw new Error('bulk-delete failed: ' + res.status)
   return (await res.json()) as { deleted: number; skipped: number }
 }
 
-/** POST /api/trash/empty — no-throw 契约。 */
+/** POST /api/trash/empty — 失败抛错（与 patchMemory 同模式，spec §失败可见）。 */
 export async function emptyTrash(fetchFn: FetchLike = fetch): Promise<{ emptied: number }> {
   const res = await fetchFn('/api/trash/empty', { method: 'POST' })
+  if (!res.ok) throw new Error('empty-trash failed: ' + res.status)
   return (await res.json()) as { emptied: number }
 }
 
@@ -566,7 +568,8 @@ export async function getTrash(
 ): Promise<TrashItem & { memory: MemoryItem | null } | null> {
   const res = await fetchFn(`/api/trash/${id}`)
   if (!res.ok) return null
-  return (await res.json()) as TrashItem & { memory: MemoryItem | null }
+  const d = await res.json() as { trash?: TrashItem & { memory: MemoryItem | null } }
+  return d.trash ?? null
 }
 
 /**

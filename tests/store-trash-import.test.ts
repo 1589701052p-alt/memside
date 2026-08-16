@@ -88,6 +88,9 @@ test('restoreFromTrash: 同 id 已存在 + skip -> 计 skipped 不覆盖', async
   await db.insert(memoryTrash).values({ id: 'trash1', memorySnapshot: JSON.stringify(mkMemory(existing.id)), originalMemoryId: existing.id, scopeType: 'global', scopeId: null, runtime: null, deletedAt: 1, title: 'T', valueClass: 'convention', subjectSlug: null }).run()
   const restored = await restoreFromTrash(db, 'trash1', { conflict: 'skip' })
   expect(restored.id).toBe(existing.id) // 原行仍在
+  // skip 未写入时 trash 行必须保留（spec §失败模式 #4）：否则快照无端消失、无法再恢复。
+  const trashLeft = await db.select().from(memoryTrash).where(eq(memoryTrash.id, 'trash1')).all()
+  expect(trashLeft.length).toBe(1)
 })
 
 test('importMemories newid: 生成新 ULID 新增', async () => {
