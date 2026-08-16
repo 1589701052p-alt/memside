@@ -9,9 +9,11 @@ import {
   getFacets, UNEVALUATED,
   listNotificationsPage, markNotificationRead, markAllNotificationsRead,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
+  listTrashPage, emptyTrash, restoreFromTrash,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
   type NotificationItem,
+  type TrashItem,
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody, SLUG_BADGE_TIP } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
@@ -29,7 +31,7 @@ const CHIP_STYLE = {
   fontSize: 12,
 }
 
-type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'settings' | 'messages'
+type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'trash' | 'settings' | 'messages'
 
 /** 带筛选条的 tab 判定（spec 2026-08-11-per-tab-memory-filters §4.4）。 */
 function isFilterTab(t: TabKey): t is FacetTab {
@@ -67,6 +69,7 @@ export default function App() {
   const [discards, setDiscards] = useState<TabPage<DiscardItem>>(emptyPage())
   const [runs, setRuns] = useState<TabPage<DistillRunListItem>>(emptyPage())
   const [msgs, setMsgs] = useState<TabPage<NotificationItem>>(emptyPage())
+  const [trash, setTrash] = useState<TabPage<TrashItem>>(emptyPage())
   // 消息筛选（spec §5.10）：kind 空串 = 全部；unreadOnly；q 关键词（300ms debounce 后入此态）
   const [msgFilter, setMsgFilter] = useState<{ kind: string; unreadOnly: boolean; q: string }>({ kind: '', unreadOnly: false, q: '' })
   const msgFilterRef = useRef(msgFilter)
@@ -74,10 +77,10 @@ export default function App() {
   const [qInput, setQInput] = useState('')
   const qTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
+  const [loaded, setLoaded] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, trash: false, settings: false, messages: false })
   // candidate 初始 true:默认 tab 首帧即显「加载中…」,避免先闪一帧空态「暂无候选记忆」
   // (对齐重构前的初始 loading=true 行为)。
-  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
+  const [pending, setPending] = useState<Record<TabKey, boolean>>({ candidate: true, approved: false, rejected: false, discards: false, runs: false, trash: false, settings: false, messages: false })
   // 四维筛选 per-tab 独立态（spec 2026-08-11-per-tab-memory-filters §4.4）：切 tab
   // 不携带筛选；空串 = 不筛该维度。facetsByTab = 每 tab 下拉选项缓存（SWR：切回
   // 立显本 tab 选项；undefined = 首访尚未加载成功）。filter/facets 是按当前 tab 的
@@ -95,8 +98,8 @@ export default function App() {
   const [sourceInputFor, setSourceInputFor] = useState<string | null>(null)
   const [runDetailFor, setRunDetailFor] = useState<string | null>(null)
   const [rescanError, setRescanError] = useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, settings: false, messages: false })
-  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null, settings: null, messages: null })
+  const [loadingMore, setLoadingMore] = useState<Record<TabKey, boolean>>({ candidate: false, approved: false, rejected: false, discards: false, runs: false, trash: false, settings: false, messages: false })
+  const [loadMoreError, setLoadMoreError] = useState<Record<TabKey, string | null>>({ candidate: null, approved: null, rejected: null, discards: null, runs: null, trash: null, settings: null, messages: null })
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const loadMoreRef = useRef<(t: TabKey) => Promise<void>>(async () => {})
 
@@ -117,6 +120,12 @@ export default function App() {
       } else if (target === 'runs') {
         const [pg, st] = await Promise.all([listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus(fetch)])
         setRuns((r) => ({ ...mergeRefreshPage(r, pg, (x) => x.distillJobId), total: r.total }))
+        setStatus(st)
+      } else if (target === 'trash') {
+        // 回收站 tab（spec 2026-08-16）：暂不接筛选下拉（decision Step 3o），分页
+        // 调用不带 filter 参数。3s 轮询同其它列表 tab。
+        const [pg, st] = await Promise.all([listTrashPage(fetch, { limit: WEB_PAGE_SIZE }), getStatus(fetch)])
+        setTrash((t) => ({ ...mergeRefreshPage(t, pg, (x) => x.id), total: pg.total ?? null }))
         setStatus(st)
       } else if (target === 'messages') {
         const mf = msgOverride ?? msgFilterRef.current
@@ -156,9 +165,9 @@ export default function App() {
     }
   }
 
-  // 当前 tab 分页读取 helper：discards/runs/messages 独立 state，其余走 memCache。
-  function tabPageOf(target: TabKey): TabPage<MemoryItem> | TabPage<DiscardItem> | TabPage<DistillRunListItem> | TabPage<NotificationItem> {
-    return target === 'discards' ? discards : target === 'runs' ? runs : target === 'messages' ? msgs : memCache[target as MemoryTabKey]
+  // 当前 tab 分页读取 helper：discards/runs/messages/trash 独立 state，其余走 memCache。
+  function tabPageOf(target: TabKey): TabPage<MemoryItem> | TabPage<DiscardItem> | TabPage<DistillRunListItem> | TabPage<NotificationItem> | TabPage<TrashItem> {
+    return target === 'discards' ? discards : target === 'runs' ? runs : target === 'messages' ? msgs : target === 'trash' ? trash : memCache[target as MemoryTabKey]
   }
 
   // 无限滚动加载下一页：守卫（首轮/加载中）-> 按游标拉下一页 -> mergeAppend 追加。
@@ -179,6 +188,9 @@ export default function App() {
       } else if (target === 'runs') {
         const pg = await listDistillRunsPage(fetch, { limit: WEB_PAGE_SIZE, before })
         setRuns((r) => ({ items: mergeAppend(r.items, pg.items, (x) => x.distillJobId), nextCursor: pg.nextCursor, hasMore: pg.hasMore, total: r.total }))
+      } else if (target === 'trash') {
+        const pg = await listTrashPage(fetch, { limit: WEB_PAGE_SIZE, before })
+        setTrash((t) => ({ items: mergeAppend(t.items, pg.items, (x) => x.id), nextCursor: pg.nextCursor, hasMore: pg.hasMore, total: t.total }))
       } else if (target === 'messages') {
         const mf = msgFilterRef.current
         const pg = await listNotificationsPage(fetch, {
@@ -256,6 +268,8 @@ export default function App() {
       setMemCache((c) => ({ ...c, [target]: { ...c[target], items: c[target].items.filter((x) => x.id !== id) } }))
     } else if (target === 'discards') {
       setDiscards((d) => ({ ...d, items: d.items.filter((x) => x.id !== id) }))
+    } else if (target === 'trash') {
+      setTrash((t) => ({ ...t, items: t.items.filter((x) => x.id !== id) }))
     }
   }
 
@@ -354,6 +368,24 @@ export default function App() {
     void refresh('candidate')
   }
 
+  // 回收站清空（spec 2026-08-16）：confirm 二次确认（清空后不可恢复），调
+  // emptyTrash() 后本地置空 + refresh 拉页 1。no-throw 契约：server 返回后信任
+  // emptied 数，UI 由 refresh 自然收敛。
+  async function emptyTrashClick() {
+    if (!confirm('确认清空回收站？清空后不可恢复。')) return
+    await emptyTrash()
+    setTrash(emptyPage())
+    void refresh('trash')
+  }
+
+  // 回收站单条恢复（spec 2026-08-16）：no-throw 契约（restoreFromTrash 404/409
+  // 返回 undefined）。本地乐观移除该卡（即时消失），refresh 收敛真实状态。
+  async function restoreTrash(id: string) {
+    await restoreFromTrash(id)
+    removeFromTab('trash', id)
+    void refresh('trash')
+  }
+
   // 筛选变化（per-tab 独立态，spec 2026-08-11-per-tab-memory-filters §4.4-4）：只作废
   // 当前 tab 缓存——其余 tab 缓存对应各自筛选，与本 tab 筛选变化无涉（推翻共享态
   // 时代的四缓存全作废）。仍须作废当前 tab：否则 mergeRefreshPage 把旧筛选条目当
@@ -362,6 +394,7 @@ export default function App() {
     if (!isFilterTab(tab)) return
     setFilters((fs) => ({ ...fs, [tab]: next }))
     if (tab === 'discards') setDiscards(emptyPage())
+    else if ((tab as TabKey) === 'trash') setTrash(emptyPage())
     else setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
     void refresh(tab, next)
   }
@@ -372,6 +405,7 @@ export default function App() {
   const listEmpty = tab === 'messages' ? msgs.items.length === 0
     : tab === 'discards' ? discards.items.length === 0
     : tab === 'runs' ? runs.items.length === 0
+    : tab === 'trash' ? trash.items.length === 0
     : (memCache[tab as MemoryTabKey]?.items ?? []).length === 0
   const showLoading = shouldShowLoading(loaded, pending, tab)
 
@@ -385,6 +419,7 @@ export default function App() {
     { key: 'rejected', label: '已拒绝', count: tabTotalCount(status, 'rejected') ?? 0 },
     { key: 'discards', label: 'AI自动拒绝', count: tabTotalCount(status, 'discards') ?? 0 },
     { key: 'runs', label: '蒸馏记录', count: tabTotalCount(status, 'runs') ?? 0 },
+    { key: 'trash', label: '回收站', count: status?.trashCount ?? null },
     { key: 'settings', label: '设置', count: null }, // 设置 tab 无计数徽标
     { key: 'messages', label: '消息', count: status?.unreadNotifications ?? null },
   ]
@@ -796,6 +831,26 @@ export default function App() {
             )
           )}
         </>
+      ) : tab === 'trash' ? (
+        <div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+            <p style={{ margin: 0 }}>{tabTotalCount(status, 'trash') ?? trash.items.length} 条回收站记录</p>
+            <button
+              onClick={() => void emptyTrashClick()}
+              disabled={trash.items.length === 0 && (status?.trashCount ?? 0) === 0}
+              style={{ color: '#c00', borderColor: '#c00' }}
+            >
+              清空回收站
+            </button>
+            <span style={{ fontSize: 12, color: '#999' }}>清空后不可恢复</span>
+          </div>
+          {trash.items.map((t) => (
+            <TrashCard key={t.id} t={t} onRestore={() => restoreTrash(t.id)} />
+          ))}
+          {trash.items.length === 0 && !showLoading && (
+            <p style={{ color: '#666' }}>回收站为空</p>
+          )}
+        </div>
       ) : tab === 'runs' ? (
         <div>
           <p>共 {tabTotalCount(status, 'runs') ?? runs.items.length} 条蒸馏记录</p>
@@ -1290,6 +1345,49 @@ function DiscardCard({ d, onPromote }: { d: DiscardItem; onPromote: () => void }
         ) : (
           <button onClick={onPromote}>提升为候选</button>
         )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 回收站卡片(trash tab)。展示被软删记忆的 title/分类/价值/主题徽标 + 范围/
+ * 会话工具/源项目/删除时间 meta。「恢复」按钮调 restoreFromTrash(no-throw，
+ * 操作后本地移除 + refresh 自然收敛)。镜像 DiscardCard 结构以保持视觉一致。
+ */
+function TrashCard({ t, onRestore }: { t: TrashItem; onRestore: () => void }) {
+  const sourceLabel = t.sourceCwd
+    ? (t.sourceCwd.split(/[\\/]/).filter(Boolean).pop() ?? t.sourceCwd)
+    : t.runtime === 'opencode'
+      ? 'opencode'
+      : '未知'
+  const time = formatMemoryTime(t.deletedAt)
+  return (
+    <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 16, marginBottom: 12 }}>
+      <strong>{stripCategoryPrefix(t.title)}</strong>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '6px 0' }}>
+        {(() => { const cat = categoryInfo(categoryFromTitle(t.title)); return cat ? (
+          <span title={cat.tip} style={{ ...CHIP_STYLE, color: '#444' }}>分类：{cat.name}</span>
+        ) : null })()}
+        {(() => { const v = valueClassInfo(t.valueClass); return (
+          <span title={v.tip} style={{ ...CHIP_STYLE, color: '#444' }}>价值：{v.name}{v.priority ? ` · ${v.priority}优先` : ''}</span>
+        ) })()}
+        {t.subjectSlug ? (
+          <span title={SLUG_BADGE_TIP} style={{ ...CHIP_STYLE, color: '#36c' }}>主题：{t.subjectSlug}</span>
+        ) : null}
+      </div>
+      <small>
+        {(() => { const s = scopeInfo(t.scopeType); return (
+          <span title={s.tip}>范围: {s.name}</span>
+        ) })()}
+        {' · '}
+        <span title={runtimeTip(t.runtime)}>会话工具: {runtimeLabel(t.runtime)}</span>
+        {' · '}
+        <span>源项目: <span title={t.sourceCwd ?? ''}>{sourceLabel}</span></span>
+        {time ? <>{' · '}<span title="被删除进入回收站的时间">删除于: {time}</span></> : null}
+      </small>
+      <div style={{ marginTop: 8 }}>
+        <button onClick={onRestore}>恢复</button>
       </div>
     </div>
   )
