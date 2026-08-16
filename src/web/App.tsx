@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import {
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, WEB_PAGE_SIZE,
   promoteMemory, patchMemory, getStatus, getSourceInput,
@@ -10,6 +10,7 @@ import {
   listNotificationsPage, markNotificationRead, markAllNotificationsRead,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   listTrashPage, emptyTrash, restoreFromTrash,
+  bulkDelete, exportMemories, importMemories as importMemoriesApi,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
   type NotificationItem,
@@ -36,6 +37,11 @@ type TabKey = 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'tra
 /** 带筛选条的 tab 判定（spec 2026-08-11-per-tab-memory-filters §4.4）。 */
 function isFilterTab(t: TabKey): t is FacetTab {
   return t === 'candidate' || t === 'approved' || t === 'rejected' || t === 'discards'
+}
+
+/** 记忆三 tab 判定（spec 2026-08-16 task-10 多选）：只有这三 tab 有多选 + 批量操作条。 */
+function isMemoryTab(t: TabKey): t is MemoryTabKey {
+  return t === 'candidate' || t === 'approved' || t === 'rejected'
 }
 
 /**
@@ -70,6 +76,13 @@ export default function App() {
   const [runs, setRuns] = useState<TabPage<DistillRunListItem>>(emptyPage())
   const [msgs, setMsgs] = useState<TabPage<NotificationItem>>(emptyPage())
   const [trash, setTrash] = useState<TabPage<TrashItem>>(emptyPage())
+  // 多选 + 批量操作条 + 导出/导入入口（spec 2026-08-16 task-10）：per-tab 选中集合，
+  // 切 tab 清空（switchTab）。导出/导入用独立 modal，importResult 显导入摘要。
+  const [selectedIds, setSelectedIds] = useState<Record<MemoryTabKey, Set<string>>>({ candidate: new Set(), approved: new Set(), rejected: new Set() })
+  const [exportOpen, setExportOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importConflict, setImportConflict] = useState<'skip' | 'overwrite' | 'newid'>('skip')
+  const [importResult, setImportResult] = useState<string | null>(null)
   // 消息筛选（spec §5.10）：kind 空串 = 全部；unreadOnly；q 关键词（300ms debounce 后入此态）
   const [msgFilter, setMsgFilter] = useState<{ kind: string; unreadOnly: boolean; q: string }>({ kind: '', unreadOnly: false, q: '' })
   const msgFilterRef = useRef(msgFilter)
@@ -386,6 +399,85 @@ export default function App() {
     void refresh('trash')
   }
 
+  // 切 tab（spec 2026-08-16 task-10）：包一层 setTab，同时清空三 tab 多选集合。
+  // 切走再切回不应残留旧选中——选中只对当前 tab 的批量操作有意义。
+  function switchTab(t: TabKey) {
+    setTab(t)
+    setSelectedIds({ candidate: new Set(), approved: new Set(), rejected: new Set() })
+  }
+
+  // 多选 helper（spec 2026-08-16 task-10）：toggleSelect 单条切换；selectAllPage
+  // 选中当前 tab 已加载页全部 id；clearSelection 清空当前 tab 选中。非记忆 tab no-op。
+  function toggleSelect(id: string) {
+    if (!isMemoryTab(tab)) return
+    setSelectedIds((s) => {
+      const next = new Set(s[tab])
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return { ...s, [tab]: next }
+    })
+  }
+  function selectAllPage() {
+    if (!isMemoryTab(tab)) return
+    setSelectedIds((s) => ({ ...s, [tab]: new Set(memItems.map((m) => m.id)) }))
+  }
+  function clearSelection() {
+    if (!isMemoryTab(tab)) return
+    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+  }
+
+  // 批量删除（spec 2026-08-16 task-10）：confirm 二次确认（可从回收站恢复），
+  // bulkDelete 一次性软删，清选中 + 重置当前 tab 缓存防已删条目滞留 + refresh。
+  async function bulkDeleteSelected() {
+    if (!isMemoryTab(tab)) return
+    const ids = [...selectedIds[tab]]
+    if (ids.length === 0) return
+    if (!window.confirm(`确认将 ${ids.length} 条移入回收站？可从回收站恢复`)) return
+    await bulkDelete(ids)
+    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+    setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
+    void refresh(tab)
+  }
+  // 批量批准/拒绝（复用 promoteMemory 逐条；no-throw swallow，失败的靠 refresh 收敛）。
+  async function bulkApproveSelected() {
+    if (!isMemoryTab(tab)) return
+    for (const id of selectedIds[tab]) {
+      try { await promoteMemory(id, { action: 'approve' }) } catch {}
+    }
+    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+    setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
+    void refresh(tab)
+  }
+  async function bulkRejectSelected() {
+    if (!isMemoryTab(tab)) return
+    for (const id of selectedIds[tab]) {
+      try { await promoteMemory(id, { action: 'reject' }) } catch {}
+    }
+    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+    setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
+    void refresh(tab)
+  }
+  // 批量归档/取消归档（仅 approved tab；逐条 archive/unarchive no-throw）。
+  async function bulkArchiveSelected() {
+    if (tab !== 'approved') return
+    for (const id of selectedIds[tab]) { try { await archiveMemory(id) } catch {} }
+    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+    void refresh(tab)
+  }
+  async function bulkUnarchiveSelected() {
+    if (tab !== 'approved') return
+    for (const id of selectedIds[tab]) { try { await unarchiveMemory(id) } catch {} }
+    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+    void refresh(tab)
+  }
+  // 批量恢复（仅 rejected tab；逐条 restoreMemory no-throw）。
+  async function bulkRestoreSelected() {
+    if (tab !== 'rejected') return
+    for (const id of selectedIds[tab]) { try { await restoreMemory(id) } catch {} }
+    setSelectedIds((s) => ({ ...s, [tab]: new Set() }))
+    setMemCache((c) => ({ ...c, [tab]: emptyPage() }))
+    void refresh(tab)
+  }
+
   // 筛选变化（per-tab 独立态，spec 2026-08-11-per-tab-memory-filters §4.4-4）：只作废
   // 当前 tab 缓存——其余 tab 缓存对应各自筛选，与本 tab 筛选变化无涉（推翻共享态
   // 时代的四缓存全作废）。仍须作废当前 tab：否则 mergeRefreshPage 把旧筛选条目当
@@ -435,7 +527,7 @@ export default function App() {
           return (
             <button
               key={t.key}
-              onClick={() => setTab(t.key)}
+              onClick={() => switchTab(t.key)}
               style={{
                 padding: '8px 14px',
                 borderRadius: 8,
@@ -454,6 +546,16 @@ export default function App() {
           )
         })}
       </div>
+
+      {/* 导出/导入入口工具栏（spec 2026-08-16 task-10）：仅记忆三 tab 显示。
+          导出 = 打开 ExportTrigger modal（scope 全部/当前筛选/选中）；导入 =
+          打开 ImportTrigger modal（选文件 + 冲突策略）。 */}
+      {isMemoryTab(tab) ? (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          <button onClick={() => setExportOpen(true)}>导出</button>
+          <button onClick={() => setImportOpen(true)}>导入</button>
+        </div>
+      ) : null}
 
       {/* 状态栏 - 后台可见性 */}
       <div
@@ -707,6 +809,20 @@ export default function App() {
           <p>{hasActiveFilter(filter)
           ? `共 ${memCache.candidate.total ?? memItems.length} 条符合当前筛选`
           : `${tabTotalCount(status, 'candidate') ?? memItems.length} 条候选记忆待审`}</p>
+          {isMemoryTab(tab) && selectedIds[tab].size > 0 ? (
+            <MemoryBatchBar
+              tab={tab}
+              selectedCount={selectedIds[tab].size}
+              onSelectAll={selectAllPage}
+              onClear={clearSelection}
+              onBulkApprove={() => void bulkApproveSelected()}
+              onBulkReject={() => void bulkRejectSelected()}
+              onBulkArchive={() => void bulkArchiveSelected()}
+              onBulkUnarchive={() => void bulkUnarchiveSelected()}
+              onBulkRestore={() => void bulkRestoreSelected()}
+              onBulkDelete={() => void bulkDeleteSelected()}
+            />
+          ) : null}
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {(status?.unevaluatedCandidates ?? 0) > 0 ? (
@@ -767,6 +883,8 @@ export default function App() {
             <MemoryCard
               key={m.id}
               m={m}
+              selected={selectedIds[tab].has(m.id)}
+              onToggleSelect={() => toggleSelect(m.id)}
               onApprove={() => approve(m.id)}
               onReject={() => reject(m.id)}
               onEdit={(t, b, s, slug) => edit(m.id, t, b, s, slug)}
@@ -790,10 +908,26 @@ export default function App() {
           <p>{hasActiveFilter(filter)
           ? `共 ${memCache.approved.total ?? memItems.length} 条符合当前筛选`
           : `${tabTotalCount(status, 'approved') ?? memItems.length} 条已审批记忆`}</p>
+          {isMemoryTab(tab) && selectedIds[tab].size > 0 ? (
+            <MemoryBatchBar
+              tab={tab}
+              selectedCount={selectedIds[tab].size}
+              onSelectAll={selectAllPage}
+              onClear={clearSelection}
+              onBulkApprove={() => void bulkApproveSelected()}
+              onBulkReject={() => void bulkRejectSelected()}
+              onBulkArchive={() => void bulkArchiveSelected()}
+              onBulkUnarchive={() => void bulkUnarchiveSelected()}
+              onBulkRestore={() => void bulkRestoreSelected()}
+              onBulkDelete={() => void bulkDeleteSelected()}
+            />
+          ) : null}
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}
               m={m}
+              selected={selectedIds[tab].has(m.id)}
+              onToggleSelect={() => toggleSelect(m.id)}
               readOnlyReason={m.status === 'superseded' ? '已被取代' : undefined}
               onArchive={m.status === 'approved' ? () => archive(m.id) : undefined}
               onUnarchive={m.status === 'archived' ? () => unarchive(m.id) : undefined}
@@ -814,10 +948,26 @@ export default function App() {
           <p>{hasActiveFilter(filter)
           ? `共 ${memCache.rejected.total ?? memItems.length} 条符合当前筛选`
           : `${tabTotalCount(status, 'rejected') ?? memItems.length} 条已拒绝记忆`}</p>
+          {isMemoryTab(tab) && selectedIds[tab].size > 0 ? (
+            <MemoryBatchBar
+              tab={tab}
+              selectedCount={selectedIds[tab].size}
+              onSelectAll={selectAllPage}
+              onClear={clearSelection}
+              onBulkApprove={() => void bulkApproveSelected()}
+              onBulkReject={() => void bulkRejectSelected()}
+              onBulkArchive={() => void bulkArchiveSelected()}
+              onBulkUnarchive={() => void bulkUnarchiveSelected()}
+              onBulkRestore={() => void bulkRestoreSelected()}
+              onBulkDelete={() => void bulkDeleteSelected()}
+            />
+          ) : null}
           {memItems.map((m) => (
             <MemoryCard
               key={m.id}
               m={m}
+              selected={selectedIds[tab].has(m.id)}
+              onToggleSelect={() => toggleSelect(m.id)}
               onRestore={() => restore(m.id)}
             />
           ))}
@@ -912,6 +1062,32 @@ export default function App() {
 
       {runDetailFor ? (
         <DistillRunModal jobId={runDetailFor} onClose={() => setRunDetailFor(null)} />
+      ) : null}
+
+      {/* 导出 modal（spec 2026-08-16 task-10）：选范围（全部/当前筛选/选中）+ 格式
+          （memside JSON 高保真 / Markdown 低保真）→ 浏览器下载。selectedIds 传入使
+          scope='selected' 时服务端只导选中（空选中 = 空导出，安全）。 */}
+      {exportOpen ? (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => setExportOpen(false)}>
+          <div style={{ background: '#fff', padding: 24, borderRadius: 8, minWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>导出记忆</h3>
+            <p style={{ fontSize: 13, color: '#666' }}>选择导出范围与格式。memside JSON 高保真（保留状态）；Markdown 低保真（人类可读）。</p>
+            <ExportTrigger selectedIds={isMemoryTab(tab) ? [...selectedIds[tab]] : []} onDone={() => setExportOpen(false)} />
+          </div>
+        </div>
+      ) : null}
+
+      {/* 导入 modal（spec 2026-08-16 task-10）：选冲突策略 + 选文件 → 上传。
+          importConflict 状态提升到 App，ImportTrigger 受控渲染三选项。 */}
+      {importOpen ? (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => { setImportOpen(false); setImportResult(null) }}>
+          <div style={{ background: '#fff', padding: 24, borderRadius: 8, minWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>导入记忆</h3>
+            <p style={{ fontSize: 13, color: '#666' }}>支持 memside JSON 与 Markdown，自动识别格式。</p>
+            <ImportTrigger conflict={importConflict} onConflictChange={setImportConflict} onResult={(msg) => { setImportResult(msg); void refresh(tab) }} />
+            {importResult ? <p style={{ fontSize: 13, color: '#080' }}>{importResult}</p> : null}
+          </div>
+        </div>
       ) : null}
     </div>
   )
@@ -1158,6 +1334,49 @@ function JudgeSettings() {
 }
 
 /**
+ * 记忆三 tab 共用的批量操作条（spec 2026-08-16 task-10）。tab: MemoryTabKey（未
+ * 收窄，candidate/approved/rejected 比较合法）决定显示哪组 tab 专属按钮；
+ * selectedCount 显「已选 N 条」；onBulk* 由 App 注入对应批量 handler。
+ */
+function MemoryBatchBar({ tab, selectedCount, onSelectAll, onClear, onBulkApprove, onBulkReject, onBulkArchive, onBulkUnarchive, onBulkRestore, onBulkDelete }: {
+  tab: MemoryTabKey
+  selectedCount: number
+  onSelectAll: () => void
+  onClear: () => void
+  onBulkApprove: () => void
+  onBulkReject: () => void
+  onBulkArchive: () => void
+  onBulkUnarchive: () => void
+  onBulkRestore: () => void
+  onBulkDelete: () => void
+}) {
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, padding: 8, border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa' }}>
+      <span style={{ fontSize: 13 }}>已选 {selectedCount} 条</span>
+      <button onClick={onSelectAll}>全选当前页</button>
+      <button onClick={onClear}>取消选择</button>
+      <span style={{ marginLeft: 'auto' }} />
+      {tab === 'candidate' ? (
+        <>
+          <button onClick={onBulkApprove}>批量批准</button>
+          <button onClick={onBulkReject}>批量拒绝</button>
+        </>
+      ) : null}
+      {tab === 'approved' ? (
+        <>
+          <button onClick={onBulkArchive}>批量归档</button>
+          <button onClick={onBulkUnarchive}>批量取消归档</button>
+        </>
+      ) : null}
+      {tab === 'rejected' ? (
+        <button onClick={onBulkRestore}>批量恢复</button>
+      ) : null}
+      <button onClick={onBulkDelete} style={{ color: '#c00' }}>批量删除</button>
+    </div>
+  )
+}
+
+/**
  * 通用记忆卡片骨架。操作按钮按 tab 注入(可选回调):候选 tab 传 onApprove/
  * onReject/onEdit/onViewSource(现有行为);已审批 tab 传 onArchive/onUnarchive
  * (按 status 决定显示哪个),superseded 传 readOnlyReason='已被取代' 只读;已拒绝
@@ -1173,6 +1392,8 @@ function MemoryCard({
   onUnarchive,
   onRestore,
   readOnlyReason,
+  selected,
+  onToggleSelect,
 }: {
   m: MemoryItem
   onApprove?: () => void
@@ -1183,6 +1404,9 @@ function MemoryCard({
   onUnarchive?: () => void
   onRestore?: () => void
   readOnlyReason?: string
+  /** 多选（spec 2026-08-16 task-10）：onToggleSelect 提供即渲染勾选框，selected 控制受控状态。 */
+  selected?: boolean
+  onToggleSelect?: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(m.title)
@@ -1233,6 +1457,9 @@ function MemoryCard({
         </>
       ) : (
         <>
+          {onToggleSelect ? (
+            <input type="checkbox" checked={selected ?? false} onChange={onToggleSelect} style={{ marginRight: 8 }} />
+          ) : null}
           <strong>{stripCategoryPrefix(m.title)}</strong>
           {/* 徽章行：分类 -> 价值 -> 出处 -> 主题；各带字段名前缀 + 悬停 tip（spec §6.1） */}
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '6px 0' }}>
@@ -1746,5 +1973,82 @@ function FilterSelect({ label, value, onChange, options, disabled }: {
         ))}
       </select>
     </label>
+  )
+}
+
+/**
+ * 导出触发器（spec 2026-08-16 task-10 §Web UI §3）。内部维护 scope + format 两个
+ * 选择 + busy 态。doExport 调 exportMemories → 拿 Blob → URL.createObjectURL +
+ * <a download> 触发浏览器下载 → revoke → onDone 关闭 modal。scope='selected' 时
+ * 透传 ids（空数组时服务端返回空导出，安全）。
+ */
+function ExportTrigger({ selectedIds, onDone }: { selectedIds: string[]; onDone: () => void }) {
+  const [scope, setScope] = useState<'selected' | 'filter' | 'all'>('all')
+  const [format, setFormat] = useState<'json' | 'markdown'>('json')
+  const [busy, setBusy] = useState(false)
+  async function doExport() {
+    setBusy(true)
+    try {
+      const blob = await exportMemories({ scope, format, ids: scope === 'selected' ? selectedIds : undefined })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = format === 'json' ? 'memside-export.json' : 'memside-export.md'
+      a.click()
+      URL.revokeObjectURL(url)
+      onDone()
+    } finally { setBusy(false) }
+  }
+  return (
+    <div>
+      <div style={{ marginBottom: 8 }}>
+        <label><input type="radio" checked={scope === 'selected'} onChange={() => setScope('selected')} /> 导出选中</label>{' '}
+        <label><input type="radio" checked={scope === 'filter'} onChange={() => setScope('filter')} /> 导出当前筛选</label>{' '}
+        <label><input type="radio" checked={scope === 'all'} onChange={() => setScope('all')} /> 导出全部</label>
+      </div>
+      <div style={{ marginBottom: 8 }}>
+        <label><input type="radio" checked={format === 'json'} onChange={() => setFormat('json')} /> memside JSON</label>{' '}
+        <label><input type="radio" checked={format === 'markdown'} onChange={() => setFormat('markdown')} /> Markdown</label>
+      </div>
+      <button onClick={doExport} disabled={busy}>{busy ? '导出中…' : '下载'}</button>
+      <button onClick={onDone}>取消</button>
+    </div>
+  )
+}
+
+/**
+ * 导入触发器（spec 2026-08-16 task-10 §Web UI §3）。冲突策略由 App 提升态传入
+ * （importConflict），文件选择后调 importMemoriesApi(file, conflict) → onResult
+ * 回显摘要；失败显错误行不静默。accept .json,.md，服务端按内容自动识别格式。
+ */
+function ImportTrigger({ conflict, onConflictChange, onResult }: {
+  conflict: 'skip' | 'overwrite' | 'newid'
+  onConflictChange: (c: 'skip' | 'overwrite' | 'newid') => void
+  onResult: (msg: string) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function onFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setBusy(true); setError(null)
+    try {
+      const r = await importMemoriesApi(file, conflict)
+      onResult(`导入 ${r.imported} 条 · 跳过 ${r.skipped} · 覆盖 ${r.overwritten}` + (r.errors.length ? ` · 错误 ${r.errors.length}` : ''))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally { setBusy(false) }
+  }
+  return (
+    <div>
+      <div style={{ marginBottom: 8 }}>
+        <label><input type="radio" checked={conflict === 'skip'} onChange={() => onConflictChange('skip')} /> 跳过已存在</label>{' '}
+        <label><input type="radio" checked={conflict === 'overwrite'} onChange={() => onConflictChange('overwrite')} /> 覆盖已存在</label>{' '}
+        <label><input type="radio" checked={conflict === 'newid'} onChange={() => onConflictChange('newid')} /> 全部新建</label>
+      </div>
+      <input type="file" accept=".json,.md" onChange={onFile} disabled={busy} />
+      {busy ? <span style={{ fontSize: 13, color: '#888' }}>导入中…</span> : null}
+      {error ? <p style={{ color: '#c00', fontSize: 13 }}>{error}</p> : null}
+    </div>
   )
 }
