@@ -148,6 +148,15 @@ test('isListTab: messages 走列表数据流（spec 2026-08-12）', () => {
   expect(isListTab('settings')).toBe(false)
 })
 
+test('isListTab(trash) = true', () => {
+  expect(isListTab('trash')).toBe(true)
+})
+
+test('tabTotalCount(trash) = trashCount', () => {
+  expect(tabTotalCount({ memories: {}, discards: 0, trashCount: 5 } as any, 'trash')).toBe(5)
+  expect(tabTotalCount({ memories: {}, discards: 0 } as any, 'trash')).toBe(0)
+})
+
 // --- 2026-08-11 记忆列表筛选（spec web-memory-filters §4.3）---
 
 test('hasActiveFilter: 全空 false，任一维非空 true', () => {
