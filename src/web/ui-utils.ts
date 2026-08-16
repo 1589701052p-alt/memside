@@ -45,7 +45,7 @@ export function formatSourceTurn(turn: { role: string; content?: string; isError
   return { label: turn.role, color: '#666' }
 }
 
-export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced' | 'skipped_trivial'
+export type DistillOutcome = 'skipped_no_new_turns' | 'empty_output' | 'llm_error' | 'produced' | 'skipped_trivial' | 'parse_error'
 
 /**
  * 蒸馏记录 outcome -> 徽标 { label, color }。produced 绿 / empty_output 灰 /
@@ -59,6 +59,7 @@ export function formatOutcome(outcome: DistillOutcome): { label: string; color: 
   if (outcome === 'produced') return { label: '产出', color: '#2e7d32' }
   if (outcome === 'empty_output') return { label: '空产出', color: '#666' }
   if (outcome === 'llm_error') return { label: 'LLM错误', color: '#c00' }
+  if (outcome === 'parse_error') return { label: '解析失败', color: '#c00' }
   if (outcome === 'skipped_trivial') return { label: '琐碎跳过', color: '#999' }
   if (outcome === 'skipped_no_new_turns') return { label: '跳过', color: '#999' }
   // 未知 outcome 兜底：不得空白（spec §5 #10）
@@ -76,6 +77,7 @@ export function degradationKindLabel(kind: string): string {
     titles_query_failed: '已审批查询失败',
     sweep_error: 'sweep异常',
     digest_truncated: '摘要压缩超限',
+    subagent_transcript_missing: 'subagent 记录缺失',
   }
   return map[kind] ?? kind
 }
@@ -303,6 +305,7 @@ export function formatPhaseStat(count: number, ms: number): string {
 /** 消息标题人话（spec §5.11）：degradation 复用降级 kind 映射；llm_error 固定文案。 */
 export function notificationTitle(n: { kind: string; title: string }): string {
   if (n.kind === 'llm_error') return '蒸馏 LLM 报错'
+  if (n.kind === 'parse_error') return '解析失败'
   if (n.kind === 'degradation') return degradationKindLabel(n.title)
   return n.title
 }

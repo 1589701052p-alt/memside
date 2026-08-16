@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick, dedupCandidates, DISTILL_DEBOUNCE_MS } from '@/scheduler'
 import { createCandidate, createCandidate as realCreateCandidate, promoteCandidate } from '@/memory/store'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, notifications } from '@/db/schema'
 import type { DistillCandidate } from '@/memory/distiller'
 import { makeLoadTranscript } from '@/daemon'
 
@@ -1151,4 +1151,76 @@ test('tick 对 subagent job 的候选强制降级 origin 为 agent-observed', as
   expect(captured).not.toBeNull()
   expect(captured.origin).toBe('agent-observed')
   expect(captured.sourceKind).toBe('subagent')
+})
+
+// ---------------------------------------------------------------------------
+// Task 5（2026-08-15 parse-error-visibility §5.5）：tick outcome 真值表接线。
+// 调用未抛错但解析重试耗尽 -> parse_error（rawText 截断落盘 + errorMessage +
+// job.last_error 回写 + parse_error 通知），不再假扮 empty_output。
+// seed/驱动 tick 模式镜像上方 llm_error 用例（无 sessionId -> 跳过滚动账本路径，
+// LLM 只被 distill 三次重试调用）。
+// ---------------------------------------------------------------------------
+
+test('tick: 调用未抛错但三次解析全败 -> outcome=parse_error + rawText 落盘 + last_error 回写 + parse_error 通知', async () => {
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId)).run()
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
+    callLLM: async () => 'total garbage not json',
+    createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
+  })
+  // 1. run 记录 outcome=parse_error
+  const runs = await db.select().from(memoryDistillRuns).where(eq(memoryDistillRuns.distillJobId, jobId)).all()
+  expect(runs[0]!.outcome).toBe('parse_error')
+  // 2. errorMessage 含重试阶段的解析错误描述；rawText 原样落盘（未超 cap 不截断）
+  expect(runs[0]!.errorMessage).toContain('不是合法 JSON')
+  expect(runs[0]!.rawText).toBe('total garbage not json')
+  // 3. job.last_error 回写（/api/status lastError 生效），job 仍标 done
+  const job = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).all()
+  expect(job[0]!.lastError).toBeTruthy()
+  expect(job[0]!.status).toBe('done')
+  // 4. notifications 有 kind='parse_error' 且 refId=jobId 的行
+  const notifs = await db.select().from(notifications).where(eq(notifications.refId, jobId)).all()
+  expect(notifs.some((n) => n.kind === 'parse_error')).toBe(true)
+})
+
+test('tick: 合法 {"candidates":[]} -> outcome=empty_output 且 rawText 为 null（真空回归锁）', async () => {
+  // 合法空产出不得被新 parse_error 分支误吞：empty_output 保持 rawText/errorMessage 全 null、
+  // 无 parse_error 通知、不回写 last_error。
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId)).run()
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
+    callLLM: async () => '{"candidates":[]}',
+    createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
+  })
+  const runs = await db.select().from(memoryDistillRuns).where(eq(memoryDistillRuns.distillJobId, jobId)).all()
+  expect(runs[0]!.outcome).toBe('empty_output')
+  expect(runs[0]!.rawText).toBeNull()
+  expect(runs[0]!.errorMessage).toBeNull()
+  const notifs = await db.select().from(notifications).where(eq(notifications.refId, jobId)).all()
+  expect(notifs.filter((n) => n.kind === 'parse_error').length).toBe(0)
+  const job = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).all()
+  expect(job[0]!.lastError).toBeNull()
+})
+
+test('tick: capRawText 接线——超长垃圾输出落盘时已截断（头8000+尾16000）', async () => {
+  const { jobId } = await enqueueDistillJob(db, {
+    sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0,
+  })
+  await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId)).run()
+  await tick(db, {
+    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
+    callLLM: async () => 'x'.repeat(30000),
+    createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
+  })
+  const runs = await db.select().from(memoryDistillRuns).where(eq(memoryDistillRuns.distillJobId, jobId)).all()
+  expect(runs[0]!.outcome).toBe('parse_error')
+  const raw = runs[0]!.rawText!
+  expect(raw.length).toBeLessThan(25000)
+  expect(raw).toContain('…[截断 6000 字]…')
 })

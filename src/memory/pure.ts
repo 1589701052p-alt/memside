@@ -352,3 +352,21 @@ export function categoryFromTitle(title: unknown): string | null {
   const v = m[1]!.trim().toLowerCase()
   return v.length > 0 ? v : null
 }
+
+// ---------------------------------------------------------------------------
+// parse_error 原始输出截断（spec 2026-08-15 §5.6）。尾部权重更大：
+// max_tokens 截断的断口在尾部；头部保留以识别围栏/散文。
+// ---------------------------------------------------------------------------
+
+export const RAW_TEXT_CAP_CHARS = 24_000
+const RAW_TEXT_HEAD_CHARS = 8_000
+
+/** null/空串 -> null；<= cap 原样；超 cap 保留头 8000 + 尾 16000 并标记省略字数。 */
+export function capRawText(raw: string | null): string | null {
+  if (!raw) return null
+  if (raw.length <= RAW_TEXT_CAP_CHARS) return raw
+  const head = raw.slice(0, RAW_TEXT_HEAD_CHARS)
+  const tail = raw.slice(-(RAW_TEXT_CAP_CHARS - RAW_TEXT_HEAD_CHARS))
+  const omitted = raw.length - RAW_TEXT_CAP_CHARS
+  return `${head}\n…[截断 ${omitted} 字]…\n${tail}`
+}

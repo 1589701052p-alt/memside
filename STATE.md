@@ -1,5 +1,28 @@
 # STATE.md - memside 构建状态
 
+## 蒸馏解析失败可视化 + subagent 兜底治理（2026-08-15）
+
+设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-15-distill-parse-error-visibility*`。
+parse_error 独立 outcome（raw_text 落盘 + 消息中心折叠 + 状态栏红条覆盖）；
+SubagentStop 删除主会话兜底，缺失改写 subagent_transcript_missing 取证 degradation。
+全量门槛：`bun run typecheck && bun test` → 1001 pass / 0 fail / 84 文件。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. parse_error 24h 计数与占比；raw_text 抽样判型（截断断口 / 围栏 / 散文），给后续 retry prompt 调优定罪。
+2. `subagent_transcript_missing` 降解的 dir listing 对照 agentId——抓 phantom agent 文件缺失现行。
+3. empty_output 是否回归纯真空（抽样应全部 raw_output_json 非 NULL）。
+4. parse_error 通知折叠效果：同签名是否收成一条。
+
+### 本轮遗留（minor，不阻塞合并）
+
+- retry.ts / distiller 缺「先 parse 败后末次抛错」混合序列优先级测试（T1/T2 deferred）。
+- capRawText 恰等于 24000 边界 case 未测；测试 import RAW_TEXT_CAP_CHARS 未用。
+- listDistillRunsPage 的 rawText 排除无独立断言（与 listRecentDistillRuns 共用 RUN_LIST_COLS）。
+- SubagentStop catch 块（broadcast memory.enqueue.failed）未测；吞 logDegradation 失败时事件 type 语义略偏（enqueue 没失败），属事件协议 follow-up。
+- notificationTitle parse_error 分支返回固定文案（与 llm_error 既有模式一致，丢细粒度信息）。
+- separator 启发式在 subagentFilePathFromPayload 与 resolveSubagentTranscript 重复（plan-mandated 逐字）。
+
 ## MVP 构建:已完成
 
 全部 17 个任务均已实现。完整测试套件全绿(`bun test` -> 100 通过,

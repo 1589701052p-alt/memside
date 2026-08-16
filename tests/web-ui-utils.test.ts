@@ -2,7 +2,7 @@
 // Task 9 纯函数层测试（spec §4.9）：skipped_trivial 徽标 + 降级 kind 人话映射。
 // 8 个 kind 中文标签逐字锁死——UI 直接渲染，措辞回归必须红。
 import { describe, test, expect } from 'bun:test'
-import { formatOutcome, degradationKindLabel } from '@/web/ui-utils'
+import { formatOutcome, degradationKindLabel, notificationTitle } from '@/web/ui-utils'
 
 describe('formatOutcome skipped_trivial（spec §4.9）', () => {
   test('新 outcome 有专属徽标', () => {
@@ -26,4 +26,15 @@ describe('degradationKindLabel', () => {
     expect(degradationKindLabel('digest_truncated')).toBe('摘要压缩超限')
     expect(degradationKindLabel('whatever')).toBe('whatever')
   })
+})
+
+// parse_error 徽标 / 消息标题 / subagent 记录缺失人话（spec 2026-08-15 §5.8）。
+// 解析失败不再假扮空产出，UI 须独立徽标 + 消息标题；新降级 kind 人话映射锁死。
+test('formatOutcome: parse_error -> 解析失败红徽标', () => {
+  expect(formatOutcome('parse_error')).toEqual({ label: '解析失败', color: '#c00' })
+})
+
+test('notificationTitle: parse_error -> 解析失败；degradationKindLabel 新映射', () => {
+  expect(notificationTitle({ kind: 'parse_error', title: 'parse_error' })).toBe('解析失败')
+  expect(degradationKindLabel('subagent_transcript_missing')).toBe('subagent 记录缺失')
 })

@@ -1,6 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { Database } from 'bun:sqlite'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDiscards, memoryDistillInputs, memoryDistillRuns } from '@/db/schema'
@@ -354,4 +355,46 @@ test('listRecentDistillRuns returns errorMessage in each row', async () => {
   const rows = await listRecentDistillRuns(db)
   const row = rows.find((r) => r.distillJobId === 'job-em3')
   expect(row?.errorMessage).toBe('fetch failed')
+})
+
+test('saveDistillRun/getDistillRun: rawText 往返；非 parse_error 为 null；listRecentDistillRuns 不带 rawText', async () => {
+  // seed 模式参照本文件既有 saveDistillRun 用例：先建 job 行
+  await db.insert(memoryDistillJobs).values({ id: 'job-rt1', debounceKey: 'k', sourceEventId: 'e', runtime: 'claude-code', cwd: '/repo', status: 'done', attempts: 0, nextRunAt: 0, createdAt: 100, finishedAt: 200 })
+  await saveDistillRun(db, 'job-rt1', {
+    outcome: 'parse_error', rawOutput: null, rawCount: 0, acceptedCount: 0,
+    dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 100, errorMessage: '不是合法 JSON：...', rawText: 'garbage-output',
+  })
+  const row = await getDistillRun(db, 'job-rt1')
+  expect(row!.outcome).toBe('parse_error')
+  expect(row!.rawText).toBe('garbage-output')
+  // 非 parse_error：rawText 缺省 -> 读回 null
+  await saveDistillRun(db, 'job-rt2', { outcome: 'produced', rawOutput: null, rawCount: 1,
+    acceptedCount: 1, dedupedCount: 1, filteredCount: 1, storedCount: 1, discardedCount: 0,
+    durationMs: 1, errorMessage: null })
+  expect((await getDistillRun(db, 'job-rt2'))!.rawText).toBeNull()
+  // 列表端点保持轻量：不带 rawText（spec 2026-08-15 §5.4）
+  const list = await listRecentDistillRuns(db, {})
+  expect(list.length).toBeGreaterThan(0)
+  expect('rawText' in list[0]!).toBe(false)
+})
+
+test('raw_text 迁移幂等：缺列老库 openDb 两次不炸（spec 2026-08-15 §5.4）', async () => {
+  // 手法参照 tests/client-backfill-subagent.test.ts：手工建无 raw_text 的老表 -> openDb 包一层 -> 再 openDb 一次
+  const dbPath = join(dir, 'oldrt.db')
+  const old = new Database(dbPath)
+  old.exec(`CREATE TABLE memory_distill_runs (distill_job_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, raw_output_json TEXT, distilled_count INTEGER NOT NULL, accepted_count INTEGER NOT NULL, deduped_count INTEGER NOT NULL, filtered_count INTEGER NOT NULL, stored_count INTEGER NOT NULL, discarded_count INTEGER NOT NULL, duration_ms INTEGER NOT NULL, error_message TEXT, digest_ms INTEGER, dedup_ms INTEGER, judge_ms INTEGER, ts INTEGER NOT NULL)`)
+  old.exec(`INSERT INTO memory_distill_runs (distill_job_id, outcome, distilled_count, accepted_count, deduped_count, filtered_count, stored_count, discarded_count, duration_ms, ts) VALUES ('j1','llm_error',0,0,0,0,0,0,1,1)`)
+  old.close()
+  const migrated = openDb(dbPath)
+  const cols = migrated.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+  expect(cols.some((c) => c.name === 'raw_text')).toBe(true)
+  // no backfill：老行保持 NULL
+  const rows = migrated.$client.prepare('SELECT distill_job_id, raw_text FROM memory_distill_runs').all() as { distill_job_id: string; raw_text: string | null }[]
+  expect(rows.find((r) => r.distill_job_id === 'j1')!.raw_text).toBeNull()
+  migrated.$client.close()
+  // 幂等：reopen 不抛（guard 跳过 ALTER，否则 duplicate column 报错）
+  const reopened = openDb(dbPath)
+  expect((reopened.$client.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]).some((c) => c.name === 'raw_text')).toBe(true)
+  reopened.$client.close()
 })

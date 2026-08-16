@@ -100,6 +100,7 @@ export function openDb(path: string) {
       discarded_count  INTEGER NOT NULL,
       duration_ms      INTEGER NOT NULL,
       error_message    TEXT,
+      raw_text         TEXT,
       digest_ms        INTEGER,
       dedup_ms         INTEGER,
       judge_ms         INTEGER,
@@ -303,6 +304,14 @@ export function openDb(path: string) {
     if (!have('digest_ms')) raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN digest_ms INTEGER')
     if (!have('dedup_ms')) raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN dedup_ms INTEGER')
     if (!have('judge_ms')) raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN judge_ms INTEGER')
+  }
+  // Idempotent migration: add raw_text to pre-existing memory_distill_runs.
+  // parse_error 时存模型原始输出截断（spec 2026-08-15 §5.4）。无 backfill（老行 NULL）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'raw_text')) {
+      raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN raw_text TEXT')
+    }
   }
   return db
 }

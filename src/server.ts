@@ -11,7 +11,7 @@ import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor, type MemoryListFilter, type FacetScope } from '@/memory/store'
 import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NotificationNotFoundError } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
-import { parseTranscriptFile, loadSubagentTranscript } from '@/claude/transcript'
+import { parseTranscriptFile, resolveSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
 import type { OpencodeMessage } from '@/opencode/transcript'
 import { enqueueWaitingJob, type EnqueueInput } from '@/scheduler'
@@ -81,11 +81,13 @@ export interface AppDeps {
  *      `PostToolUse` is skipped entirely (early-return 202 without
  *      parsing/enqueuing/broadcasting) - see the route handler. PostToolUse's
  *      transcript is a cumulative prefix of Stop's, so it would duplicate Stop.
- *      `SubagentStop` (round 7) is NOT skipped: it uses `loadSubagentTranscript`
- *      to read that subagent's own conversation file (double-fallback on
- *      `agent_id`), enqueues a one-off distill job tagged with `sourceAgentId`
+ *      `SubagentStop` (round 7) is NOT skipped: it uses `resolveSubagentTranscript`
+ *      to read that subagent's own conversation file (no main-session fallback),
+ *      enqueues a one-off distill job tagged with `sourceAgentId`
  *      (no `sessionId` - subagents don't update the main session offset), and
- *      persists/broadcasts like Stop. Error signals still surface via
+ *      persists/broadcasts like Stop. When the subagent file is missing/empty,
+ *      no enqueue/event happens — a `subagent_transcript_missing` degradation
+ *      (with forensic diag) is logged instead. Error signals still surface via
  *      detectErrorSignals on the Stop transcript.
  *
  * 2. Injector (`POST /inject`) - programmatic seam (the SessionStart hook
@@ -259,31 +261,33 @@ export function createApp(deps: AppDeps) {
       return c.json({ ok: true }, 202)
     }
 
-    // SubagentStop（第七轮）：不再早返回。payload 带 agent_id -> loadSubagentTranscript
-    // 定位该 subagent 自己的对话文件（双路兜底）-> 单独蒸馏成独立任务（与主会话互不可见）。
-    // subagent 一次性任务，不传 sessionId（不更新主会话偏移）；sourceAgentId 标来源。
+    // SubagentStop（spec 2026-08-15 §5.3）：只蒸馏 subagent 自有 transcript；
+    // 文件缺失/为空不再退回主会话（主会话内容由其自有累加 job 负责，兜底既重复
+    // 又把 origin 强制降级），改写 subagent_transcript_missing degradation 带取证现场。
     if (event === 'SubagentStop') {
       const agentId: string = body.agent_id ?? ''
       const transcriptPath: string = body.transcript_path ?? ''
       const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
       const debounceKey = `${cwd}:${event}`
-      const sourceKind = 'conversation'  // events.kind：对话型数据（subagent 区分在 job.source_agent_id）
-      // 失败模式可观测：payload 缺 agent_id 时 loadSubagentTranscript 只能退回 transcript_path
-      // 兜底。同步路径打 warn（不入 IIFE，即使后续 enqueue 失败也留信号），便于发现 claude
-      // code payload 变更悄悄禁用 subagent 蒸馏的情况。
-      if (!agentId) {
-        console.warn('memside: SubagentStop payload missing agent_id; falling back to transcript_path')
-      }
       void (async () => {
         try {
-          const turns = loadSubagentTranscript(transcriptPath, agentId)
-          const { jobId } = await deps.enqueueDistillJob(deps.db, {
-            sourceEventId, runtime: 'claude-code', cwd, debounceKey, sourceAgentId: agentId || null,
-          })
-          await deps.db.insert(memoryDistillEvents).values({
-            distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
-            kind: sourceKind, payload: JSON.stringify(turns),
-          })
+          const { turns, diag } = resolveSubagentTranscript(transcriptPath, agentId)
+          if (turns.length > 0) {
+            const { jobId } = await deps.enqueueDistillJob(deps.db, {
+              sourceEventId, runtime: 'claude-code', cwd, debounceKey, sourceAgentId: agentId || null,
+            })
+            await deps.db.insert(memoryDistillEvents).values({
+              distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
+              kind: 'conversation', payload: JSON.stringify(turns),
+            })
+          } else {
+            const detail = JSON.stringify({ ...diag, payloadKeys: Object.keys(body) })
+            await logDegradation(deps.db, {
+              kind: 'subagent_transcript_missing', detail,
+              sessionId: body.session_id ?? undefined,
+            })
+            console.warn('memside: subagent transcript missing, distill skipped', detail)
+          }
         } catch (e) {
           deps.broadcast({ type: 'memory.enqueue.failed', sourceEventId, error: String(e) })
         }
@@ -453,16 +457,17 @@ export function createApp(deps: AppDeps) {
     const st = statsRows[0]
     const unreadRows = await deps.db.select({ n: count() }).from(notifications)
       .where(isNull(notifications.readAt)).all()
-    // 按类未读计数 + 最新未读 llm_error（spec 2026-08-14 §3.2）：状态栏警示条
-    // 需要「LLM 报错 ×N（最近：xxx）」与「降级 ×N」分开展示；unreadNotifications
-    // 总数保留（铃铛徽标）。
+    // 按类未读计数 + 最新未读 LLM 类报错（spec 2026-08-14 §3.2，2026-08-15 §5.7）：
+    // 状态栏警示条需要「LLM 类报错 ×N（最近：xxx）」与「降级 ×N」分开展示。
+    // latestUnreadLlmError 覆盖 llm_error + parse_error 两类，取 ts 最新一条
+    // （字段名不变，语义扩为「LLM 类报错」）；unreadNotifications 总数保留（铃铛徽标）。
     const unreadKindRows = await deps.db.select({ kind: notifications.kind, n: count() })
       .from(notifications).where(isNull(notifications.readAt)).groupBy(notifications.kind).all()
     const unreadByKind: Record<string, number> = {}
     for (const r of unreadKindRows) unreadByKind[r.kind] = r.n
     const latestErrRows = await deps.db.select({ body: notifications.body, ts: notifications.ts })
       .from(notifications)
-      .where(and(eq(notifications.kind, 'llm_error'), isNull(notifications.readAt)))
+      .where(and(inArray(notifications.kind, ['llm_error', 'parse_error']), isNull(notifications.readAt)))
       .orderBy(desc(notifications.ts), desc(notifications.id)).limit(1).all()
     // waiting 单列（spec §4.9）：累加中的 job 不是积压，避免 UI「pending 堆积」假象。
     const waitingCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
@@ -489,7 +494,8 @@ export function createApp(deps: AppDeps) {
         judge: { count: Number(st?.judgeCount ?? 0), ms: Number(st?.judgeMs ?? 0) },
       },
       unreadNotifications: unreadRows[0]?.n ?? 0,
-      unreadLlmErrors: unreadByKind['llm_error'] ?? 0,
+      // spec 2026-08-15 §5.7：字段名不变，语义扩为「覆盖 llm_error + parse_error」。
+      unreadLlmErrors: (unreadByKind['llm_error'] ?? 0) + (unreadByKind['parse_error'] ?? 0),
       unreadDegradations: unreadByKind['degradation'] ?? 0,
       latestUnreadLlmError: latestErrRows[0] ?? null,
       waitingJobs: waitingCount[0]?.n ?? 0,
@@ -562,9 +568,9 @@ export function createApp(deps: AppDeps) {
   // --- Notifications（消息中心，spec 2026-08-12 §5.8）------------------------
   app.get('/api/notifications', async (c) => {
     const kindParam = c.req.query('kind')
-    let kind: 'degradation' | 'llm_error' | undefined
+    let kind: 'degradation' | 'llm_error' | 'parse_error' | undefined
     if (kindParam !== undefined) {
-      if (kindParam !== 'degradation' && kindParam !== 'llm_error') {
+      if (kindParam !== 'degradation' && kindParam !== 'llm_error' && kindParam !== 'parse_error') {
         return c.json({ error: `invalid kind: ${kindParam}` }, 400)
       }
       kind = kindParam

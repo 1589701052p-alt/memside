@@ -585,7 +585,7 @@ export async function getSourceInput(
 // listRecentDistillRuns 不含 rawOutput（走专用详情端点），JOIN job 元数据。
 // ---------------------------------------------------------------------------
 
-export type DistillOutcome = 'skipped_no_new_turns' | 'skipped_trivial' | 'empty_output' | 'llm_error' | 'produced'
+export type DistillOutcome = 'skipped_no_new_turns' | 'skipped_trivial' | 'empty_output' | 'llm_error' | 'parse_error' | 'produced'
 
 export interface DistillRunRecord {
   outcome: DistillOutcome
@@ -598,6 +598,7 @@ export interface DistillRunRecord {
   discardedCount: number
   durationMs: number
   errorMessage: string | null
+  rawText?: string | null
   dedupMs?: number | null
   judgeMs?: number | null
 }
@@ -614,6 +615,7 @@ export interface DistillRunRow {
   discardedCount: number
   durationMs: number
   errorMessage: string | null
+  rawText: string | null
   ts: number
   digestMs: number | null
   dedupMs: number | null
@@ -631,6 +633,7 @@ export async function saveDistillRun(
     dedupedCount: record.dedupedCount, filteredCount: record.filteredCount,
     storedCount: record.storedCount, discardedCount: record.discardedCount,
     durationMs: record.durationMs, errorMessage: record.errorMessage, ts: now,
+    rawText: record.rawText ?? null,
     dedupMs: record.dedupMs ?? null, judgeMs: record.judgeMs ?? null,
   }).onConflictDoUpdate({
     target: memoryDistillRuns.distillJobId,
@@ -639,6 +642,7 @@ export async function saveDistillRun(
       filteredCount: record.filteredCount, storedCount: record.storedCount,
       discardedCount: record.discardedCount, durationMs: record.durationMs,
       errorMessage: record.errorMessage, ts: now,
+      rawText: record.rawText ?? null,
       dedupMs: record.dedupMs ?? null, judgeMs: record.judgeMs ?? null },
   })
 }
@@ -653,6 +657,7 @@ function rowToRun(r: any): DistillRunRow {
     rawCount: r.distilledCount, acceptedCount: r.acceptedCount, dedupedCount: r.dedupedCount,
     filteredCount: r.filteredCount, storedCount: r.storedCount, discardedCount: r.discardedCount,
     durationMs: r.durationMs, errorMessage: r.errorMessage ?? null, ts: r.ts,
+    rawText: r.rawText ?? null,
     digestMs: r.digestMs ?? null, dedupMs: r.dedupMs ?? null, judgeMs: r.judgeMs ?? null,
   }
 }
@@ -1178,7 +1183,7 @@ export async function listDegradationsForJob(db: DbClient, jobId: string): Promi
 
 export const NOTIFICATION_RETENTION_CAP = 500
 export const NOTIFICATION_BODY_CAP_CHARS = 2000
-export const NOTIFICATION_KINDS = ['degradation', 'llm_error'] as const
+export const NOTIFICATION_KINDS = ['degradation', 'llm_error', 'parse_error'] as const
 export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 
 export interface NotificationRow {
@@ -1193,21 +1198,22 @@ export class InvalidNotificationFilterError extends Error {}
  * 写一条消息并执行保留裁剪（spec §5.2）：超过 NOTIFICATION_RETENTION_CAP
  * 删最旧。裁剪失败只 warn，不影响插入结果。
  *
- * 同内容折叠（spec 2026-08-14 §3.3）：插入前查最新一条未读同内容通知——
- * llm_error 按裁剪后 body 匹配，degradation 按 title 匹配；命中则不新插，
- * 只把该行 ts 刷新为 MAX(Date.now(), 全表 MAX(ts)+1)（防同毫秒撞车保证浮顶）
- * 并返回原 id（跳过保留裁剪）。已读的相同
+ * 同内容折叠（spec 2026-08-14 §3.3 + 2026-08-15 §5.4）：插入前查最新一条未读
+ * 同内容通知——llm_error/parse_error 按裁剪后 body 匹配，degradation 按 title
+ * 匹配；命中则不新插，只把该行 ts 刷新为 MAX(Date.now(), 全表 MAX(ts)+1)（防同
+ * 毫秒撞车保证浮顶）并返回原 id（跳过保留裁剪）。已读的相同
  * 内容不折叠（用户已处置，新的发生是新事件）。折叠路径不吞错：DB 失败沿
- * 调用方（logDegradation / logLlmErrorNotification）的 try/catch 契约 warn。
+ * 调用方（logDegradation / logLlmErrorNotification / logParseErrorNotification）
+ * 的 try/catch 契约 warn。
  */
 export async function insertNotification(
   db: DbClient,
   input: { kind: NotificationKind; title: string; body?: string | null; refType?: string | null; refId?: string | null },
 ): Promise<string> {
   const body = input.body == null ? null : input.body.slice(0, NOTIFICATION_BODY_CAP_CHARS)
-  const foldConds = input.kind === 'llm_error'
+  const foldConds = (input.kind === 'llm_error' || input.kind === 'parse_error')
     ? and(
-        eq(notifications.kind, 'llm_error'),
+        eq(notifications.kind, input.kind),
         isNull(notifications.readAt),
         body === null ? isNull(notifications.body) : eq(notifications.body, body),
       )
@@ -1242,6 +1248,13 @@ export async function logLlmErrorNotification(db: DbClient, input: { jobId: stri
   try {
     await insertNotification(db, { kind: 'llm_error', title: 'llm_error', body: input.message, refType: 'distill_job', refId: input.jobId })
   } catch (e) { console.warn('memside: llm_error notification insert failed', e) }
+}
+
+/** scheduler parse_error 路径专用（spec 2026-08-15 §5.4）：自身吞错只 warn，不炸蒸馏。 */
+export async function logParseErrorNotification(db: DbClient, input: { jobId: string; message: string }): Promise<void> {
+  try {
+    await insertNotification(db, { kind: 'parse_error', title: 'parse_error', body: input.message, refType: 'distill_job', refId: input.jobId })
+  } catch (e) { console.warn('memside: parse_error notification insert failed', e) }
 }
 
 export interface NotificationListOpts {

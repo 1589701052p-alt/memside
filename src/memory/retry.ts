@@ -8,9 +8,17 @@ export interface RetryOpts {
   /** Return an error message to retry, or null to accept the parsed output. */
   shouldRetry: (parsed: unknown) => string | null
   maxRetries?: number
+  /** 每次未抛错的 attempt 后回调：raw=原始文本，error=parse/校验错误（接受为 null）。
+   *  纯观测（distiller 据此判 parse_error 并留存原始输出）。call 抛错的 attempt 不触发。 */
+  onAttempt?: (info: { raw: string; error: string | null }) => void
 }
 
 const FEEDBACK_SUFFIX = '请只输出纯 JSON 对象，不要 markdown 围栏，不要解释文字，键与字符串值用双引号，最后一个属性后无逗号。'
+
+function fireAttempt(opts: RetryOpts, raw: string, error: string | null): void {
+  if (!opts.onAttempt) return
+  try { opts.onAttempt({ raw, error }) } catch (e) { console.warn('memside: retry onAttempt callback failed', e) }
+}
 
 /**
  * Call `call` -> extractJsonObject -> JSON.parse -> shouldRetry. On any failure
@@ -41,14 +49,19 @@ export async function callWithRetry(opts: RetryOpts): Promise<unknown> {
     try {
       parsed = JSON.parse(cleaned)
     } catch (e) {
-      if (attempt === maxRetries) return lastParsed
       const error = `不是合法 JSON：${e instanceof Error ? e.message : String(e)}`
+      fireAttempt(opts, raw, error)
+      if (attempt === maxRetries) return lastParsed
       currentUser = `${opts.user}\n\n[修正] 你上次的回答有问题：${error}。${FEEDBACK_SUFFIX}`
       continue
     }
     lastParsed = parsed
     const retryError = opts.shouldRetry(parsed)
-    if (retryError === null) return parsed
+    if (retryError === null) {
+      fireAttempt(opts, raw, null)
+      return parsed
+    }
+    fireAttempt(opts, raw, retryError)
     if (attempt === maxRetries) return lastParsed
     currentUser = `${opts.user}\n\n[修正] 你上次的回答有问题：${retryError}。${FEEDBACK_SUFFIX}`
   }

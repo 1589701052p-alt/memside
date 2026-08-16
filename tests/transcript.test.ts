@@ -1,7 +1,7 @@
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseTranscriptFile, extractText, subagentFilePathFromPayload, loadSubagentTranscript } from '@/claude/transcript'
+import { parseTranscriptFile, extractText, subagentFilePathFromPayload, resolveSubagentTranscript } from '@/claude/transcript'
 import { detectErrorSignals } from '@/memory/pure'
 
 /**
@@ -266,38 +266,6 @@ test('subagentFilePathFromPayload: empty transcriptPath -> null', () => {
   expect(subagentFilePathFromPayload('', 'ag')).toBeNull()
 })
 
-// --- loadSubagentTranscript double-fallback (Task 5) -------------------------
-
-test('loadSubagentTranscript: agent_id path hit -> parses subagent file', () => {
-  // 主会话 dir/sess-1.jsonl；subagent 文件 dir/sess-1/subagents/agent-AG.jsonl
-  mkdirSync(join(dir, 'sess-1', 'subagents'), { recursive: true })
-  const mainPath = join(dir, 'sess-1.jsonl')
-  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
-  const subPath = join(dir, 'sess-1', 'subagents', 'agent-AG.jsonl')
-  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT INTERNAL' } }) + '\n')
-  const turns = loadSubagentTranscript(mainPath, 'AG')
-  expect(turns.length).toBe(1)
-  expect(turns[0]!.content).toBe('SUBAGENT INTERNAL')
-  expect(turns[0]!.content).not.toBe('MAIN SESSION')
-})
-
-test('loadSubagentTranscript: agent_id path miss -> falls back to transcript_path', () => {
-  const mainPath = join(dir, 'sess-2.jsonl')
-  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'FALLBACK TO MAIN' } }) + '\n')
-  // 不建 subagents 目录 -> 推路径读不到 -> 退回 mainPath
-  const turns = loadSubagentTranscript(mainPath, 'NOPE')
-  expect(turns.length).toBe(1)
-  expect(turns[0]!.content).toBe('FALLBACK TO MAIN')
-})
-
-test('loadSubagentTranscript: both miss -> empty (no throw)', () => {
-  const turns = loadSubagentTranscript(join(dir, 'nope.jsonl'), 'AG')
-  expect(turns).toEqual([])
-  // agentId 空 + 无 transcript_path 也空
-  expect(loadSubagentTranscript('', 'AG')).toEqual([])
-  expect(loadSubagentTranscript(join(dir, 'x.jsonl'), '')).toEqual([])
-})
-
 // --- thinking 捕获（spec 2026-08-09 §4.1）---
 
 test('thinking block 在 text 之前时按文件顺序先产出', () => {
@@ -379,4 +347,43 @@ test('tool_use input 超 300 字 -> toolCall 截断带后缀', () => {
   expect(toolTurn!.toolCall!.endsWith('…[truncated]')).toBe(true)
   // 截断后长度 = 300 + 后缀（JSON 包装部分会超 300，截在 300 处）
   expect(toolTurn!.toolCall!.length).toBe(300 + '…[truncated]'.length)
+})
+
+// --- resolveSubagentTranscript (spec 2026-08-15 §5.2)：不兜底主会话，带取证 diag ---
+
+test('resolveSubagentTranscript: 文件存在 -> turns + diag 全字段', () => {
+  // 夹具：main.jsonl + main/subagents/agent-AG.jsonl（内容同既有用例）
+  mkdirSync(join(dir, 'main', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
+  const subPath = join(dir, 'main', 'subagents', 'agent-AG.jsonl')
+  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT INTERNAL' } }) + '\n')
+  const { turns, diag } = resolveSubagentTranscript(mainPath, 'AG')
+  expect(turns.length).toBeGreaterThan(0)
+  expect(diag.derivedExists).toBe(true)
+  expect(diag.derivedTurns).toBe(turns.length)
+  expect(diag.mainTranscriptExists).toBe(true)
+  expect(diag.subagentsDirEntries).toContain('agent-AG.jsonl')
+  expect(diag.derivedPath).toContain('agent-AG.jsonl')
+})
+
+test('resolveSubagentTranscript: 文件缺失 -> 空 turns，不读主会话（行为锁）', () => {
+  // 夹具同上但无 agent-NOPE.jsonl；主会话文件有内容
+  mkdirSync(join(dir, 'main', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
+  const subPath = join(dir, 'main', 'subagents', 'agent-AG.jsonl')
+  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT INTERNAL' } }) + '\n')
+  const { turns, diag } = resolveSubagentTranscript(mainPath, 'NOPE')
+  expect(turns).toEqual([])          // 旧行为会退回主会话返回非空——此断言锁死新行为
+  expect(diag.derivedExists).toBe(false)
+  expect(diag.derivedTurns).toBe(0)
+  expect(diag.mainTranscriptExists).toBe(true)   // 主文件存在也不读
+  expect(diag.subagentsDirEntries).toContain('agent-AG.jsonl')  // 目录现场仍取证
+})
+
+test('resolveSubagentTranscript: 畸形输入永不抛 + 目录不存在时 listing 为 []', () => {
+  expect(resolveSubagentTranscript('', 'AG').turns).toEqual([])
+  expect(resolveSubagentTranscript(join(dir, 'nope.jsonl'), 'AG').diag.subagentsDirEntries).toEqual([])
+  expect(resolveSubagentTranscript(join(dir, 'x.jsonl'), '').diag.derivedPath).toBeNull()
 })

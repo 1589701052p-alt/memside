@@ -7,7 +7,7 @@ import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun, log
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns, notifications } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns, memoryDegradations, notifications } from '@/db/schema'
 import { markAllNotificationsRead } from '@/memory/store'
 import type { MemoryStatus } from '@/memory/pure'
 import type { ValueClass } from '@/memory/valueFilter'
@@ -159,68 +159,103 @@ test('collector PostToolUse is skipped (no distill, no event, no job, no broadca
   expect(broadcastCalls.length).toBe(0)             // 不 broadcast（连 memory.capture 都不发）
 })
 
-test('collector SubagentStop now enqueues + stores event + broadcasts (subagent distill)', async () => {
-  // 第七轮（本 spec）：SubagentStop 不再早返回。payload 带 agent_id -> 定位 subagent
-  // 自己的文件 -> 单独蒸馏。这里 transcript_path 指向一个 fixture（双路兜底退回它），
-  // 断言 enqueue（带 sourceAgentId）+ 落 event + broadcast。
-  const fixturePath = writeJsonlFixture('sub.jsonl', {
-    type: 'user', message: { role: 'user', content: 'subagent internal turn' },
-  })
+// --- collector SubagentStop（spec 2026-08-15 §5.3）：删主会话兜底 + 取证 degradation ---
+// Task 7：SubagentStop 不再调 loadSubagentTranscript（会退回主会话）改调
+// resolveSubagentTranscript（永不兜底）。turns 非空 -> 入队 + 存 event（旧行为守卫）；
+// turns 空 -> 不入队、不存 event，写一条 subagent_transcript_missing degradation
+// （detail = diag 全字段 + payloadKeys），logDegradation 双写通知。
+test('collector SubagentStop: subagent 文件命中 -> 入队 + 存 event + broadcast（旧行为守卫）', async () => {
+  // 夹具：tmp 目录 main.jsonl + main/subagents/agent-AG.jsonl
+  const subDir = join(dir, 'main', 'subagents')
+  mkdirSync(subDir, { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
+  const subPath = join(subDir, 'agent-AG.jsonl')
+  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT INTERNAL' } }) + '\n')
   const beforeEvents = await db.select().from(memoryDistillEvents)
+  const beforeDeg = await db.select().from(memoryDegradations)
   const r = await req('/hooks/claude/SubagentStop', {
     method: 'POST',
-    body: JSON.stringify({ sourceEventId: 'e3', cwd: '/r', transcript_path: fixturePath, session_id: 'sess-1', agent_id: 'ag-1' }),
+    body: JSON.stringify({ sourceEventId: 'e3', cwd: '/r', transcript_path: mainPath, agent_id: 'AG' }),
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
   await new Promise((res) => setTimeout(res, 50))
-  // enqueue 被调用，且带 sourceAgentId
+  // enqueue 被调且 sourceAgentId='AG'
   expect(enqueueCalls.length).toBe(1)
   expect(enqueueCalls[0]).toMatchObject({ sourceEventId: 'e3', runtime: 'claude-code', cwd: '/r', debounceKey: '/r:SubagentStop' })
-  expect(enqueueCalls[0]!.sourceAgentId).toBe('ag-1')
-  // 落了 event（含 subagent 内部 turn）
+  expect(enqueueCalls[0]!.sourceAgentId).toBe('AG')
+  // 落了 event（含 subagent 内部 turn，不含主会话）
   const events = await db.select().from(memoryDistillEvents)
   expect(events.length).toBe(beforeEvents.length + 1)
-  expect(events[events.length - 1]!.payload).toContain('subagent internal turn')
+  expect(events[events.length - 1]!.payload).toContain('SUBAGENT INTERNAL')
+  expect(events[events.length - 1]!.payload).not.toContain('MAIN SESSION')
+  // 无 degradation 行
+  const afterDeg = await db.select().from(memoryDegradations)
+  expect(afterDeg.length).toBe(beforeDeg.length)
   // broadcast 了 capture
   expect(broadcastCalls.length).toBeGreaterThanOrEqual(1)
 })
 
-test('collector SubagentStop with agent_id hitting subagent file (double-fallback path 1)', async () => {
-  // agent_id 推路径命中真实 subagent 文件 -> 落的 event 含 subagent 内容、不含主会话内容
-  const subDir = join(dir, 'sess-ff', 'subagents')
-  mkdirSync(subDir, { recursive: true })
-  const mainPath = join(dir, 'sess-ff.jsonl')
-  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
-  const subPath = join(subDir, 'agent-ff.jsonl')
-  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUBAGENT-FF' } }) + '\n')
-  await req('/hooks/claude/SubagentStop', {
-    method: 'POST',
-    body: JSON.stringify({ sourceEventId: 'e-ff', cwd: '/r', transcript_path: mainPath, agent_id: 'ff' }),
-    headers: { 'content-type': 'application/json' },
-  })
-  await new Promise((res) => setTimeout(res, 50))
-  const events = await db.select().from(memoryDistillEvents)
-  const last = events[events.length - 1]!
-  expect(last.payload).toContain('SUBAGENT-FF')
-  expect(last.payload).not.toContain('MAIN')
-})
-
-test('collector SubagentStop still acks 202 when enqueue rejects, broadcasts failure', async () => {
-  const bc: unknown[] = []
-  app = createApp({
-    db, adapter, opencodeAdapter,
-    enqueueDistillJob: async () => { throw new Error('SQLITE_BUSY') },
-    broadcast: (m: unknown) => { bc.push(m) },
-  })
+test('collector SubagentStop: 文件缺失 -> 不入队 + subagent_transcript_missing degradation（含取证）+ 通知双写', async () => {
+  // 夹具只有 main.jsonl（无 subagents 目录或无该 agent 文件）
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
+  const beforeEvents = await db.select().from(memoryDistillEvents)
+  const beforeJobs = await db.select().from(memoryDistillJobs)
   const r = await req('/hooks/claude/SubagentStop', {
     method: 'POST',
-    body: JSON.stringify({ sourceEventId: 'e-rej', cwd: '/r', transcript_path: '', agent_id: 'ag' }),
+    body: JSON.stringify({ sourceEventId: 'e-miss', cwd: '/r', transcript_path: mainPath, session_id: 's1', agent_id: 'NOPE' }),
     headers: { 'content-type': 'application/json' },
   })
   expect(r.status).toBe(202)
   await new Promise((res) => setTimeout(res, 50))
-  expect(bc.some((m: any) => m.type === 'memory.enqueue.failed' && m.sourceEventId === 'e-rej')).toBe(true)
+  // 不入队
+  expect(enqueueCalls.length).toBe(0)
+  const afterJobs = await db.select().from(memoryDistillJobs)
+  expect(afterJobs.length).toBe(beforeJobs.length)
+  // 不存 event
+  const afterEvents = await db.select().from(memoryDistillEvents)
+  expect(afterEvents.length).toBe(beforeEvents.length)
+  // memory_degradations 有 kind='subagent_transcript_missing' 且 sessionId='s1'
+  const degs = await db.select().from(memoryDegradations)
+  const miss = degs.find((d) => d.kind === 'subagent_transcript_missing')
+  expect(miss).toBeDefined()
+  expect(miss!.sessionId).toBe('s1')
+  // detail JSON 含 diag 全字段 + payloadKeys；agentId='NOPE'、derivedExists=false
+  const detail = JSON.parse(miss!.detail!)
+  expect(detail.agentId).toBe('NOPE')
+  expect(detail.derivedExists).toBe(false)
+  expect(detail.derivedTurns).toBe(0)
+  expect(detail.transcriptPath).toBe(mainPath)
+  expect(detail.mainTranscriptExists).toBe(true)
+  expect(Array.isArray(detail.subagentsDirEntries)).toBe(true)
+  expect(Array.isArray(detail.payloadKeys)).toBe(true)
+  expect(detail.payloadKeys).toContain('agent_id')
+  // notifications 表新增 kind='degradation'、title='subagent_transcript_missing' 的行
+  const notifs = await db.select().from(notifications)
+  const nd = notifs.find((n) => n.kind === 'degradation' && n.title === 'subagent_transcript_missing')
+  expect(nd).toBeDefined()
+})
+
+test('collector SubagentStop: payload 缺 agent_id -> 同样走 degradation（不再只 console.warn）', async () => {
+  // POST 不带 agent_id
+  const mainPath = join(dir, 'main2.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN2' } }) + '\n')
+  const r = await req('/hooks/claude/SubagentStop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e-noid', cwd: '/r', transcript_path: mainPath, session_id: 's2' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  await new Promise((res) => setTimeout(res, 50))
+  expect(enqueueCalls.length).toBe(0)
+  const degs = await db.select().from(memoryDegradations)
+  const miss = degs.find((d) => d.kind === 'subagent_transcript_missing' && d.sessionId === 's2')
+  expect(miss).toBeDefined()
+  const detail = JSON.parse(miss!.detail!)
+  expect(detail.agentId).toBe('')
+  expect(detail.derivedPath).toBeNull()
 })
 
 test('collector Stop reads session_id and keys the session waiting job by it', async () => {
@@ -773,6 +808,23 @@ test('GET /api/status 全部已读后按类计数归零、latestUnreadLlmError �
   expect(r.body.unreadDegradations).toBe(0)
   expect(r.body.latestUnreadLlmError).toBeNull()
   expect(r.body.unreadNotifications).toBe(0)
+})
+
+// Task 8（spec 2026-08-15 §5.7）：unreadLlmErrors / latestUnreadLlmError 字段名
+// 不变，语义扩为「覆盖 llm_error + parse_error」两类 LLM 类报错——解析失败不再
+// 假扮空产出而漏报。latestUnreadLlmError 取两类中 ts 最新的一条。
+test('GET /api/status: unreadLlmErrors 覆盖 parse_error；latestUnreadLlmError 取两类中最新', async () => {
+  const rows: (typeof notifications.$inferInsert)[] = [
+    { id: 'n-pe1', ts: 1000, kind: 'llm_error', title: 'llm_error', body: 'Connection error.', readAt: null },
+    { id: 'n-pe2', ts: 2000, kind: 'parse_error', title: 'parse_error', body: '不是合法 JSON：x', readAt: null },
+  ]
+  for (const row of rows) await db.insert(notifications).values(row)
+
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.unreadLlmErrors).toBe(2)
+  expect(r.body.latestUnreadLlmError).toEqual({ body: '不是合法 JSON：x', ts: 2000 })
+  expect(r.body.unreadNotifications).toBe(2)
 })
 
 test('GET /api/status 聚合语义不变：24h 外的 run 不计入 distillRuns', async () => {
