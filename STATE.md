@@ -1,5 +1,72 @@
 # STATE.md - memside 构建状态
 
+## 记忆批量删除（回收站）+ 导出/导入 + 多选批量操作（2026-08-16，Spec A）
+
+商用前记忆管理层补齐四块能力。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-08-16-memory-portability-and-batch-ops*`
+（双 spec 分解的 **Spec A**；**Spec B（npm 包 + exe + 安装器一键发布）** 待后续独立头脑风暴）。
+
+1. **回收站机制**（`src/db/schema.ts` + `client.ts`）：新增 `memory_trash` 表
+   （沿用 `memory_discards` 审计表模式，幂等迁移）。删除 = 单事务内 `DELETE memories`
+   + `INSERT memory_trash` 快照（删 memory 真删，快照留 trash）；恢复 = 反序列化
+   snapshot → `importMemories(skip)` 写回（保留 status 高保真）→ 删 trash 行（仅当
+   实际写入时删，skip 冲突保留快照可重试）；清空 = `DELETE FROM memory_trash` 全表
+   物理删（不可恢复）。
+2. **trash 快照纯函数**（`src/memory/trash.ts`）：`snapshotMemory`/`restoreFromSnapshot`
+   全字段往返，schema 演进容错（缺字段回 null，永不抛）。
+3. **exchange 纯函数**（`src/memory/exchange.ts`）：memside JSON 高保真
+   （`{format,version,exportedAt,memories}` envelope + 逐条 zod 式校验，非法跳过计
+   errors）+ Markdown 低保真（`## [category:xxx]` 小节 + 元信息列表，`---` 分隔，
+   bodyMd 含 `---` 不误切）+ `detectExchangeFormat` 自动识别（JSON.parse 成功且
+   format 匹配 → json，否则 markdown 兜底）。
+4. **store 层**（`src/memory/store.ts`）：`bulkDeleteMemories`（逐条事务删+写 trash，
+   吞错计 skipped，幂等）/`restoreFromTrash`（默认 skip 冲突）/`emptyTrash`/
+   `importMemories`（高保真 seam：绕过 createCandidate 的 status:'candidate' 硬编码，
+   三冲突策略 skip/overwrite/newid，load-bearing writeId 逻辑
+   `conflict==='newid'?ulid():rec.id`）/`listMemoriesForExport`（三档 scope，无分页）/
+   `listTrashPage`/`listTrashFacets`/`getTrash`/`TrashRow`。
+5. **server 7 路由**（`src/server.ts`）：`POST /api/memories/bulk-delete`、
+   `GET/POST /api/trash`（列表分页+筛选 / 详情 / 恢复 / 清空）、
+   `POST /api/memories/export`（scope selected|filter|all × format json|markdown，
+   markdown 走 Content-Disposition 下载）、`POST /api/memories/import`（multipart
+   `parseBody`，格式自动识别，JSON→importMemories/MD→createCandidate 循环，条数 cap
+   10000）。`/api/status` 加 `trashCount`。导入路由合并 parseMemoriesJson 的 parse
+   errors 进响应 errors。
+6. **Web UI**（`src/web/App.tsx` + `api.ts` + `tab-cache.ts`）：新增「回收站」tab
+   （第 8 个，计数徽标 + TrashCard + 恢复/清空 + 空态，暂不接筛选条 follow-up）；
+   记忆三 tab 多选（per-tab `selectedIds` + MemoryCard checkbox + 批量操作条
+   `MemoryBatchBar`：批量批准/拒绝/归档/取消归档/恢复/删除）；导出入口
+   （ExportTrigger：选中/当前筛选/全部 × JSON/MD，`scope:'filter'` 透传 filter+statuses
+   `project→sourceCwd` 映射，浏览器 Blob 下载）；导入入口（ImportTrigger：文件上传 +
+   三冲突策略选择）。`bulkDelete`/`emptyTrash` api wrapper 检 res.ok 失败抛错，
+   UI 层 try/catch + setError 横幅（CLAUDE.md 错误可见性）。
+
+执行：subagent-driven（10 实现 task + 1 fix wave 各 implementer + reviewer；终审 opus
+whole-branch review verdict=FIX BEFORE MERGE → 1 Important + 5 Minor 一轮 fix wave 全
+修后 scoped re-review 全绿 ADDRESSED）。`bun run typecheck && bun test` 1060/1060
+全绿（2914 expects，91 文件；基线 980 → +80 测试）。无新依赖（multipart 用 Hono
+parseBody；Blob 下载用浏览器原生；ULID 复用现有）。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. 回收站使用频率（删除/恢复/清空计数）——验证回收站是否缓解"删不掉"痛点；
+2. 导出格式偏好（JSON vs Markdown 比例）+ 导出 scope 分布（选中/筛选/全部）；
+3. 导入冲突策略选择分布（skip/overwrite/newid）+ 导入 errors 占比（衡量导入文件质量）；
+4. 批量操作是否被采用（vs 逐条 approve/reject）——批量删除是否进回收站而非误以为是硬删；
+5. 大表导出内存峰值（live DB 3000+ 条，YAGNI 未做流式，观测是否需升级）。
+
+### 终审 deferred minor（非阻塞，建议 follow-up issue）
+
+1. `emptyTrash` COUNT+DELETE 非事务（emptied 计数竞态下可能不准；emptied 未在 UI 展示，低危）。
+2. `changeFilter` trash 分支 `(tab as TabKey) === 'trash'` cast 无 inline NOTE（dead code
+   因 trash 不在 isFilterTab；接 trash 筛选条时可去 cast）。
+3. `listTrashFacets` 已导出但未接线（trash tab 无筛选 UI；未来接 trash 筛选时复用）。
+4. `rowToTrash`/`listTrashPage` conds 的 `any` cast（pre-existing store.ts 模式，非本次引入）。
+5. 回收站 tab 暂不接四维筛选条（discards 同模式两维）；`listTrashPage`/`listTrashFacets`
+   已就绪待 UI。
+6. 批量 approve/reject/archive/unarchive/restore 逐条 N 次 round-trip（仅 bulkDelete 用
+   批量端点）；大选中慢，v1 接受，后续可加批量端点。
+
 ## 蒸馏解析失败可视化 + subagent 兜底治理（2026-08-15）
 
 设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-15-distill-parse-error-visibility*`。
