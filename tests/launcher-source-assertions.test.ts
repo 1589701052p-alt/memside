@@ -40,6 +40,35 @@ test('assets.ts 走 manifest 回退路径（Ruling-C），不含 directory impor
   }
 })
 
+/**
+ * Spec B 接缝 3 兜底断言。launcher 无法被 `bun test` 真正编译实跑（需
+ * `bun build --compile`），故靠源码层文本断言锁接线：必须调 startDaemon
+ * （含 serveStaticAssets）、installOpencodePlugin（含 files）、loadEmbeddedAssets
+ * （Task 4 统一资产对象，Ruling-A/B 废弃 brief 的动态 import 插件块）、
+ * findPortHolders（port-check 复用）。任一 token 缺失即红，防止未来 refactor
+ * 误断 launcher 的启动链路。
+ */
+test('src/exe/launcher.ts 存在并接线启动链路（Ruling-A/B 统一资产对象）', () => {
+  const p = join(exeDir, 'launcher.ts')
+  expect(existsSync(p)).toBe(true)
+  const src = readFileSync(p, 'utf-8')
+  expect(src).toContain('startDaemon')
+  expect(src).toContain('serveStaticAssets')
+  expect(src).toContain('installOpencodePlugin')
+  expect(src).toContain('files')
+  expect(src).toContain('loadEmbeddedAssets')
+  expect(src).toContain('findPortHolders')
+  // Ruling-A/B：插件资产从统一对象取，不得复活 brief 的动态 import 插件源块。
+  // 仅锁 import 行（注释里的措辞不算），与 assets.ts 的 directory-import 锁法一致。
+  const importLines = src.split('\n').filter((l) => /^\s*import\b/.test(l))
+  for (const l of importLines) {
+    expect(l).not.toMatch(/@ts-expect-error/)
+    expect(l).not.toMatch(/opencode-plugin\/memside\.js/)
+  }
+  // 整源不得有动态 import() 插件源（brief 的废弃写法）。
+  expect(src).not.toMatch(/import\(['"].*opencode-plugin\/memside\.js['"]\)/)
+})
+
 test('manifest.ts 由 gen-manifest.ts 生成并含四段资产', () => {
   const p = join(exeDir, 'manifest.ts')
   expect(existsSync(p)).toBe(true)
