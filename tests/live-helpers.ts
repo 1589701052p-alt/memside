@@ -105,10 +105,11 @@ export function makeFixture(): TranscriptTurn[] {
 }
 
 /**
- * 大输入 fixture（spec §3.3）：~360 turn / ~12K tokens。
- * 模拟长寿会话：大量 assistant rationale + tool turn + 明确可提炼规则。
- * 用于 live e2e 逼出真实路径（124 tokens 的小 fixture 测不出 empty_output/parse_error）。
- * 含明确业务规则确保模型应产出 ≥1 候选（非 empty_output）。
+ * 大输入 fixture（spec §3.3）：~100K tokens，模拟生产长寿会话规模。
+ * 生产失败的 distill 输入是 63K tokens（1119 turn / 988KB），小输入测不出
+ * empty_output/parse_error 真实路径。本 fixture 刻意拉到 ~100K tokens（超过生产
+ * 失败的 63K），逼出「大输入 + 长生成」下模型返回空字符串的真实故障路径。
+ * 含明确业务规则确保模型在能消化时应有产出（用于区分「模型判无记忆」vs「输入太大返回空」）。
  */
 export function makeLargeFixture(): TranscriptTurn[] {
   const turns: TranscriptTurn[] = []
@@ -116,12 +117,12 @@ export function makeLargeFixture(): TranscriptTurn[] {
   turns.push({ role: 'user', content: 'Team rule: all deployments must pass the smoke test before promote to production. No exceptions.' })
   turns.push({ role: 'assistant', content: 'Understood. Deployments require a passing smoke test before production promote; I will enforce this gate.' })
   turns.push({ role: 'thinking', content: 'The smoke-test-before-promote rule is a hard deployment invariant the user stated explicitly.' })
-  // 中段：大量 rationale + tool（模拟长寿会话，撑大输入）
-  for (let i = 0; i < 90; i++) {
-    turns.push({ role: 'assistant', content: `Investigating step ${i}: I am checking the deployment config and reviewing the test output to confirm the gate is wired correctly. The smoke test must run against the staging endpoint before any promote action is taken, and the result must be a clean pass.` })
+  // 中段：大量 rationale + tool（模拟长寿会话，撑到 ~100K tokens，超生产失败规模）
+  for (let i = 0; i < 750; i++) {
+    turns.push({ role: 'assistant', content: `Investigating step ${i}: I am checking the deployment config and reviewing the test output to confirm the gate is wired correctly. The smoke test must run against the staging endpoint before any promote action is taken, and the result must be a clean pass before I proceed.` })
     turns.push({ role: 'assistant', content: '[tool:Bash]', toolName: 'Bash', toolCall: `{"command":"kubectl get deploy -n staging","description":"check staging deploy"}` })
-    turns.push({ role: 'tool', content: `NAME READY STATUS\napp-${i} 1/1 Running\ncheck-${i} 1/1 Running`, toolName: 'Bash' })
-    turns.push({ role: 'thinking', content: `The staging deploy ${i} is ready. The smoke test gate is in place. Before any promote I must confirm the smoke test passed.` })
+    turns.push({ role: 'tool', content: `NAME READY STATUS\napp-${i} 1/1 Running\ncheck-${i} 1/1 Running\ngateway-${i} 2/2 Running`, toolName: 'Bash' })
+    turns.push({ role: 'thinking', content: `The staging deploy ${i} is ready. The smoke test gate is in place. Before any promote I must confirm the smoke test passed and the config is valid.` })
   }
   // 收尾：另一条明确规则（确保多候选）
   turns.push({ role: 'user', content: 'Also: the rollback window is 30 minutes after promote. Past that, escalate to on-call instead of auto-rollback.' })
