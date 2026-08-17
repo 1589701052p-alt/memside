@@ -1,5 +1,31 @@
 # STATE.md - memside 构建状态
 
+## 运行环境自定义路径配置（2026-08-17，商用 codeagent 适配）
+
+商用适配：codeagent（claude code fork，读 `~/.cac/setting.json`）等公司内部 agent 配置路径与官方不同，原 `installHooks` 硬编码 `~/.claude/settings.json` → hooks 到不了 codeagent → capture/inject 整个闭环断（STATE 2026-07-23 codeagent 桥接遗留第 5 点，标记「决定产品能否闭环」）。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-08-17-runtime-path-config*`。
+
+1. **`RuntimePaths`**（`src/settings.ts`）：三字段（claudeDir/settingsFilename/opencodeDir）落 `app_settings`，缺失回默认（`~/.claude`/`settings.json`/`~/.config/opencode`，与 install.ts/creds.ts 既有默认逐字一致）。字段级合并 save（空串=回默认）。`loadRuntimePaths` 返回前统一 `expandTilde`——`~`-前缀 claudeDir 展开为绝对路径（final review IF-1：daemon/CLI 透传 `~`-前缀路径给 installHooks 会 `mkdirSync('~/.cac')` 建字面 `~` 目录 → 闭环静默断；统一在 loadRuntimePaths 展开让三处消费者都拿绝对路径，server 端点既有展开保留作 belt-and-suspenders）。
+2. **`installHooks` + `uninstallHooks`**（`src/install.ts`）：`InstallOpts` 加 `settingsFilename?`（default `settings.json`，codeagent 用 `setting.json`）；`settingsPath = join(baseDir, settingsFilename ?? 'settings.json')`。新增 `uninstallHooks`——install 的 idempotent-merge 对偶，按 `MEMSIDE_TAG` marker 移除 memside-managed 组（保留用户自写 hook），返回 `{removed, settingsPath}`，文件不存在/malformed 返回 `removed:0` 不抛；`removed===0` 时早返回不写盘（避免重格式化用户 settings.json）。
+3. **daemon/CLI 透传**（`src/daemon.ts` + `src/cli.ts`）：`startDaemon(installClaudeHooks:true)` 与 `memside install` 读 `loadRuntimePaths(db)` 透传 baseDir + settingsFilename；存储异常 try/catch 降级默认路径（CLI 对齐 daemon，db 句柄 finally close），零回归（首次启动未配置 → `~/.claude/settings.json`）。start-and-install 分支不动（hooks 安装由 startDaemon 内部读配置完成，不重复）。CLI install 日志改打实际路径（`rp.claudeDir/rp.settingsFilename`）。
+4. **server 4 端点**（`src/server.ts`）：`GET/PUT /api/settings/runtime`（路径读写 + 默认对照，PUT 非字符串 400）+ `POST /api/settings/runtime/{install,uninstall}`（读已存路径调 installHooks/uninstallHooks，~ 展开，失败 `{ok:false,error}` 不静默，HTTP 200 业务结果）。`AppDeps` 加可选 `port?` + `installHooksFn?`/`uninstallHooksFn?` 注入点（测试不碰真实 ~/.claude）。
+5. **Web UI**（`src/web/App.tsx` + `api.ts`）：设置 tab 第三 section `RuntimeSettings`——三路径输入框（默认值 placeholder）+ 保存/安装/卸载按钮 + 错误行 + codeagent 用法提示文案。`saveRuntimeSettings` 检 `!res.ok` 抛错（对齐 saveJudgeConfig，让 onSave try/catch 显 msg）。`opencodeDir` 本次存而不用（安装/卸载按钮只管 claude hooks；opencode 安装走 CLI/launcher）。
+
+执行：subagent-driven（6 实现 task + 1 final whole-branch review + 1 fix wave）。`bun run typecheck && bun test` 1119 pass / 4 skip / 0 fail（基线 1112 → +7 测试：6 实现测试 + 2 IF-1 回归 - 1 合并）。无新依赖。
+
+### final review deferred minor（非阻塞，已 triage）
+
+1. daemon 降级路径用 `homedir()` 而非 `defaultRuntimePaths()` 的 `resolveHome()` 优先链——仅在 DB 读异常极少路径触发，生产环境等价；未来 export `resolveHome` 复用可彻底消漂移（defer-to-followup）。
+2. `tests/settings.test.ts`/`settings-runtime-api.test.ts`/`app-source-assertions.test.ts` 个别 brief-mandated verbatim 的 dead/未用 import 已在 fix wave 清理；剩余 type-only import（编译期剥离，零运行时影响）dismiss。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. codeagent 用户配 `~/.cac/setting.json` 后点「安装 hooks」→ SessionStart/Stop 是否真的触发（daemon 侧日志 + 新 distill job 出现）。
+2. **daemon 重启后自动装到 `~/.cac/setting.json`**（spec §4.2 核心承诺；IF-1 修复点）——重启后无需再点安装，codeagent 仍能读到 hooks。
+3. codeagent 闭环端到端跑通（capture → distill → approve → inject），参考 2026-07-31 opencode live smoke 模式。
+4. 「卸载 hooks」后 codeagent 是否停止触发 memside（无新 capture）；用户自写 hook 是否保留。
+5. 部门 API（UI 配 LlmSettings）在 codeagent 环境是否 distill 成功。
+
 ## 成品发布：npm 包 + Windows exe + NSIS 安装器 + GHA 发版（2026-08-17，Spec B）
 
 把 memside 从"clone 仓库才能用"变成一键安装。设计 spec / 计划见
