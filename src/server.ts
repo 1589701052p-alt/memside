@@ -39,6 +39,13 @@ export interface AppDeps {
    * `GET /` 返回 index.html、`/assets/*` 走 serveStatic；不提供时行为与
    * 之前完全一致（vite dev 模式走 5173，不需要 daemon 托管）。 */
   staticDir?: string
+  /** 内存静态资产（exe 编译模式）：命中时 GET / 与 /assets/* 从内存返回，不读盘。
+   * 与 staticDir 互斥；同时传时 staticAssets 优先。dev/npm 用 staticDir 走磁盘。 */
+  staticAssets?: {
+    indexHtml: string
+    /** key 是相对 staticDir 的路径（如 'assets/index-abc.js'）。 */
+    assets: Record<string, Uint8Array>
+  }
   /** LLM 设置端点的注入点（均可选，缺省走真实实现；测试注入假实现，
    * 不碰真实 ~/.claude 与网络）。 */
   loadUiConfig?: () => UiLlmConfig | null
@@ -52,6 +59,18 @@ export interface AppDeps {
   callLLM?: LLMCall
   /** LLM 实时活动跟踪器（spec 2026-08-12 §5.7）：scheduler 置位，status 读出。 */
   tracker?: ActivityTracker
+}
+
+/** 扩展名→MIME 映射（内存静态资产用）。不引 mime 依赖，覆盖 vite dist 产物类型。 */
+function mimeFor(path: string): string {
+  if (path.endsWith('.js')) return 'text/javascript; charset=utf-8'
+  if (path.endsWith('.css')) return 'text/css; charset=utf-8'
+  if (path.endsWith('.html')) return 'text/html; charset=utf-8'
+  if (path.endsWith('.svg')) return 'image/svg+xml'
+  if (path.endsWith('.json')) return 'application/json; charset=utf-8'
+  if (path.endsWith('.png')) return 'image/png'
+  if (path.endsWith('.ico')) return 'image/x-icon'
+  return 'application/octet-stream'
 }
 
 /**
@@ -1002,7 +1021,21 @@ export function createApp(deps: AppDeps) {
   // --- Static hosting (one-click launch, production mode) ------------------
   // 注册在末尾：具名路由（/api/*、/inject、/hooks/*）先匹配，静态处理只在
   // 未命中时介入，不会抢占 API（与 CLAUDE.md 的 vite proxy 陷阱同类问题）。
-  if (deps.staticDir) {
+  // staticAssets（内存，exe 编译模式）优先于 staticDir（磁盘，dev/npm）——互斥；
+  // 同时传时 staticAssets 生效，staticDir 分支不注册。
+  if (deps.staticAssets) {
+    const a = deps.staticAssets
+    app.get('/', (c) => c.html(a.indexHtml))
+    app.get('/assets/*', (c) => {
+      const rel = c.req.path.replace(/^\//, '')          // 'assets/x.js'
+      const body = a.assets[rel]
+      if (!body) return c.notFound()
+      // a.assets 声明为 Uint8Array（ArrayBufferLike）；BodyInit 需要
+      // Uint8Array<ArrayBuffer>，运行时两者同为 TypedArray 可直接传给 Response，
+      // 这里仅做类型收窄。
+      return new Response(body as BodyInit, { headers: { 'content-type': mimeFor(rel) } })
+    })
+  } else if (deps.staticDir) {
     app.get('/', serveStatic({ path: join(deps.staticDir, 'index.html') }))
     app.use('/assets/*', serveStatic({ root: deps.staticDir }))
   }

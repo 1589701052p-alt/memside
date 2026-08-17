@@ -1,0 +1,62 @@
+# Spec B 接缝 7：tag 发版。打 v* tag 触发：windows job 产 exe+安装器挂 Release，
+# ubuntu job npm publish。两 job 独立（npm 包无依赖 exe，串行简化编排）。
+name: release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}  # 手动触发便于调试
+
+permissions:
+  contents: write  # 发 GitHub Release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run build:exe      # dist/memside.exe（package.json build:exe 内部已含 vite build + gen-manifest + compile）
+      - uses: crazy-max/ghaction-chocolatey@v3
+        with:
+          args: install nsis -y
+      - name: Install EnVar NSIS plugin  # choco nsis 不带 EnVar 第三方插件，installer.nsi 依赖 EnVar:: 调用
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nsisDir = 'C:\Program Files (x86)\NSIS'
+          if (-not (Test-Path "$nsisDir")) { throw "NSIS dir not found: $nsisDir" }
+          $zip = "$env:TEMP\EnVar-Plugin.zip"
+          Invoke-WebRequest -Uri 'https://github.com/GsNSIS/EnVar/releases/download/v0.3.1/EnVar-Plugin.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $nsisDir -Force
+          if (-not (Test-Path "$nsisDir\Plugins\x86-unicode\EnVar.dll")) { throw "EnVar.dll missing after extract" }
+          Write-Host "EnVar plugin installed to $nsisDir\Plugins\x86-unicode\EnVar.dll"
+      - run: bun run build:installer  # installer/memside-setup.exe（makensis 读 installer/installer.nsi）
+        working-directory: ${{ github.workspace }}
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/memside.exe
+            installer/memside-setup.exe
+          generate_release_notes: true
+
+  publish-npm:
+    runs-on: ubuntu-latest
+    needs: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - uses: actions/setup-node@v4
+        with:
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # prepublishOnly（package.json）已在 publish 前跑 bun run build，dist 新鲜。
