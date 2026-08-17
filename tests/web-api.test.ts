@@ -5,6 +5,7 @@ import {
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, bulkRejectUnevaluated, WEB_PAGE_SIZE,
   getFacets, UNEVALUATED,
   listNotificationsPage, markNotificationRead, markAllNotificationsRead, type MemsideStatus, type FetchLike,
+  getRuntimeSettings, saveRuntimeSettings, installRuntimeHooks, uninstallRuntimeHooks,
 } from '@/web/api'
 
 // Locks the web API client contract (Task 15). The React component itself is
@@ -406,4 +407,53 @@ test('MemsideStatus 新字段类型存在（编译期锁定）', () => {
     unreadNotifications: 3,
   }
   expect(s.unreadNotifications).toBe(3)
+})
+
+// --- Task 5 (runtime-path-config): /api/settings/runtime* client ---------------
+// Locks the web API contract for the runtime path settings endpoints (Task 3
+// server): GET/PUT /api/settings/runtime + POST install/uninstall. Uses the same
+// fake-fetch pattern as the other wrapper tests.
+
+test('getRuntimeSettings returns defaults shape', async () => {
+  const fake: FetchLike = async () => new Response(JSON.stringify({
+    claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode',
+    defaults: { claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode' },
+  }), { status: 200 })
+  const r = await getRuntimeSettings(fake)
+  expect(r.claudeDir).toBe('/h/.claude')
+  expect(r.defaults.settingsFilename).toBe('settings.json')
+})
+
+test('saveRuntimeSettings PUTs patch + returns updated state', async () => {
+  let captured: any = null
+  const fake: FetchLike = async (url, init) => {
+    captured = { url, init }
+    return new Response(JSON.stringify({
+      claudeDir: '/h/.cac', settingsFilename: 'setting.json', opencodeDir: '/h/.config/opencode',
+      defaults: { claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode' },
+    }), { status: 200 })
+  }
+  const r = await saveRuntimeSettings({ claudeDir: '/h/.cac', settingsFilename: 'setting.json' }, fake)
+  expect(captured.init?.method).toBe('PUT')
+  expect(r.claudeDir).toBe('/h/.cac')
+})
+
+test('installRuntimeHooks POSTs install + returns ok shape', async () => {
+  let captured: any = null
+  const fake: FetchLike = async (url, init) => {
+    captured = { url, init }
+    return new Response(JSON.stringify({ ok: true, settingsPath: '/h/.cac/setting.json' }), { status: 200 })
+  }
+  const r = await installRuntimeHooks(fake)
+  expect(captured.init?.method).toBe('POST')
+  expect(captured.url).toContain('/api/settings/runtime/install')
+  expect(r.ok).toBe(true)
+  expect(r.settingsPath).toBe('/h/.cac/setting.json')
+})
+
+test('uninstallRuntimeHooks POSTs uninstall + returns removed shape', async () => {
+  const fake: FetchLike = async () => new Response(JSON.stringify({ ok: true, removed: 5, settingsPath: '/x/setting.json' }), { status: 200 })
+  const r = await uninstallRuntimeHooks(fake)
+  expect(r.ok).toBe(true)
+  expect(r.removed).toBe(5)
 })
