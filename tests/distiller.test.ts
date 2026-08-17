@@ -606,3 +606,46 @@ test('parseError 回归锁: 合法 {"candidates":[]} 真空 -> parseError=null�
   expect(threw.parseError).toBeNull()
   expect(threw.lastRawText).toBeNull()
 })
+
+// --- 空字符串归类（spec 2026-08-17 §3.1）：空/纯空白 = 无产出（empty_output），非 parse_error ---
+
+test('空字符串返回 -> parseError null（归 empty_output 非 parse_error，spec §3.1）', async () => {
+  const { distillTranscript } = await import('@/memory/distiller')
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'team rule: refunds within 14 days' }],
+    runtime: 'claude-code',
+    cwd: '/test',
+    existingSlugs: [],
+    callLLM: async () => '',   // 模型返回空字符串
+  })
+  expect(result.candidates).toEqual([])
+  expect(result.callThrew).toBe(false)
+  expect(result.parseError).toBe(null)   // 空字符串 = 无产出，非解析失败
+  expect(result.lastRawText).toBe('')   // 空字符串落盘
+})
+
+test('纯空白返回 -> parseError null（归 empty_output）', async () => {
+  const { distillTranscript } = await import('@/memory/distiller')
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'team rule: refunds within 14 days' }],
+    runtime: 'claude-code',
+    cwd: '/test',
+    existingSlugs: [],
+    callLLM: async () => '   \n  \t ',   // 纯空白
+  })
+  expect(result.parseError).toBe(null)
+  expect(result.candidates).toEqual([])
+})
+
+test('半个坏 JSON -> parseError 非空（仍 parse_error，spec §3.1）', async () => {
+  const { distillTranscript } = await import('@/memory/distiller')
+  const result = await distillTranscript({
+    turns: [{ role: 'user', content: 'team rule: refunds within 14 days' }],
+    runtime: 'claude-code',
+    cwd: '/test',
+    existingSlugs: [],
+    callLLM: async () => '{"candidates":[{"title":"x"',   // 截断的坏 JSON
+  })
+  expect(result.parseError).not.toBe(null)   // 真坏 JSON 仍归 parse_error
+  expect(result.candidates).toEqual([])
+})
