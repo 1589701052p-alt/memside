@@ -1,6 +1,7 @@
 {
   "name": "@memside-h/memside",
   "version": "0.1.0",
+  "license": "MIT",
   "private": false,
   "files": ["src", "opencode-plugin", "tsconfig.json"],
   "publishConfig": {
