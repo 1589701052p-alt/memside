@@ -32,7 +32,7 @@ const PORT = Number(process.env.MEMSIDE_PORT ?? 7777)
 const pluginSrcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'opencode-plugin')
 
 if (cmd === 'start') {
-  await startDaemon({ port: PORT, installClaudeHooks: false })
+  await startDaemon({ port: PORT, installClaudeHooks: false, opencodePluginSource: { srcDir: pluginSrcDir } })
   console.log(`memside daemon on http://127.0.0.1:${PORT}`)
 } else if (cmd === 'install') {
   // N-2: read configured runtime paths, degrading to defaults on any DB error
@@ -50,7 +50,7 @@ if (cmd === 'start') {
   // N-1: log the actual resolved path rather than a hardcoded ~/.claude placeholder.
   console.log(`hooks installed into ${join(rp.claudeDir, rp.settingsFilename)}; opencode plugin installed into ~/.config/opencode/`)
 } else if (cmd === 'start-and-install') {
-  await startDaemon({ port: PORT, installClaudeHooks: true })
+  await startDaemon({ port: PORT, installClaudeHooks: true, opencodePluginSource: { srcDir: pluginSrcDir } })
   installOpencodePlugin({ port: PORT, pluginSrcDir })
   console.log(`memside daemon on http://127.0.0.1:${PORT} (hooks installed; opencode plugin installed)`)
 } else {

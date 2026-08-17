@@ -59,6 +59,7 @@ async function main(): Promise<void> {
     port: PORT,
     installClaudeHooks: true,
     serveStaticAssets: { indexHtml: ea.indexHtml, assets: ea.assets },
+    opencodePluginSource: { files: { 'memside.js': ea.pluginJs, 'package.json': ea.pluginPkg } },
   })
   installOpencodePlugin({
     port: PORT,
