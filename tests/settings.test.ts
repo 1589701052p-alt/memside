@@ -5,6 +5,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openDb } from '../src/db/client'
+import { appSettings } from '../src/db/schema'
 import { maskToken, loadUiLlmConfig, saveUiLlmConfig } from '../src/settings'
 
 function tmpDb() {
@@ -72,4 +73,55 @@ test('clear:true 连带删除 protocol', () => {
   saveUiLlmConfig(db, { token: 'sk-abcdefghijklmn', protocol: 'openai' })
   saveUiLlmConfig(db, { clear: true })
   expect(loadUiLlmConfig(db)).toBeNull()
+})
+
+import { loadRuntimePaths, saveRuntimePaths, defaultRuntimePaths, type RuntimePaths } from '../src/settings'
+
+test('defaultRuntimePaths: 三字段默认值（claudeDir ~/.claude / settings.json / opencode ~/.config/opencode）', () => {
+  const d = defaultRuntimePaths()
+  expect(d.settingsFilename).toBe('settings.json')
+  expect(d.claudeDir.endsWith('.claude')).toBe(true)
+  expect(d.opencodeDir.endsWith(join('.config', 'opencode'))).toBe(true)
+})
+
+test('loadRuntimePaths: 未配置返回全默认', () => {
+  const db = tmpDb()
+  expect(loadRuntimePaths(db)).toEqual(defaultRuntimePaths())
+})
+
+test('save+load RuntimePaths: 三字段写入后读回', () => {
+  const db = tmpDb()
+  saveRuntimePaths(db, { claudeDir: '/home/u/.cac', settingsFilename: 'setting.json', opencodeDir: '/home/u/.config/opencode' })
+  expect(loadRuntimePaths(db)).toEqual({
+    claudeDir: '/home/u/.cac', settingsFilename: 'setting.json', opencodeDir: '/home/u/.config/opencode',
+  })
+})
+
+test('RuntimePaths 字段级合并: 部分提供保持其余', () => {
+  const db = tmpDb()
+  saveRuntimePaths(db, { claudeDir: '/x/.cac', settingsFilename: 'setting.json', opencodeDir: '/x/.config/opencode' })
+  saveRuntimePaths(db, { settingsFilename: 'other.json' }) // 只改文件名
+  expect(loadRuntimePaths(db)).toEqual({
+    claudeDir: '/x/.cac', settingsFilename: 'other.json', opencodeDir: '/x/.config/opencode',
+  })
+})
+
+test('RuntimePaths 空串 = 回默认（删该 key）', () => {
+  const db = tmpDb()
+  saveRuntimePaths(db, { claudeDir: '/x/.cac', settingsFilename: 'setting.json' })
+  saveRuntimePaths(db, { claudeDir: '', settingsFilename: '' }) // 空串删
+  const got = loadRuntimePaths(db)
+  expect(got.claudeDir).toBe(defaultRuntimePaths().claudeDir)
+  expect(got.settingsFilename).toBe('settings.json')
+})
+
+test('RuntimePaths 脏数据（非字符串）回默认不抛', () => {
+  const db = tmpDb()
+  // 直接往 app_settings 写非法值（绕过 saveRuntimePaths 的类型约束）
+  db.insert(appSettings).values({ key: 'runtime.claude_dir', value: '123', updatedAt: 0 }).run()
+  db.insert(appSettings).values({ key: 'runtime.settings_filename', value: '', updatedAt: 0 }).run()
+  const got = loadRuntimePaths(db)
+  // 123 是字符串 -> 原样用；空串 -> 回默认
+  expect(got.claudeDir).toBe('123')
+  expect(got.settingsFilename).toBe('settings.json')
 })
