@@ -1,12 +1,21 @@
-import { test, expect } from 'bun:test'
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { test, expect, afterEach } from 'bun:test'
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { assembleAssets, loadEmbeddedAssets, type Manifest } from '@/exe/assets'
+import { assembleAssets, type Manifest } from '@/exe/assets'
 
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const exeDir = join(srcDir, 'exe')
+
+// code-review finding：mkdtempSync 测试泄漏 tmp 目录。afterEach 清理本轮创建的 tmp 目录。
+let createdTmpRoot: string | null = null
+afterEach(() => {
+  if (createdTmpRoot) {
+    try { rmSync(createdTmpRoot, { recursive: true, force: true }) } catch { /* best-effort */ }
+    createdTmpRoot = null
+  }
+})
 
 /**
  * Spec B 接缝 4 兜底断言。launcher 无法被 `bun test` 真正编译实跑（需
@@ -93,6 +102,7 @@ test('manifest.ts 由 gen-manifest.ts 生成并含四段资产', () => {
 test('assembleAssets() 装配统一对象，字节级匹配自造 fixture（自给自足，不读磁盘 dist）', () => {
   // 自造 tmp 目录 + fixture（不跑 gen-manifest，不读磁盘 dist）。
   const tmpRoot = mkdtempSync(join(tmpdir(), 'memside-asset-'))
+  createdTmpRoot = tmpRoot
   const tmpIndex = join(tmpRoot, 'index.html')
   const tmpAssetsDir = join(tmpRoot, 'assets')
   const tmpJs = join(tmpAssetsDir, 'x.js')
@@ -122,8 +132,7 @@ test('assembleAssets() 装配统一对象，字节级匹配自造 fixture（自�
 
   const ea = assembleAssets(manifest)
 
-  // index.html 文本透传
-  expect(ea.indexHtml).toBe(manifest.INDEX_HTML)
+  // index.html 文本透传（manifest.INDEX_HTML 已 = indexHtmlContent，去重为一条断言）
   expect(ea.indexHtml).toBe(indexHtmlContent)
 
   // assets：base64 解码为 Uint8Array，字节级匹配 tmp 原始字节（含非 ASCII）
@@ -140,12 +149,11 @@ test('assembleAssets() 装配统一对象，字节级匹配自造 fixture（自�
   expect(decodedBack).toContain('🌍')
 
   // pluginJs：透传 + 含端口占位（installOpencodePlugin 烘焙依赖）
-  expect(ea.pluginJs).toBe(manifest.PLUGIN_JS)
   expect(ea.pluginJs).toBe(pluginJsContent)
   expect(ea.pluginJs).toContain('__MEMSIDE_PORT__')
 
   // pluginPkg：JSON 文本字符串（非解析对象），写盘前可 JSON.parse
-  expect(ea.pluginPkg).toBe(manifest.PLUGIN_PKG)
+  expect(ea.pluginPkg).toBe(pluginPkgContent)
   expect(typeof ea.pluginPkg).toBe('string')
   expect(JSON.parse(ea.pluginPkg).name).toBe('memside-opencode')
 })
@@ -156,7 +164,9 @@ test('assembleAssets() 装配统一对象，字节级匹配自造 fixture（自�
  * 状态（缓存、随机、时间戳、磁盘读取）破坏确定性。fixture 用已知常量，**不读磁盘**。
  */
 test('assembleAssets() 纯函数性：相同 manifest 两次调用输出逐字 / 逐字节相等', () => {
-  const manifest: Manifest = {
+  // code-review finding：两个独立 manifest 对象（深拷贝），防 assembleAssets 改输入时
+  // 两次调用共享引用互相污染——同一对象引用测不出 input mutation。
+  const baseManifest: Manifest = {
     INDEX_HTML: '<html>FIXTURE</html>',
     ASSET_FILES: [
       ['assets/a.js', Buffer.from('console.log(1)').toString('base64')],
@@ -166,17 +176,24 @@ test('assembleAssets() 纯函数性：相同 manifest 两次调用输出逐字 /
     PLUGIN_JS: 'const P = "__MEMSIDE_PORT__";',
     PLUGIN_PKG: '{"name":"memside-opencode"}',
   }
+  // 深拷贝两份独立输入（结构化克隆 ASSET_FILES 数组）
+  const manifestA: Manifest = structuredClone(baseManifest)
+  const manifestB: Manifest = structuredClone(baseManifest)
 
-  const first = assembleAssets(manifest)
-  const second = assembleAssets(manifest)
+  const first = assembleAssets(manifestA)
+  const second = assembleAssets(manifestB)
+
+  // 输入未被篡改（防 input mutation：调用后 manifestA/B 仍 == baseManifest）
+  expect(manifestA).toEqual(baseManifest)
+  expect(manifestB).toEqual(baseManifest)
 
   // 文本字段逐字相等
   expect(second.indexHtml).toBe(first.indexHtml)
-  expect(second.indexHtml).toBe(manifest.INDEX_HTML)
+  expect(second.indexHtml).toBe(baseManifest.INDEX_HTML)
   expect(second.pluginJs).toBe(first.pluginJs)
-  expect(second.pluginJs).toBe(manifest.PLUGIN_JS)
+  expect(second.pluginJs).toBe(baseManifest.PLUGIN_JS)
   expect(second.pluginPkg).toBe(first.pluginPkg)
-  expect(second.pluginPkg).toBe(manifest.PLUGIN_PKG)
+  expect(second.pluginPkg).toBe(baseManifest.PLUGIN_PKG)
 
   // assets map 的 key 集合相同（排序后逐字相等）
   const firstKeys = Object.keys(first.assets).sort()
@@ -205,4 +222,9 @@ test('loadEmbeddedAssets() body 委托 assembleAssets（源码层文本守卫，
   const src = readFileSync(join(srcDir, 'exe', 'assets.ts'), 'utf-8')
   // 正面断言：loadEmbeddedAssets body 含对 assembleAssets 的委托调用，传入四字段 manifest。
   expect(src).toContain('assembleAssets({ INDEX_HTML, ASSET_FILES, PLUGIN_JS, PLUGIN_PKG })')
+  // code-review finding 加固：loadEmbeddedAssets 的函数体不得含内联装配（Buffer.from 是
+  // base64 解码标志，只该出现在 assembleAssets 里）。抽取 loadEmbeddedAssets 的函数体文本，
+  // 断言其内无 Buffer.from——若未来 refactor 把装配逻辑搬回内联，此断言即红。
+  const fnBody = src.slice(src.indexOf('async function loadEmbeddedAssets'), src.indexOf('export function assembleAssets'))
+  expect(fnBody).not.toContain('Buffer.from')
 })
