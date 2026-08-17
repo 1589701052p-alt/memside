@@ -23,6 +23,24 @@ AI agent (Claude Code / opencode) 的本地记忆 sidecar。它监听你的 AI a
 
 ## 快速开始
 
+### 成品安装（推荐终端用户）
+
+**Windows**：从 GitHub Release 下载 `memside-setup.exe`，双击安装（per-user，免管理员权限）→ 开始菜单/桌面快捷方式 → 双击 `memside` 启动 → 浏览器开 `http://localhost:7777` 就是审批 UI。安装会自动注册 PATH，终端也能 `memside`。卸载走"添加/删除程序"，**用户数据（记忆库 `~/.memside`、claude hooks、opencode 插件）保留**。
+
+> 未签名的 exe 首次双击会弹 Windows SmartScreen"已保护你的电脑"——点"更多信息"→"仍运行"即可（v1 未做代码签名，后续版本会评估签名）。
+
+**npm（跨平台，需先装 [bun](https://bun.sh)）**：
+
+```bash
+bunx memside start-and-install   # 启动 daemon + 装 claude hooks + 装 opencode 插件 -> http://localhost:7777
+```
+
+> `bun:sqlite` 是 Bun 专有，npm 包跑在 bun 运行时上，纯 Node 不可用。`npm i -g memside` 后 PATH 里的 `memside` 在装了 bun 的环境可用，但 `bunx memside` 最稳（保证 bun 运行时）。
+
+成品跑起来后，**正常用 claude code / opencode 即可**——不用改使用习惯。
+
+### 从源码构建（开发者）
+
 ```bash
 git clone <this-repo> memside && cd memside
 bun install
@@ -35,6 +53,8 @@ bun run start   # 构建前端 + 启动 daemon + 装 hooks -> http://localhost:7
 > 开发调试想保留前端热更新,用 `bun run dev`(daemon + vite dev 双进程,
 > UI 在 5173)。旧的分布命令(`bun run src/cli.ts start-and-install` +
 > `bun run dev:web`)仍然可用。
+
+> **发版**：打 `v*` tag 推送触发 GitHub Actions（`.github/workflows/release.yml`）：windows job 产 `memside.exe` + `memside-setup.exe` 挂 GitHub Release，ubuntu job `npm publish`。打 tag 前先在 `package.json` 里改版本号。
 
 ---
 

@@ -1,5 +1,78 @@
 # STATE.md - memside 构建状态
 
+## 成品发布：npm 包 + Windows exe + NSIS 安装器 + GHA 发版（2026-08-17，Spec B）
+
+把 memside 从"clone 仓库才能用"变成一键安装。设计 spec / 计划见
+`docs/superpowers/specs|plans/2026-08-17-packaged-distribution*`（双 spec 分解的
+**Spec B**；Spec A 见下一节）。三分发路径共享同一 `startDaemon`/`createApp`/`install*`
+代码，新增两个旁路接缝不改既有磁盘路径行为。
+
+1. **createApp 内存静态资产**（`src/server.ts`）：`AppDeps.staticAssets?`
+   （`{indexHtml, assets: Record<string,Uint8Array>}`）旁路——exe 用内嵌 web dist
+   内存托管，`GET /` 返回 indexHtml、`/assets/*` 从内存 map 返回（`mimeFor` 内联
+   扩展名→MIME，不引依赖）。既有 `staticDir` 磁盘分支不变，staticAssets 优先（互斥）。
+2. **startDaemon 透传**（`src/daemon.ts`）：`DaemonOpts.serveStaticAssets?` 透传到
+   createApp，与 serveStaticDir 互斥。
+3. **installOpencodePlugin 内容模式**（`src/install.ts`）：`files?`
+   （`{memside.js, package.json}` 字符串）旁路——exe 从内嵌资产字符串写盘（跳过
+   cpSync），端口烘焙照旧。既有 pluginSrcDir 磁盘分支不变，两者都缺抛错。
+4. **exe 资产装配**（`src/exe/assets.ts` + `scripts/gen-manifest.ts`）：实测 Bun 1.3.14
+   的 `bun build --compile` **不支持** directory import / `type:file` / `type:bytes`
+   （仅 text/json），按 spec 失败模式 #2 回退到构建期 manifest——gen-manifest.ts 把
+   dist（base64 二进制安全）+ opencode 插件（转义字符串）写进 `src/exe/manifest.ts`
+   （普通 TS 模块，无 `with` 语法 → typecheck 干净无需 @ts-expect-error，bonus 可被
+   bun test 直接 import 写真实字节级 round-trip 测试）。`loadEmbeddedAssets()` 返回
+   统一对象 `{indexHtml, assets, pluginJs, pluginPkg}`（Ruling-A/B：launcher 从统一
+   对象取插件资产，不重复 import）。assets key `assets/<file>` + vite base '/'（script
+   引用根绝对路径），与 createApp 消费端一致。
+5. **exe launcher**（`src/exe/launcher.ts`）：`bun build --compile` 编译入口。双击即
+   生产启动：port-check（复用 `@/launch/portCheck`）→ startDaemon(installClaudeHooks:true,
+   serveStaticAssets=内嵌) → installOpencodePlugin(files=内嵌) → 控制台常驻。用内嵌
+   资产而非磁盘 dist，不做 dist 存在性检查。
+6. **package.json**（`private:false` + `files` allowlist `["src","opencode-plugin","tsconfig.json"]`
+   + `gen-manifest`/`build:exe`/`build:installer`/`prepublishOnly` 脚本）。`build:exe`
+   严格顺序 `bun run build(vite) → gen-manifest → bun build --compile`（Task 4 硬指针：
+   manifest 须在 compile 前生成）。npm 包带预构建 dist（prepublishOnly 保证新鲜），
+   bin 仍指 src/cli.ts（npm 路径推荐 bunx memside）。
+7. **NSIS 安装器**（`installer/installer.nsi`）：per-user（`RequestExecutionLevel user`，
+   `%LOCALAPPDATA%\memside`，免 UAC）+ 开始菜单/桌面快捷方式 + PATH 追加（EnVar）。
+   **不自启**（无开机注册）。uninstall 只删程序 + 快捷方式 + PATH 条目，**保留用户数据**
+   （`~/.memside`/`~/.claude`/`~/.config/opencode`）。
+8. **GitHub Actions 发版**（`.github/workflows/release.yml`）：`v*` tag 触发。windows
+   job：build → build:exe → choco install nsis → build:installer → softprops
+   action-gh-release 上传 memside.exe + memside-setup.exe。ubuntu job（needs:windows）：
+   npm publish（prepublishOnly 保 dist 新鲜，NPM_TOKEN）。
+
+执行：subagent-driven（9 task，implementer haiku/sonnet + reviewer haiku/sonnet；Task 6
+implementer 时预算超时 controller 代提交验证完成的改动，Task 7/8 reviewer 提前结束由
+controller 直接核验约束裁决）。`bun run typecheck && bun test` 1077/1077 全绿（2999
+expects，95 文件；基线 1060 → +17 测试）。无新运行时依赖（Bun 资产导入/readdir node
+内建；NSIS 构建期工具 CI 装；GHA 外部 CI）。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. **CI 首跑**（打首个 `v*` tag）：`bun build --compile` 实跑验证（本地 win-only 未跑）；
+   EnVar 插件 choco nsis 官方包**不带**——build:installer 较大概率编译期红，预案：
+   choco 装 nsis 后补抓 EnVar 插件 zip 解到 NSIS Plugins 目录（或回退 WriteRegStr
+   HKCU "Environment" "PATH" + SendMessage HWND_BROADCAST）。
+2. 未签名 exe SmartScreen 拦截率 + 用户反馈——决定 v1.1 是否上代码签名。
+3. npm 包下载量 + `bunx memside` vs `npm i -g` 占比——决定是否优化 PATH shim。
+4. NSIS 安装器安装/卸载成功率 + 卸载后用户数据保留验证（抽样）。
+5. exe 体积（Bun runtime ~90MB + JS + dist，用户友好优先于体积，观测是否需瘦身）。
+
+### deferred minor（非阻塞，建议 follow-up）
+
+1. EnVar 插件 CI 验证（见上线后观测 1）。
+2. `build:exe` 未本地实跑验证（CI 首跑验证）。
+3. workflow_dispatch 无 tag_name 兜底（手动调试受影响，tag 主路径无影响）。
+4. npm 版本号 `0.1.0` 与 `v*` tag 无自动联动（无 npm version 同步步骤）。
+5. Task 1 F1：缺 staticAssets+staticDir 同时传优先级显式测试（if/else if 结构保证）。
+6. Task 4 F1：gen-manifest 对 `assets/` 子目录非递归（当前 vite dist 扁平，未来子目录时改 recursive:true）。
+7. Task 6 F1/F2：build:exe 仅 toDefined 未锁 gen-manifest 顺序；manifest.ts stale payload 随 npm 包发布（无害，可 .npmignore）。
+8. Task 8：测试未锁步骤顺序（build:installer 在 nsis 之后）+ 上传 files 路径。
+9. macOS/Linux exe（npm 包覆盖；bun build --compile cross-compile 留后续）。
+10. 托盘图标 / 自动更新检查 / portable 模式（v1.1+）。
+
 ## 记忆批量删除（回收站）+ 导出/导入 + 多选批量操作（2026-08-16，Spec A）
 
 商用前记忆管理层补齐四块能力。设计 spec / 计划见
