@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "test:live": "MEMSIDE_RUN_LIVE=1 bun test tests/live-*",
+    "test:live": "cross-env MEMSIDE_RUN_LIVE=1 bun test tests/live-distill.test.ts tests/live-dedup.test.ts tests/live-judge.test.ts",
     "typecheck": "tsc --noEmit",
     "dev:web": "vite",
     "build": "vite build",
@@ -27,6 +27,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^10.1.0",
     "drizzle-kit": "^0.30.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
