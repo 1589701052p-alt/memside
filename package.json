@@ -8,6 +8,7 @@
   },
   "scripts": {
     "test": "bun test",
+    "test:live": "MEMSIDE_RUN_LIVE=1 bun test tests/live-*",
     "typecheck": "tsc --noEmit",
     "dev:web": "vite",
     "build": "vite build",
