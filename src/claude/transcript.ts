@@ -216,16 +216,23 @@ export interface SubagentResolveDiag {
   mainTranscriptExists: boolean
   /** <base>/subagents/ 目录当时真实 basename（cap 30）；目录不存在/不可读为 [] */
   subagentsDirEntries: string[]
+  // —— 新增（方案 A 取证：subagent 直连路径，仅记取证不参与决策）——
+  /** payload 的 agent_transcript_path 直连路径值；payload 无此字段/调用方未传为 null */
+  agentTranscriptPath: string | null
+  /** agentTranscriptPath 存在且为文件；null 路径恒 false */
+  agentTranscriptPathExists: boolean
 }
 
 export function resolveSubagentTranscript(
   transcriptPath: string,
   agentId: string | null | undefined,
+  agentTranscriptPath?: string | null,
 ): { turns: TranscriptTurn[]; diag: SubagentResolveDiag } {
   const diag: SubagentResolveDiag = {
     agentId: agentId ?? '', transcriptPath,
     derivedPath: null, derivedExists: false, derivedTurns: 0,
     mainTranscriptExists: false, subagentsDirEntries: [],
+    agentTranscriptPath: null, agentTranscriptPathExists: false,
   }
   try {
     diag.mainTranscriptExists = !!transcriptPath && existsSync(transcriptPath)
@@ -239,6 +246,10 @@ export function resolveSubagentTranscript(
         if (existsSync(dir)) diag.subagentsDirEntries = readdirSync(dir).slice(0, 30)
       } catch { /* 目录不可读保持 [] */ }
     }
+    // 方案 A 取证：记 payload 的 agent_transcript_path 直连路径值 + 它指向文件的存在性。
+    // 仅赋值，绝不参与 derivedExists/turns 决策（控制流一字不动）。
+    diag.agentTranscriptPath = typeof agentTranscriptPath === 'string' && agentTranscriptPath ? agentTranscriptPath : null
+    diag.agentTranscriptPathExists = !!diag.agentTranscriptPath && existsSync(diag.agentTranscriptPath)
     if (subPath && existsSync(subPath)) {
       diag.derivedExists = true
       const turns = parseTranscriptFile(subPath)

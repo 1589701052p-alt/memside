@@ -387,3 +387,118 @@ test('resolveSubagentTranscript: 畸形输入永不抛 + 目录不存在时 list
   expect(resolveSubagentTranscript(join(dir, 'nope.jsonl'), 'AG').diag.subagentsDirEntries).toEqual([])
   expect(resolveSubagentTranscript(join(dir, 'x.jsonl'), '').diag.derivedPath).toBeNull()
 })
+
+// --- resolveSubagentTranscript 方案 A 直连路径取证（spec 2026-08-17 §测试策略 #1–#4 + #6）---
+//
+// 诊断 memside "subagent_transcript_missing" 降级时发现 claude code SubagentStop
+// payload 带 agent_transcript_path 直连字段，但旧版 resolveSubagentTranscript 从不读
+// 它的值。下面测试锁定：第三参数透传后，diag 如实记录直连路径值 + existsSync 结果，
+// **且绝不参与 derivedExists/turns 决策**（仅取证）。向后兼容：第三参数缺省时行为与
+// 旧版逐字节一致。
+
+/** 写一个内容为单 user turn 的 .jsonl，返回路径。供直连路径取证测试构造真实文件。 */
+function writeDirectAgentJsonl(): string {
+  const p = join(dir, 'agent-direct.jsonl')
+  writeFileSync(p, JSON.stringify({ type: 'user', message: { role: 'user', content: 'DIRECT' } }) + '\n')
+  return p
+}
+
+test('resolveSubagentTranscript: 直连路径存在、derivedPath 不存在 -> diag 如实记 agentTranscriptPathExists:true（找错地方信号）', () => {
+  // 夹具：主会话 + subagents 目录存在（derivedPath 推导指向此目录下 agent-AG.jsonl），
+  // 但 agent-AG.jsonl 缺失（derivedExists=false）。直连路径指向另一个真实文件——模拟
+  // claude code 对异常子 agent 用了不同落盘位置。
+  mkdirSync(join(dir, 'main', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
+  const directPath = writeDirectAgentJsonl()
+  const { turns, diag } = resolveSubagentTranscript(mainPath, 'AG', directPath)
+  expect(diag.agentTranscriptPath).toBe(directPath)
+  expect(diag.agentTranscriptPathExists).toBe(true)
+  expect(diag.derivedExists).toBe(false)   // 推导路径仍不存在——直连路径不进决策
+  expect(turns).toEqual([])                // 仍走降级，不切到读直连路径
+  expect(diag.derivedTurns).toBe(0)
+})
+
+test('resolveSubagentTranscript: 直连路径不存在 -> agentTranscriptPathExists:false，但值仍如实记', () => {
+  mkdirSync(join(dir, 'main', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
+  const missingDirect = join(dir, 'no-such-agent.jsonl')
+  const { turns, diag } = resolveSubagentTranscript(mainPath, 'AG', missingDirect)
+  expect(diag.agentTranscriptPath).toBe(missingDirect)
+  expect(diag.agentTranscriptPathExists).toBe(false)
+  expect(diag.derivedExists).toBe(false)
+  expect(turns).toEqual([])
+})
+
+test('resolveSubagentTranscript: 第三参数空串/undefined/null -> agentTranscriptPath=null、agentTranscriptPathExists=false（向后兼容回归锁）', () => {
+  // 夹具：derivedPath 不存在，主会话存在。无论第三参数缺省/空串/null，diag 两字段恒
+  // null/false，且 derivedExists/turns/derivedPath 与旧版（不传第三参数）逐字节一致。
+  mkdirSync(join(dir, 'main', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
+
+  // 旧版基线（不传第三参数）
+  const baseline = resolveSubagentTranscript(mainPath, 'AG')
+  // 逐字段断言旧版行为，作为后续对比锚点
+  expect(baseline.turns).toEqual([])
+  expect(baseline.diag.derivedExists).toBe(false)
+  expect(baseline.diag.derivedTurns).toBe(0)
+  expect(baseline.diag.derivedPath).toBe(join(dir, 'main', 'subagents', 'agent-AG.jsonl'))
+  expect(baseline.diag.agentTranscriptPath).toBeNull()
+  expect(baseline.diag.agentTranscriptPathExists).toBe(false)
+
+  // 传空串：与旧版逐字节一致（仅两新字段恒 null/false）
+  const emptyStr = resolveSubagentTranscript(mainPath, 'AG', '')
+  expect(emptyStr.turns).toEqual(baseline.turns)
+  expect(emptyStr.diag.derivedExists).toBe(baseline.diag.derivedExists)
+  expect(emptyStr.diag.derivedTurns).toBe(baseline.diag.derivedTurns)
+  expect(emptyStr.diag.derivedPath).toBe(baseline.diag.derivedPath)
+  expect(emptyStr.diag.agentTranscriptPath).toBeNull()
+  expect(emptyStr.diag.agentTranscriptPathExists).toBe(false)
+
+  // 传 null：同上
+  const nullArg = resolveSubagentTranscript(mainPath, 'AG', null)
+  expect(nullArg.turns).toEqual(baseline.turns)
+  expect(nullArg.diag.derivedExists).toBe(baseline.diag.derivedExists)
+  expect(nullArg.diag.derivedTurns).toBe(baseline.diag.derivedTurns)
+  expect(nullArg.diag.derivedPath).toBe(baseline.diag.derivedPath)
+  expect(nullArg.diag.agentTranscriptPath).toBeNull()
+  expect(nullArg.diag.agentTranscriptPathExists).toBe(false)
+
+  // 传 undefined：同上
+  const undefArg = resolveSubagentTranscript(mainPath, 'AG', undefined)
+  expect(undefArg.turns).toEqual(baseline.turns)
+  expect(undefArg.diag.derivedExists).toBe(baseline.diag.derivedExists)
+  expect(undefArg.diag.derivedTurns).toBe(baseline.diag.derivedTurns)
+  expect(undefArg.diag.derivedPath).toBe(baseline.diag.derivedPath)
+  expect(undefArg.diag.agentTranscriptPath).toBeNull()
+  expect(undefArg.diag.agentTranscriptPathExists).toBe(false)
+})
+
+test('resolveSubagentTranscript: derivedPath 存在（正常路径）-> turns 非空，diag 两字段照样填不干扰主路径', () => {
+  mkdirSync(join(dir, 'main', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
+  const subPath = join(dir, 'main', 'subagents', 'agent-AG.jsonl')
+  writeFileSync(subPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'SUB' } }) + '\n')
+  // 直连路径同时指向另一个真实文件——确保主路径正常蒸馏时直连路径取证仍如实填
+  const directPath = writeDirectAgentJsonl()
+  const { turns, diag } = resolveSubagentTranscript(mainPath, 'AG', directPath)
+  expect(turns.length).toBeGreaterThan(0)   // 主路径正常蒸馏
+  expect(diag.derivedExists).toBe(true)
+  expect(diag.derivedTurns).toBe(turns.length)
+  expect(diag.agentTranscriptPath).toBe(directPath)
+  expect(diag.agentTranscriptPathExists).toBe(true)
+})
+
+test('resolveSubagentTranscript: 源码层文本守卫——取证两字段赋值行存在（防 refactor 误删，spec §测试策略 #6）', async () => {
+  const src = await Bun.file(join(import.meta.dir, '..', 'src', 'claude', 'transcript.ts')).text()
+  expect(src).toContain('diag.agentTranscriptPath = typeof agentTranscriptPath')
+  expect(src).toContain('diag.agentTranscriptPathExists = !!diag.agentTranscriptPath && existsSync(diag.agentTranscriptPath)')
+  // 接口两字段存在
+  expect(src).toContain('agentTranscriptPath: string | null')
+  expect(src).toContain('agentTranscriptPathExists: boolean')
+  // 第三参数可选（签名含 agentTranscriptPath?）
+  expect(src).toMatch(/agentTranscriptPath\?:\s*string\s*\|\s*null/)
+})
