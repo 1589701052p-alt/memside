@@ -157,8 +157,10 @@ export interface InstallOpencodePluginOpts {
    * a tmp dir so they never touch the real user config.
    */
   baseDir?: string
-  /** Repo `opencode-plugin/` source dir (copied verbatim, then port-baked). */
-  pluginSrcDir: string
+  /** 磁盘源目录模式（dev/npm：从仓库 opencode-plugin/ 读盘复制）。 */
+  pluginSrcDir?: string
+  /** 内容模式（exe：从内嵌资产字符串写盘）。与 pluginSrcDir 互斥。 */
+  files?: { 'memside.js': string; 'package.json': string }
 }
 
 /**
@@ -184,8 +186,18 @@ export function installOpencodePlugin(opts: InstallOpencodePluginOpts): void {
   const ocdDir = opts.baseDir ?? join(resolveHome(), '.config', 'opencode')
   mkdirSync(ocdDir, { recursive: true })
   const destDir = join(ocdDir, 'memside-opencode')
-  // 复制 plugin 目录（package.json + memside.js，Task 6 产物）
-  cpSync(opts.pluginSrcDir, destDir, { recursive: true })
+  if (opts.files) {
+    // 内容模式（exe）：从内嵌字符串写盘，不 cpSync
+    // writeFileSync 不建父目录，需先 mkdir destDir（cpSync recursive 会自建，这里手动建）
+    mkdirSync(destDir, { recursive: true })
+    writeFileSync(join(destDir, 'memside.js'), opts.files['memside.js'])
+    writeFileSync(join(destDir, 'package.json'), opts.files['package.json'])
+  } else if (opts.pluginSrcDir) {
+    // 磁盘模式（dev/npm）：复制仓库 opencode-plugin/
+    cpSync(opts.pluginSrcDir, destDir, { recursive: true })
+  } else {
+    throw new Error('installOpencodePlugin: must provide pluginSrcDir or files')
+  }
   // 端口烘焙：读 memside.js 把 __MEMSIDE_PORT__ 占位替换为实际端口
   const jsPath = join(destDir, 'memside.js')
   let js = readFileSync(jsPath, 'utf-8')

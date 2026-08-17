@@ -66,3 +66,38 @@ test('malformed opencode.json 当空文档不抛', () => {
   expect(Array.isArray(cfg.plugin)).toBe(true)
   expect(cfg.plugin.some((p: string) => p.includes('memside-opencode'))).toBe(true)
 })
+
+// 以下 3 个 case 锁 Spec B 接缝 2（Task 3）：installOpencodePlugin 的 files 内容
+// 模式——从内嵌字符串写盘（而非 cpSync 复制磁盘目录），端口烘焙与 opencode.json
+// 幂等合并照旧。files 与 pluginSrcDir 互斥，都缺抛错（src/install.ts 三分支分流）。
+
+test('files 内容模式：从字符串写盘 + 端口烘焙', () => {
+  const baseDir = join(tmpRoot, 'case-files')
+  installOpencodePlugin({
+    port: 9999, baseDir,
+    files: { 'memside.js': 'port=__MEMSIDE_PORT__;', 'package.json': '{"name":"memside"}' },
+  })
+  const js = readFileSync(join(baseDir, 'memside-opencode', 'memside.js'), 'utf-8')
+  expect(js).toBe('port=9999;')
+  expect(js).not.toContain('__MEMSIDE_PORT__')
+  const pkg = readFileSync(join(baseDir, 'memside-opencode', 'package.json'), 'utf-8')
+  expect(pkg).toBe('{"name":"memside"}')
+})
+
+test('files 内容模式：opencode.json 幂等合并', () => {
+  const baseDir = join(tmpRoot, 'case-files-idem')
+  installOpencodePlugin({
+    port: 9999, baseDir,
+    files: { 'memside.js': 'x', 'package.json': '{}' },
+  })
+  installOpencodePlugin({
+    port: 9999, baseDir,
+    files: { 'memside.js': 'x', 'package.json': '{}' },
+  })
+  const cfg = JSON.parse(readFileSync(join(baseDir, 'opencode.json'), 'utf-8'))
+  expect((cfg.plugin as string[]).filter((p) => p.includes('memside-opencode'))).toHaveLength(1)
+})
+
+test('files 与 pluginSrcDir 都缺抛错', () => {
+  expect(() => installOpencodePlugin({ port: 9999, baseDir: join(tmpRoot, 'case-err') })).toThrow()
+})
