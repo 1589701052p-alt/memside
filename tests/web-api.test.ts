@@ -444,16 +444,16 @@ test('installRuntimeHooks POSTs install + returns ok shape', async () => {
     captured = { url, init }
     return new Response(JSON.stringify({ ok: true, settingsPath: '/h/.cac/setting.json' }), { status: 200 })
   }
-  const r = await installRuntimeHooks(fake)
+  const r = await installRuntimeHooks('claude', fake)
   expect(captured.init?.method).toBe('POST')
-  expect(captured.url).toContain('/api/settings/runtime/install')
+  expect(captured.url).toContain('/api/settings/runtime/install?target=claude')
   expect(r.ok).toBe(true)
   expect(r.settingsPath).toBe('/h/.cac/setting.json')
 })
 
 test('uninstallRuntimeHooks POSTs uninstall + returns removed shape', async () => {
   const fake: FetchLike = async () => new Response(JSON.stringify({ ok: true, removed: 5, settingsPath: '/x/setting.json' }), { status: 200 })
-  const r = await uninstallRuntimeHooks(fake)
+  const r = await uninstallRuntimeHooks('claude', fake)
   expect(r.ok).toBe(true)
   expect(r.removed).toBe(5)
 })
