@@ -1,5 +1,31 @@
 # STATE.md - memside 构建状态
 
+## 运行环境设置重设计（2026-08-17，双分组 UI + opencode 安装/卸载生效）
+
+前作「运行环境自定义路径配置」落地了路径配置 + claude 侧 install/uninstall，但留两类产品缺陷：UI 不清晰（三框三按钮无标签、按钮与框关系不明、改了没存就点安装会静默装旧路径）+ opencodeDir 字段存了但 install/uninstall 不读它（opencode 装/卸从未经 UI 生效）。本变重设计 UI 成双分组并让 opencode 真正闭环。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-17-runtime-settings-redesign*`。
+
+1. **`uninstallOpencodePlugin`**（`src/install.ts`，新增）：`installOpencodePlugin` 的幂等对偶——`rmSync(destDir)` 删 `memside-opencode/` 目录 + 过滤 `opencode.json` 的 `plugin` 数组（保留用户自写插件），返回 `{removed, pluginPath, dirRemoved}`；malformed/缺文件降级不抛；`removed===0` 不重写盘。`~` 展开由调用方（server 端点）做。
+2. **server `?target` 分流 + opencode 注入接缝**（`src/server.ts`）：`POST /api/settings/runtime/{install,uninstall}` 加 `?target=claude|opencode`（默认 `claude` 保后兼容，invalid→400）；`AppDeps` 加 `installOpencodePluginFn?`/`uninstallOpencodePluginFn?` 注入点。opencodeDir `~` 展开复用 `resolveHome()`。缺 `installOpencodePluginFn` → `{ok:false, 不可用}` 不抛；`uninstallOpencodePluginFn` 恒注入（不依赖源）。
+3. **daemon 插件源 plumbing**（`src/daemon.ts`）：`DaemonOpts.opencodePluginSource?: {srcDir}|{files}`——`startDaemon` 据此构造 `installOpencodePluginFn`（缺 source→undefined）+ `uninstallOpencodePluginFn`（恒注入）喂 `createApp`。cli `start`/`start-and-install` 传 `{srcDir: pluginSrcDir}`（`start` 仅启用 UI 按钮不变「不自动装」语义）；exe launcher 传 `{files:{memside.js, package.json}}`。
+4. **web-api client**（`src/web/api.ts`）：`installRuntimeHooks`/`uninstallRuntimeHooks` 加可选 `target='claude'|'opencode'` 首参（默认 claude 后兼容），URL 拼 `?target=`，返回类型加 `pluginPath?`/`dirRemoved?`。
+5. **双分组 UI + 纯函数**（`src/web/App.tsx` + 新 `src/web/runtime-paths.ts`）：`RuntimeSettings` 重构成 claude/codeagent + opencode/nga 双分组——每组可见标签字段 + 实时「→ 将写入」预览 + 「保存并安装」（先存再装，消除改了没存的脚枪）+「卸载」，独立 busy/msg，无持久「已装」徽标。`resolveClaudePath`/`resolveOpencodePath` 抽到独立纯模块（不埋 React 文件，便于测试不引 React）。
+
+执行：subagent-driven（6 实现 task 各带 task review + 1 final whole-branch review + 1 M1 fix）。`bun run typecheck && bun test` 1148 pass / 4 skip / 0 fail。
+
+### final review deferred minor（非阻塞，已 triage）
+
+1. M1（已修）：`tests/daemon-install-paths.test.ts` 删未用 `installOpencodePlugin` import（commit 81b7b51）。
+2. M2：`tests/app-source-assertions.test.ts` RuntimeSettings 切片窗口 3000→5000 魔数，函数再长会再红；durable fix=切片到下一个 `function` 关键字（defer-to-followup）。
+3. M3：`uninstall?target=invalid→400` 无测试（install 侧有）；代码对称低风险，follow-up 补。
+4. M4：App.tsx `defaults` fallback 硬编码，若后端 `defaultRuntimePaths()` 变可能漂移；前作既有模式低风险。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. UI 双分组在 dev（`bun run dev:web`）+ exe 两种模式都正确渲染、字段标签清晰、预览实时。
+2. codeagent 用户经 claude 分组「保存并安装」后 hook 真触发（daemon SessionStart/Stop 日志 + 新 distill job）。
+3. opencode 用户经 opencode 分组「保存并安装」后 plugin 落地 `~/.config/opencode/memside-opencode/` + `opencode.json` 注册，新会话 inject 生效。
+4. 两组「卸载」分别清掉对应痕，互不影响 + 保留用户自写项。
+
 ## 运行环境自定义路径配置（2026-08-17，商用 codeagent 适配）
 
 商用适配：codeagent（claude code fork，读 `~/.cac/setting.json`）等公司内部 agent 配置路径与官方不同，原 `installHooks` 硬编码 `~/.claude/settings.json` → hooks 到不了 codeagent → capture/inject 整个闭环断（STATE 2026-07-23 codeagent 桥接遗留第 5 点，标记「决定产品能否闭环」）。设计 spec / 计划见
