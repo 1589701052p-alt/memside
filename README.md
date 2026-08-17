@@ -33,6 +33,23 @@ AI agent（Claude Code / opencode）的本地记忆 sidecar。它监听你的 AI
 
 > 首次双击未签名的 exe，Windows 会弹"已保护你的电脑"（SmartScreen）。点 **"更多信息"** → **"仍运行"** 即可。这是 v1 未签名的正常现象，后续版本会评估代码签名。
 
+<details>
+<summary>不想装安装器？直接用便携 exe</summary>
+
+Releases 页另有一个 `memside.exe`，是内嵌 Bun 运行时 + 前端 + opencode 插件的**单文件绿色二进制**，不写 PATH、不动注册表、不留卸载项。
+
+1. 去 [Releases 页](https://github.com/1589701052p-alt/memside/releases) 下载 `memside.exe`，放任意目录（桌面、U 盘都行）。
+2. 双击运行。它等价于 `start-and-install`：自动启动 daemon **并** 装 claude code hooks **并** 装 opencode 插件——一次搞定。
+3. 看到 `memside on http://127.0.0.1:7777 ...` 就说明在跑了。**保持那个窗口开着**，daemon 跟着窗口活；关窗即停。
+
+和安装器版的区别：
+
+- **无 PATH / 无快捷方式**，每次开机想用就再双击一次 `memside.exe`。
+- **关窗口即停 daemon**。要让它常驻，别关那个控制台窗口（或开个终端跑）。
+- hooks 是 `curl` 调 `127.0.0.1:7777`，**不依赖 exe 路径**——所以之后移动 / 重命名 `memside.exe` 不影响已装的 hooks，只要 daemon 还在跑。
+
+</details>
+
 ### 方式 B：npm（跨平台，需先装 [Bun](https://bun.sh)）
 
 ```bash
