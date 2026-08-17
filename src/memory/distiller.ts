@@ -232,9 +232,12 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
       // 历史 bug 曾在 callThrew 时清空 -> llm_error job 丢失 source input（spec §source input 修复）。
       // 空字符串/纯空白 = 模型无产出（与 {"candidates":[]} 同义），归 empty_output 非 parse_error。
       // 非空但解析失败 = 真 parse_error。callThrew 与 parseError 互斥不变。
-      // lastAttemptRaw null（onAttempt 未触发，如全 call 抛错）时 fallback 原 parseError 逻辑。
-      // 注：写法用 `(lastAttemptRaw ?? '').trim()` 而非 `lastAttemptRaw != null && lastAttemptRaw.trim()`
-      // ——后者被 TS CFA 误窄为 never（closure 赋值不可见，只剩 =null 初始化），无法通过 typecheck。
+      // lastAttemptRaw null 的可达性：仅当所有 attempt 都 call 抛错（onAttempt 在抛错路径不触发，
+      // retry.ts:41-45）——此时 callThrew=true，下方三元 callThrew?null 短路，isEmpty 不求值。
+      // 故 null 分支不可观测，(lastAttemptRaw ?? '').trim() 的 ?? '' 仅满足 TS CFA（闭包赋值不可见，
+      // lastAttemptRaw 被窄化为 null→never，`!= null &&` 写法 typecheck 不过）。
+      // 不变量：callThrew=false ⟹ 末次 attempt 未抛 ⟹ fireAttempt 触发 ⟹ lastAttemptRaw 非空。
+      // 若未来改 retry.ts 破坏此不变量，需加断言锁。
       const isEmpty = (lastAttemptRaw ?? '').trim() === ''
       return { candidates: [], filteredTurns: filtered, rawOutput, rawCount: 0, callThrew,
         errorMessage: callThrew ? lastErrorMessage : null,
