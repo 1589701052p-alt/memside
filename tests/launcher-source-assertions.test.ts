@@ -149,3 +149,60 @@ test('assembleAssets() 装配统一对象，字节级匹配自造 fixture（自�
   expect(typeof ea.pluginPkg).toBe('string')
   expect(JSON.parse(ea.pluginPkg).name).toBe('memside-opencode')
 })
+
+/**
+ * 纯函数性回归锁：assembleAssets 是纯函数，相同 Manifest 输入必须产出逐字 / 逐字节
+ * 相同的 EmbeddedAssets。锁两次独立调用的输出一致性，防未来 refactor 引入外部
+ * 状态（缓存、随机、时间戳、磁盘读取）破坏确定性。fixture 用已知常量，**不读磁盘**。
+ */
+test('assembleAssets() 纯函数性：相同 manifest 两次调用输出逐字 / 逐字节相等', () => {
+  const manifest: Manifest = {
+    INDEX_HTML: '<html>FIXTURE</html>',
+    ASSET_FILES: [
+      ['assets/a.js', Buffer.from('console.log(1)').toString('base64')],
+      // 非 ASCII（中文），验 base64 解码二进制安全 + 确定性
+      ['assets/b.js', Buffer.from('你好').toString('base64')],
+    ],
+    PLUGIN_JS: 'const P = "__MEMSIDE_PORT__";',
+    PLUGIN_PKG: '{"name":"memside-opencode"}',
+  }
+
+  const first = assembleAssets(manifest)
+  const second = assembleAssets(manifest)
+
+  // 文本字段逐字相等
+  expect(second.indexHtml).toBe(first.indexHtml)
+  expect(second.indexHtml).toBe(manifest.INDEX_HTML)
+  expect(second.pluginJs).toBe(first.pluginJs)
+  expect(second.pluginJs).toBe(manifest.PLUGIN_JS)
+  expect(second.pluginPkg).toBe(first.pluginPkg)
+  expect(second.pluginPkg).toBe(manifest.PLUGIN_PKG)
+
+  // assets map 的 key 集合相同（排序后逐字相等）
+  const firstKeys = Object.keys(first.assets).sort()
+  const secondKeys = Object.keys(second.assets).sort()
+  expect(secondKeys).toEqual(firstKeys)
+  expect(firstKeys).toEqual(['assets/a.js', 'assets/b.js'])
+
+  // 每个 key 对应 Uint8Array 逐字节相等（byteLength + Buffer.equals 双重断言）
+  expect(second.assets['assets/a.js'].byteLength).toBe(first.assets['assets/a.js'].byteLength)
+  expect(second.assets['assets/b.js'].byteLength).toBe(first.assets['assets/b.js'].byteLength)
+  expect(Buffer.from(second.assets['assets/a.js']).equals(Buffer.from(first.assets['assets/a.js']))).toBe(true)
+  expect(Buffer.from(second.assets['assets/b.js']).equals(Buffer.from(first.assets['assets/b.js']))).toBe(true)
+
+  // 非空断言兜底：两次输出确为非空对象（非 undefined / 非空 map）
+  expect(first.assets['assets/a.js'].byteLength).toBeGreaterThan(0)
+  expect(first.assets['assets/b.js'].byteLength).toBeGreaterThan(0)
+})
+
+/**
+ * loadEmbeddedAssets 委托回归锁（源码层文本断言）。装配逻辑（base64 解码 + 字段映射）
+ * 必须留在同步纯函数 assembleAssets 里，loadEmbeddedAssets 仅做「取 import 常量 →
+ * 构 Manifest → 委托 assembleAssets」。防未来 refactor 把装配逻辑搬回 loadEmbeddedAssets
+ * 内联，断了纯函数测试接缝（Task 1 抽出的 assembleAssets 无法再被注入测试）。
+ */
+test('loadEmbeddedAssets() body 委托 assembleAssets（源码层文本守卫，防内联回退）', () => {
+  const src = readFileSync(join(srcDir, 'exe', 'assets.ts'), 'utf-8')
+  // 正面断言：loadEmbeddedAssets body 含对 assembleAssets 的委托调用，传入四字段 manifest。
+  expect(src).toContain('assembleAssets({ INDEX_HTML, ASSET_FILES, PLUGIN_JS, PLUGIN_PKG })')
+})
