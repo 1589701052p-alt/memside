@@ -1,7 +1,8 @@
 ; memside Windows installer (Spec B 接缝 6)
 ; per-user 安装（免 UAC），不自启，uninstall 保数据。
+; PATH 追加用 EnVar 第三方插件（NSIS choco 包不带，CI 单独装）。
+; EnVar:: 调用经 Plugins DLL 自动发现，无需 !include 头文件（插件未随附 .nsh）。
 !include "MUI2.nsh"
-!include "EnVar.nsh"
 
 Name "memside"
 OutFile "memside-setup.exe"

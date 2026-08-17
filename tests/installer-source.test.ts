@@ -47,4 +47,10 @@ test('.github/workflows/release.yml 存在并含两 job', () => {
   expect(src).toContain('build:installer')
   expect(src).toContain('npm publish')
   expect(src).toContain('NPM_TOKEN')
+  // F1 回归防护：windows job 必须装 EnVar 第三方插件（choco nsis 不带，installer.nsi 用 EnVar::）。
+  // 缺此 step 首次 v* tag 发版时 makensis 编译期红（EnVar.dll not found）。
+  expect(src).toMatch(/EnVar/i)
+  expect(src).toMatch(/GsNSIS\/EnVar/)
+  // F3 回归防护：build:exe 已含 vite build，不得再显式跑一遍 bun run build（冗余浪费）。
+  expect(src).not.toMatch(/bun run build\s+# vite dist/)
 })
