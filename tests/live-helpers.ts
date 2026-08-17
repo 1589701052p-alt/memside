@@ -1,10 +1,16 @@
 import { makeLLMCall } from '@/anthropic'
 import { loadClaudeCreds } from '@/creds'
+import { resolveCallLLM } from '@/daemon'
+import { openDb } from '@/db/client'
+import { loadUiLlmConfig } from '@/settings'
 import type { LLMCall } from '@/llm'
 import type { TranscriptTurn } from '@/memory/pure'
 // 注意：DistillCandidate 实际导出在 src/memory/distiller.ts（brief 原写 '@/memory/pure'，
 // 已按 src/ 实际定义修正——grep 核实 pure.ts 不含该类型）。
 import type { DistillCandidate } from '@/memory/distiller'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 
 /**
  * Live LLM e2e 门禁共享脚手架（spec 2026-08-16）。
@@ -12,14 +18,55 @@ import type { DistillCandidate } from '@/memory/distiller'
  * 不改任何生产代码，仅复用 makeLLMCall / loadClaudeCreds。
  */
 
-/** 凭证守卫：loadClaudeCreds 返回 apiKey 非 null 才算有凭证。 */
-export const hasLiveCreds = loadClaudeCreds().apiKey != null
+/** 用户生产 DB 路径（与 daemon 默认同源：~/.memside/memside.db）。 */
+const MEMSIDE_DB = join(homedir(), '.memside', 'memside.db')
 
-/** env 守卫：默认 bun test 不设 MEMSIDE_RUN_LIVE -> 全 skip。 */
-export const LIVE_GUARD = hasLiveCreds && process.env.MEMSIDE_RUN_LIVE === '1'
+/**
+ * 真实 callLLM——与生产 daemon 同源组合根 `resolveCallLLM({}, db)`（spec §3.1）。
+ * 复刻 daemon 的 db-backed UI 配置注入：每次调用现读 ~/.memside/memside.db 的
+ * app_settings（Web UI 设置页写入的凭证整级短路），与生产 daemon 零分歧。
+ * DB 不存在时降级为无 UI 级（makeLLMCall 走 ~/.claude/settings.json + env）。
+ *
+ * 修复背景：原 `makeLLMCall()` 不传 loadUiConfig，读不到 Web UI 配的有效凭证，
+ * fallback 到 settings.json 的失效 token → 401。生产 daemon 通过 resolveCallLLM
+ * 注入 db-backed loadUiConfig 才用上 UI 配的凭证；live test 必须复刻这步才算
+ * 「与生产同源」。
+ */
+function makeLiveCallLLM(): LLMCall {
+  if (existsSync(MEMSIDE_DB)) {
+    return resolveCallLLM({}, openDb(MEMSIDE_DB))
+  }
+  // DB 不存在：退回 makeLLMCall（走 settings.json + env），与原行为一致
+  return makeLLMCall()
+}
 
-/** 真实 callLLM（与生产 daemon 同源 makeLLMCall）。 */
-export const realCallLLM: LLMCall = makeLLMCall()
+/** 真实 callLLM（与生产 daemon 同源）。 */
+export const realCallLLM: LLMCall = makeLiveCallLLM()
+
+/**
+ * 凭证守卫：有可用凭证才真跑（与生产 resolveCallLLM 用的同一凭证源）。
+ * 优先看 UI 配（~/.memside/memside.db 的 app_settings），无 DB/无 UI token
+ * 时兜底看 loadClaudeCreds（settings.json + env）。
+ */
+function resolveHasLiveCreds(): boolean {
+  if (existsSync(MEMSIDE_DB)) {
+    const db = openDb(MEMSIDE_DB)
+    try {
+      const ui = loadUiLlmConfig(db)
+      if (ui?.token && ui.token.length > 0) {
+        db.$client.close()
+        return true
+      }
+    } catch {
+      // DB 读异常 → 降级看 settings.json
+    }
+    db.$client.close()
+  }
+  return loadClaudeCreds().apiKey != null
+}
+
+/** env + 凭证双守卫：默认 bun test 不设 MEMSIDE_RUN_LIVE -> 全 skip。 */
+export const LIVE_GUARD = resolveHasLiveCreds() && process.env.MEMSIDE_RUN_LIVE === '1'
 
 /**
  * AI judge 的 callLLM。默认复用被测 realCallLLM（同源，盲区已知接受）。
