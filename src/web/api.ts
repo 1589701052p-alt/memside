@@ -506,6 +506,49 @@ export async function saveJudgeConfig(patch: Partial<JudgeConfigDto>, fetchFn: F
   return data
 }
 
+// --- 运行环境路径配置 client（spec 2026-08-17-runtime-path-config §3.7）---------
+
+export interface RuntimeSettingsState {
+  claudeDir: string
+  settingsFilename: string
+  opencodeDir: string
+  defaults: { claudeDir: string; settingsFilename: string; opencodeDir: string }
+}
+
+/** GET /api/settings/runtime — 当前生效路径 + 默认值对照。 */
+export async function getRuntimeSettings(fetchFn: FetchLike = fetch): Promise<RuntimeSettingsState> {
+  const res = await fetchFn('/api/settings/runtime')
+  return (await res.json()) as RuntimeSettingsState
+}
+
+/** PUT /api/settings/runtime — 字段级保存（空串=回默认）。返回更新后状态。
+ * 非 2xx 抛错（对齐 saveJudgeConfig），让 App.tsx onSave 的 try/catch 显 msg。 */
+export async function saveRuntimeSettings(
+  patch: Partial<{ claudeDir: string; settingsFilename: string; opencodeDir: string }>,
+  fetchFn: FetchLike = fetch,
+): Promise<RuntimeSettingsState> {
+  const res = await fetchFn('/api/settings/runtime', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+    headers: { 'content-type': 'application/json' },
+  })
+  const data = (await res.json()) as RuntimeSettingsState & { error?: string }
+  if (!res.ok) throw new Error(data.error ?? 'save runtime settings failed')
+  return data
+}
+
+/** POST /api/settings/runtime/install — 读已存路径装 hooks。失败返回 {ok:false,error}。 */
+export async function installRuntimeHooks(fetchFn: FetchLike = fetch): Promise<{ ok: boolean; settingsPath?: string; error?: string }> {
+  const res = await fetchFn('/api/settings/runtime/install', { method: 'POST' })
+  return (await res.json()) as { ok: boolean; settingsPath?: string; error?: string }
+}
+
+/** POST /api/settings/runtime/uninstall — 移除 memside-managed hooks（保留用户自写）。 */
+export async function uninstallRuntimeHooks(fetchFn: FetchLike = fetch): Promise<{ ok: boolean; removed?: number; settingsPath?: string; error?: string }> {
+  const res = await fetchFn('/api/settings/runtime/uninstall', { method: 'POST' })
+  return (await res.json()) as { ok: boolean; removed?: number; settingsPath?: string; error?: string }
+}
+
 // --- 回收站 + 批量删除 + 导出/导入 client（spec 2026-08-16）----------------
 
 export interface TrashItem {

@@ -27,6 +27,13 @@ export interface InstallOpts {
    * so they never touch the real user settings.
    */
   baseDir?: string
+  /**
+   * Override the claude settings filename (default `settings.json`).
+   * codeagent fork reads `~/.cac/setting.json` (singular), so this lets the
+   * install land in the file the agent actually reads. Default keeps the
+   * legacy `settings.json` behavior byte-for-byte.
+   */
+  settingsFilename?: string
 }
 
 /**
@@ -109,7 +116,7 @@ function hookCommand(port: number, event: HookEvent): string {
 export function installHooks(opts: InstallOpts): void {
   const claudeDir = opts.baseDir ?? join(resolveHome(), '.claude')
   mkdirSync(claudeDir, { recursive: true })
-  const settingsPath = join(claudeDir, 'settings.json')
+  const settingsPath = join(claudeDir, opts.settingsFilename ?? 'settings.json')
 
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
@@ -148,6 +155,66 @@ export function installHooks(opts: InstallOpts): void {
   }
 
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+}
+
+/**
+ * Remove memside-managed hook groups from the claude settings file — the
+ * idempotent-merge dual of `installHooks`. For each of the five EVENTS,
+ * drops any matcher-group whose command list contains the `MEMSIDE_TAG`
+ * marker (i.e. memside's own entries); user-authored hooks (no marker) are
+ * always preserved.
+ *
+ * Resolves the same settings path as `installHooks` (baseDir + settingsFilename,
+ * defaults `~/.claude` / `settings.json`). Missing file or malformed JSON ->
+ * `removed:0`, never throws (mirrors installHooks's never-throw contract).
+ *
+ * Returns `{ removed, settingsPath }` where `removed` is the total count of
+ * memside-managed groups removed across all five events.
+ */
+export function uninstallHooks(opts: { baseDir?: string; settingsFilename?: string }): { removed: number; settingsPath: string } {
+  const claudeDir = opts.baseDir ?? join(resolveHome(), '.claude')
+  const settingsPath = join(claudeDir, opts.settingsFilename ?? 'settings.json')
+  if (!existsSync(settingsPath)) return { removed: 0, settingsPath }
+
+  let settings: Record<string, unknown> = {}
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      settings = parsed as Record<string, unknown>
+    } else {
+      return { removed: 0, settingsPath }
+    }
+  } catch {
+    // malformed settings.json: nothing to remove, no throw
+    return { removed: 0, settingsPath }
+  }
+
+  const hooks = settings.hooks as Record<string, unknown[]> | undefined
+  if (!hooks || typeof hooks !== 'object') return { removed: 0, settingsPath }
+
+  let removed = 0
+  for (const ev of EVENTS) {
+    let groups = hooks[ev]
+    if (!Array.isArray(groups)) continue
+    const before = groups.length
+    groups = groups.filter((group: unknown) => {
+      if (!group || typeof group !== 'object') return true
+      const g = group as { hooks?: Array<{ command?: string }> }
+      const cmds = (g.hooks ?? []).map((h) => h.command ?? '').join('|')
+      return !cmds.includes(MEMSIDE_TAG)
+    })
+    removed += before - groups.length
+    hooks[ev] = groups
+  }
+
+  // N-3: no memside-managed markers anywhere -> don't rewrite the file. Re-serializing
+  // would reformat the user's settings.json (indentation / trailing newline) even
+  // though no group was removed. We already parsed to detect the hooks field, so
+  // the read wasn't wasted; we just skip the write.
+  if (removed === 0) return { removed: 0, settingsPath }
+
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+  return { removed, settingsPath }
 }
 
 export interface InstallOpencodePluginOpts {

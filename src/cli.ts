@@ -21,6 +21,9 @@ import { startDaemon } from './daemon'
 import { installHooks, installOpencodePlugin } from './install'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { openDb } from './db/client'
+import { loadRuntimePaths, type RuntimePaths } from './settings'
 
 const cmd = process.argv[2]
 const PORT = Number(process.env.MEMSIDE_PORT ?? 7777)
@@ -32,9 +35,20 @@ if (cmd === 'start') {
   await startDaemon({ port: PORT, installClaudeHooks: false })
   console.log(`memside daemon on http://127.0.0.1:${PORT}`)
 } else if (cmd === 'install') {
-  installHooks({ port: PORT })
+  // N-2: read configured runtime paths, degrading to defaults on any DB error
+  // (mirrors startDaemon's try/catch in daemon.ts). The db handle is closed in
+  // finally so a loadRuntimePaths throw doesn't leak it.
+  let rp: RuntimePaths
+  try {
+    const db = openDb(join(homedir(), '.memside', 'memside.db'))
+    try { rp = loadRuntimePaths(db) } finally { db.$client.close() }
+  } catch {
+    rp = { claudeDir: join(homedir(), '.claude'), settingsFilename: 'settings.json', opencodeDir: join(homedir(), '.config', 'opencode') }
+  }
+  installHooks({ port: PORT, baseDir: rp.claudeDir, settingsFilename: rp.settingsFilename })
   installOpencodePlugin({ port: PORT, pluginSrcDir })
-  console.log('hooks installed into ~/.claude/settings.json; opencode plugin installed into ~/.config/opencode/')
+  // N-1: log the actual resolved path rather than a hardcoded ~/.claude placeholder.
+  console.log(`hooks installed into ${join(rp.claudeDir, rp.settingsFilename)}; opencode plugin installed into ~/.config/opencode/`)
 } else if (cmd === 'start-and-install') {
   await startDaemon({ port: PORT, installClaudeHooks: true })
   installOpencodePlugin({ port: PORT, pluginSrcDir })

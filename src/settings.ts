@@ -1,4 +1,6 @@
 import { eq } from 'drizzle-orm'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { DbClient } from './db/client'
 import { appSettings } from './db/schema'
 import type { JudgeConfig } from '@/memory/judgeConfig'
@@ -101,4 +103,80 @@ export function saveJudgeConfig(db: DbClient, patch: Partial<JudgeConfig>): void
   if (patch.mode !== undefined) upsert(JUDGE_KEYS.mode, patch.mode)
   if (patch.maxRounds !== undefined) upsert(JUDGE_KEYS.maxRounds, String(patch.maxRounds))
   if (patch.timeBudgetS !== undefined) upsert(JUDGE_KEYS.timeBudgetS, String(patch.timeBudgetS))
+}
+
+// --- 运行环境路径配置（spec 2026-08-17-runtime-path-config）-----------------
+// codeagent 读 ~/.cac/setting.json（目录与文件名双双不同于标准 ~/.claude/settings.json）。
+// 用户在 UI 配置路径，install 据此装到正确文件。三字段落 app_settings，缺失回默认。
+
+/** portably resolve home (mirrors resolveHome in creds.ts / install.ts). */
+function resolveHome(): string {
+  return process.env.HOME || process.env.USERPROFILE || homedir()
+}
+
+/**
+ * Expand a leading `~` to the resolved home directory (IF-1 fix). Without this,
+ * a `~`-prefixed claudeDir saved from the UI (`~/.cac`) is passed verbatim to
+ * `installHooks` → `mkdirSync('~/.cac')` creates a literal `~` directory and
+ * hooks land in `./~/.cac/setting.json`, which codeagent never reads — silently
+ * breaking the capture→inject loop on daemon restart / `memside install`.
+ * Absolute paths and the defaults (already absolute) pass through unchanged.
+ */
+function expandTilde(p: string): string {
+  if (p.startsWith('~')) return join(resolveHome(), p.slice(1))
+  return p
+}
+
+export interface RuntimePaths {
+  /** claude 配置目录，默认 ~/.claude。 */
+  claudeDir: string
+  /** claude settings 文件名，默认 'settings.json'。codeagent 用 'setting.json'。 */
+  settingsFilename: string
+  /** opencode 配置目录，默认 ~/.config/opencode（nga 标准路径）。本次存而不用。 */
+  opencodeDir: string
+}
+
+const RUNTIME_KEYS = {
+  claudeDir: 'runtime.claude_dir',
+  settingsFilename: 'runtime.settings_filename',
+  opencodeDir: 'runtime.opencode_dir',
+} as const
+
+/** 三字段默认值（与 install.ts/creds.ts 既有默认路径一致，零回归基准）。 */
+export function defaultRuntimePaths(): RuntimePaths {
+  return {
+    claudeDir: join(resolveHome(), '.claude'),
+    settingsFilename: 'settings.json',
+    opencodeDir: join(resolveHome(), '.config', 'opencode'),
+  }
+}
+
+/** 读取：缺失/空串逐字段回默认；脏数据字符串原样用、空串回默认。 */
+export function loadRuntimePaths(db: DbClient): RuntimePaths {
+  const rows = db.select().from(appSettings).all()
+  const map = new Map(rows.map((r) => [r.key, r.value]))
+  const d = defaultRuntimePaths()
+  const claudeDir = map.get(RUNTIME_KEYS.claudeDir)
+  const settingsFilename = map.get(RUNTIME_KEYS.settingsFilename)
+  const opencodeDir = map.get(RUNTIME_KEYS.opencodeDir)
+  return {
+    claudeDir: expandTilde(claudeDir && claudeDir.length > 0 ? claudeDir : d.claudeDir),
+    settingsFilename: settingsFilename && settingsFilename.length > 0 ? settingsFilename : d.settingsFilename,
+    opencodeDir: opencodeDir && opencodeDir.length > 0 ? opencodeDir : d.opencodeDir,
+  }
+}
+
+/**
+ * 字段级合并写（同 saveUiLlmConfig 语义）：提供才写；空串 = 删该 key（回默认）。
+ * 非字符串值不会进 patch（TS 类型守卫 + server 层校验）。
+ */
+export function saveRuntimePaths(db: DbClient, patch: Partial<RuntimePaths>): void {
+  const upsert = (key: string, value: string) => {
+    db.insert(appSettings).values({ key, value, updatedAt: Date.now() })
+      .onConflictDoUpdate({ target: appSettings.key, set: { value, updatedAt: Date.now() } }).run()
+  }
+  const del = (key: string) => db.delete(appSettings).where(eq(appSettings.key, key)).run()
+  if (patch.claudeDir !== undefined) { patch.claudeDir === '' ? del(RUNTIME_KEYS.claudeDir) : upsert(RUNTIME_KEYS.claudeDir, patch.claudeDir) }
+  if (patch.settingsFilename !== undefined) { patch.settingsFilename === '' ? del(RUNTIME_KEYS.settingsFilename) : upsert(RUNTIME_KEYS.settingsFilename, patch.settingsFilename) }
+  if (patch.opencodeDir !== undefined) { patch.opencodeDir === '' ? del(RUNTIME_KEYS.opencodeDir) : upsert(RUNTIME_KEYS.opencodeDir, patch.opencodeDir) }
 }

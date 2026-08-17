@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
 import { and, count, desc, eq, gt, inArray, isNull, notInArray, or, sql } from 'drizzle-orm'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { z } from 'zod'
 import type { DbClient } from '@/db/client'
 import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns, notifications, memoryTrash } from '@/db/schema'
@@ -16,13 +17,14 @@ import { parseTranscriptFile, resolveSubagentTranscript } from '@/claude/transcr
 import { parseOpencodeMessages } from '@/opencode/transcript'
 import type { OpencodeMessage } from '@/opencode/transcript'
 import { enqueueWaitingJob, type EnqueueInput } from '@/scheduler'
-import { loadUiLlmConfig, saveUiLlmConfig, maskToken, loadJudgeConfig, saveJudgeConfig, type UiLlmConfig } from '@/settings'
+import { loadUiLlmConfig, saveUiLlmConfig, maskToken, loadJudgeConfig, saveJudgeConfig, loadRuntimePaths, saveRuntimePaths, defaultRuntimePaths, type UiLlmConfig } from '@/settings'
 import type { JudgeConfig } from '@/memory/judgeConfig'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { testConnection as defaultTestConnection } from './anthropic'
 import { testConnection as openAiTestConnection, loadOpenAiUiCreds, type OpenAiCreds } from './openai'
 import { resolveCallLLMProtocol, type LLMProtocol, type LLMCall } from '@/llm'
 import { rescanCandidates, type RescanReport } from '@/memory/rescan'
+import { installHooks, uninstallHooks } from '@/install'
 import type { ActivityTracker } from '@/activity'
 
 export interface AppDeps {
@@ -59,6 +61,23 @@ export interface AppDeps {
   callLLM?: LLMCall
   /** LLM 实时活动跟踪器（spec 2026-08-12 §5.7）：scheduler 置位，status 读出。 */
   tracker?: ActivityTracker
+  /** daemon 监听端口。install 端点写 hooks 命令时需把端口烘焙进 curl URL。
+   * 可选字段——缺省 7777（与 daemon 默认一致）；Task 4 让 daemon 传真实端口。 */
+  port?: number
+  /** 运行环境路径 install/uninstall 注入点（spec 2026-08-17-runtime-path-config §3.6）。
+   * 缺省走真实 install.ts 实现；测试注入假实现，不碰真实 ~/.claude。 */
+  installHooksFn?: (opts: { port: number; baseDir?: string; settingsFilename?: string }) => void
+  uninstallHooksFn?: (opts: { baseDir?: string; settingsFilename?: string }) => { removed: number; settingsPath: string }
+}
+
+/** Portably resolve the user home directory. Mirrors resolveHome in
+ *  creds.ts / install.ts / settings.ts: os.homedir() reads USERPROFILE on
+ *  Windows and ignores HOME, so we honor an explicit HOME override first
+ *  (tests + claude code itself honor HOME when present), then USERPROFILE,
+ *  then the OS-reported home. Used by the runtime install/uninstall endpoints
+ *  to expand a leading `~` in the user-configured claudeDir (spec §6.3). */
+function resolveHome(): string {
+  return process.env.HOME || process.env.USERPROFILE || homedir()
 }
 
 /** 扩展名→MIME 映射（内存静态资产用）。不引 mime 依赖，覆盖 vite dist 产物类型。 */
@@ -138,6 +157,12 @@ export function createApp(deps: AppDeps) {
       ? openAiTestConnection({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model })
       : defaultTestConnection({ baseURL: cfg.baseURL, token: cfg.token, model: cfg.model })
   ) as (cfg: { protocol: LLMProtocol; baseURL?: string; token: string; model?: string }) => Promise<{ ok: boolean; error?: string }>
+
+  // 运行环境路径 install/uninstall 注入点（spec 2026-08-17 §3.6）：缺省走真实 install.ts
+  // 实现；测试注入假实现，不碰真实 ~/.claude。port 缺省 7777（与 daemon 默认一致）。
+  const port = deps.port ?? 7777
+  const doInstall = deps.installHooksFn ?? ((opts: { port: number; baseDir?: string; settingsFilename?: string }) => installHooks(opts))
+  const doUninstall = deps.uninstallHooksFn ?? ((opts: { baseDir?: string; settingsFilename?: string }) => uninstallHooks(opts))
 
   /** 按协议解析当前生效 creds，统一为 {source, apiKey, baseURL?, model?}；无 creds 返回 null。 */
   function resolveEffective(
@@ -975,6 +1000,52 @@ export function createApp(deps: AppDeps) {
     }
     saveJudgeConfig(deps.db, b as Partial<JudgeConfig>)
     return c.json(loadJudgeConfig(deps.db))
+  })
+
+  // --- 运行环境路径配置（spec 2026-08-17-runtime-path-config §3.6）-----------
+  // GET 回当前生效路径 + 默认对照；PUT 字段级保存（空串=回默认）；install/uninstall
+  // 读已存路径调 installHooks/uninstallHooks。install/uninstall 失败不静默，
+  // 返回 {ok:false,error} 让 UI 显横幅（CLAUDE.md 错误可见性）。
+  app.get('/api/settings/runtime', (c) => {
+    const rp = loadRuntimePaths(deps.db)
+    return c.json({ ...rp, defaults: defaultRuntimePaths() })
+  })
+
+  const runtimePutSchema = z.object({
+    claudeDir: z.string().optional(),
+    settingsFilename: z.string().optional(),
+    opencodeDir: z.string().optional(),
+  })
+  app.put('/api/settings/runtime', async (c) => {
+    const parsed = runtimePutSchema.safeParse(await c.req.json().catch(() => ({})))
+    if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? 'invalid body' }, 400)
+    saveRuntimePaths(deps.db, parsed.data)
+    const rp = loadRuntimePaths(deps.db)
+    return c.json({ ...rp, defaults: defaultRuntimePaths() })
+  })
+
+  app.post('/api/settings/runtime/install', (c) => {
+    const rp = loadRuntimePaths(deps.db)
+    // ~ 展开：claudeDir 若以 ~ 开头走 resolveHome（spec §6.3）；绝对路径原样用。
+    const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
+    try {
+      doInstall({ port, baseDir, settingsFilename: rp.settingsFilename })
+      const settingsPath = join(baseDir, rp.settingsFilename)
+      return c.json({ ok: true, settingsPath })
+    } catch (e) {
+      return c.json({ ok: false, error: (e as Error).message })
+    }
+  })
+
+  app.post('/api/settings/runtime/uninstall', (c) => {
+    const rp = loadRuntimePaths(deps.db)
+    const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
+    try {
+      const r = doUninstall({ baseDir, settingsFilename: rp.settingsFilename })
+      return c.json({ ok: true, removed: r.removed, settingsPath: r.settingsPath })
+    } catch (e) {
+      return c.json({ ok: false, error: (e as Error).message })
+    }
   })
 
   // --- Archive / unarchive / restore --------------------------------------
