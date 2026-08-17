@@ -1,7 +1,8 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lt, notInArray, or, sql } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications } from '@/db/schema'
+import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications, memoryTrash } from '@/db/schema'
+import { snapshotMemory, restoreFromSnapshot } from './trash'
 import {
   canTransition,
   categoryFromTitle,
@@ -1324,4 +1325,239 @@ export async function markAllNotificationsRead(db: DbClient): Promise<number> {
 export async function updateDistillRunDigestMs(db: DbClient, jobId: string, ms: number): Promise<void> {
   await db.update(memoryDistillRuns).set({ digestMs: ms })
     .where(eq(memoryDistillRuns.distillJobId, jobId)).run()
+}
+
+// ---------------------------------------------------------------------------
+// 回收站 + 批量删除 + 导入 + 导出查询（spec 2026-08-16）
+// ---------------------------------------------------------------------------
+
+export interface TrashRow {
+  id: string
+  originalMemoryId: string
+  scopeType: string
+  scopeId: string | null
+  sourceCwd: string | null
+  runtime: string | null
+  deletedAt: number
+  title: string
+  valueClass: string | null
+  subjectSlug: string | null
+}
+
+const TRASH_COLS = {
+  id: memoryTrash.id, originalMemoryId: memoryTrash.originalMemoryId,
+  scopeType: memoryTrash.scopeType, scopeId: memoryTrash.scopeId,
+  sourceCwd: memoryTrash.sourceCwd, runtime: memoryTrash.runtime,
+  deletedAt: memoryTrash.deletedAt, title: memoryTrash.title,
+  valueClass: memoryTrash.valueClass, subjectSlug: memoryTrash.subjectSlug,
+} as const
+
+function rowToTrash(r: any): TrashRow {
+  return {
+    id: r.id, originalMemoryId: r.originalMemoryId,
+    scopeType: r.scopeType, scopeId: r.scopeId ?? null, sourceCwd: r.sourceCwd ?? null,
+    runtime: r.runtime ?? null, deletedAt: r.deletedAt, title: r.title,
+    valueClass: r.valueClass ?? null, subjectSlug: r.subjectSlug ?? null,
+  }
+}
+
+/**
+ * 批量删除：逐条事务内 DELETE memory + INSERT memory_trash 快照。吞错计 skipped
+ * （含 not-found / 重复删）。幂等：同 id 第二次删 memory 已不在 -> 计 skipped，不写第二条 trash。
+ */
+export async function bulkDeleteMemories(db: DbClient, ids: string[]): Promise<{ deleted: number; skipped: number }> {
+  let deleted = 0, skipped = 0
+  for (const id of ids) {
+    try {
+      await db.transaction((tx) => {
+        const rows = tx.select().from(memories).where(eq(memories.id, id)).limit(1).all()
+        if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
+        const m = rowToMemory(rows[0]!)
+        tx.delete(memories).where(eq(memories.id, id)).run()
+        tx.insert(memoryTrash).values({
+          id: ulid(), memorySnapshot: snapshotMemory(m), originalMemoryId: m.id,
+          scopeType: m.scopeType, scopeId: m.scopeId, sourceCwd: m.sourceCwd,
+          runtime: m.runtime, deletedAt: Date.now(), title: m.title,
+          valueClass: m.valueClass, subjectSlug: m.subjectSlug,
+        }).run()
+      })
+      deleted += 1
+    } catch {
+      skipped += 1
+    }
+  }
+  return { deleted, skipped }
+}
+
+/** 清空回收站：物理删全部 memory_trash 行（快照没了 -> 不可恢复，spec §数据模型）。 */
+export async function emptyTrash(db: DbClient): Promise<{ emptied: number }> {
+  const rows = await db.select({ n: sql<number>`COUNT(*)` }).from(memoryTrash).all()
+  await db.delete(memoryTrash).run()
+  return { emptied: Number(rows[0]?.n ?? 0) }
+}
+
+/**
+ * 高保真导入 seam（恢复 + JSON 文件导入共用，spec §导入/恢复共享 seam）。
+ * 绕过 createCandidate 的 status:'candidate' 硬编码，按记录 status 直接写入。
+ * 冲突策略：skip（已存在跳过）/ overwrite（删旧写新保留 id）/ newid（生成新 ULID 新增）。
+ * 非法记录跳过计 errors，不整批失败。subjectSlug 经 normalizeSubjectSlug 校验。
+ */
+export async function importMemories(
+  db: DbClient,
+  records: Memory[],
+  opts: { conflict: 'skip' | 'overwrite' | 'newid' },
+): Promise<{ imported: number; skipped: number; overwritten: number; errors: string[] }> {
+  let imported = 0, skipped = 0, overwritten = 0
+  const errors: string[] = []
+  for (const rec of records) {
+    try {
+      if (!rec.id || !rec.title || !rec.bodyMd) { errors.push(`invalid record: ${rec.id ?? '(no id)'}`); continue }
+      const slug = rec.subjectSlug !== null && rec.subjectSlug !== undefined
+        ? normalizeSubjectSlug(rec.subjectSlug) : rec.subjectSlug ?? null
+      const existing = await db.select({ id: memories.id }).from(memories).where(eq(memories.id, rec.id)).limit(1).all()
+      const exists = existing.length > 0
+      if (exists && opts.conflict === 'skip') { skipped += 1; continue }
+      // newid: 总是生成新 ULID（spec §new ULID 新增，即便 id 不冲突也换 id）。
+      // skip/overwrite: 保留 rec.id（overwrite 删旧写新同 id；restoreFromTrash 据此按
+      // snap.id 取回恢复行）。
+      const writeId = opts.conflict === 'newid' ? ulid() : rec.id
+      const values: typeof memories.$inferInsert = {
+        id: writeId, scopeType: rec.scopeType, scopeId: rec.scopeId, runtime: rec.runtime,
+        title: rec.title, bodyMd: rec.bodyMd, tags: JSON.stringify(rec.tags), status: rec.status,
+        sourceKind: (rec.sourceKind || 'manual') as 'conversation' | 'error' | 'manual' | 'subagent', sourceCwd: rec.sourceCwd ?? null,
+        sourceEventId: rec.sourceEventId ?? null, distillJobId: rec.distillJobId ?? null,
+        distillAction: (rec.distillAction ?? null) as 'new' | 'update_of' | 'duplicate_of' | 'conflict_with' | null, supersedesId: rec.supersedesId ?? null,
+        supersededById: rec.supersededById ?? null, approvedAt: rec.approvedAt ?? null,
+        createdAt: rec.createdAt || Date.now(), version: rec.version || 1,
+        valueClass: rec.valueClass ?? null, subjectSlug: slug,
+        origin: rec.origin ?? null, evidence: rec.evidence ?? null,
+      }
+      if (exists && opts.conflict === 'overwrite') {
+        // 原子化 delete+insert（spec §失败模式 #4）：两条语句分立时若 insert 抛错，
+        // 旧行已删 -> 记忆丢失。包进单事务，任一失败整体回滚（与 bulkDeleteMemories
+        // 同模式：同步回调，无 await）。
+        db.transaction((tx) => {
+          tx.delete(memories).where(eq(memories.id, rec.id)).run()
+          tx.insert(memories).values(values).run()
+        })
+        overwritten += 1
+      } else {
+        await db.insert(memories).values(values).run()
+        imported += 1
+      }
+    } catch (e) {
+      errors.push(`failed record ${rec.id}: ${(e as Error).message}`)
+    }
+  }
+  return { imported, skipped, overwritten, errors }
+}
+
+/**
+ * 恢复回收站条目：反序列化 snapshot -> importMemories(skip) -> 删 trash 行。
+ * trash 不存在抛 MemoryNotFoundError。恢复默认 skip（安全：不暴露 overwrite，spec §失败模式 #4）。
+ */
+export async function restoreFromTrash(
+  db: DbClient, id: string, opts: { conflict: 'skip' | 'overwrite' | 'newid' } = { conflict: 'skip' },
+): Promise<Memory> {
+  const rows = await db.select().from(memoryTrash).where(eq(memoryTrash.id, id)).limit(1).all()
+  if (rows.length === 0) throw new MemoryNotFoundError(`trash ${id} not found`)
+  const snap = restoreFromSnapshot(rows[0]!.memorySnapshot)
+  if (!snap) throw new MemoryConflictError(`trash ${id} snapshot corrupt`)
+  const r = await importMemories(db, [snap], opts)
+  // 只在实际写入了恢复行时删 trash 行（spec §失败模式 #4）：conflict='skip' 且
+  // snap.id 已存在时 importMemories 计 skipped、不写库，此时删 trash 会让快照
+  // 无端消失、无法再次恢复。保留 trash 行，下方按 snap.id 取回已存在的行返回。
+  if (r.imported > 0 || r.overwritten > 0) {
+    await db.delete(memoryTrash).where(eq(memoryTrash.id, id)).run()
+  }
+  // 返回恢复的记忆（按 snap.id 取回；skip 时库内既有行仍在）
+  const restored = await db.select().from(memories).where(eq(memories.id, snap.id)).limit(1).all()
+  if (restored.length === 0) throw new MemoryConflictError(`restore reported ${JSON.stringify(r)} but memory not found`)
+  return rowToMemory(restored[0]!)
+}
+
+/**
+ * 无分页导出查询（spec §导出三档作用域）。selected 按 ids；filter 按 statuses+filter；
+ * all 全部 statuses。不受 cursor 限制（导出量级可控，YAGNI 不流式）。
+ */
+export async function listMemoriesForExport(
+  db: DbClient,
+  opts: { scope: 'selected' | 'filter' | 'all'; ids?: string[]; statuses?: MemoryStatus[]; filter?: MemoryListFilter },
+): Promise<Memory[]> {
+  if (opts.scope === 'selected') {
+    const ids = (opts.ids ?? []).filter((x): x is string => typeof x === 'string')
+    if (ids.length === 0) return []
+    const rows = await db.select().from(memories).where(inArray(memories.id, ids)).orderBy(desc(memories.createdAt)).all()
+    return rows.map(rowToMemory)
+  }
+  const conds: any[] = []
+  if (opts.scope === 'filter' && opts.statuses && opts.statuses.length > 0) {
+    conds.push(inArray(memories.status, opts.statuses))
+  }
+  conds.push(...memoryFilterConds(opts.filter))
+  const rows = await db.select().from(memories)
+    .where(conds.length > 0 ? and(...conds) : undefined)
+    .orderBy(desc(memories.createdAt)).all()
+  return rows.map(rowToMemory)
+}
+
+/** 回收站分页（与 listMemoriesPage 同模式，复合游标 deletedAt+id DESC）。 */
+export async function listTrashPage(
+  db: DbClient,
+  opts: { limit?: number; before?: PageCursor; filter?: MemoryListFilter } = {},
+): Promise<PageWithTotal<TrashRow>> {
+  const limit = clampPageLimit(opts.limit)
+  const baseConds: any[] = []
+  if (opts.filter?.sourceCwd) baseConds.push(eq(memoryTrash.sourceCwd, opts.filter.sourceCwd))
+  if (opts.filter?.category) baseConds.push(sql`instr(${memoryTrash.title}, ${'[category:' + opts.filter.category + ']'}) > 0`)
+  if (opts.filter?.subjectSlug) baseConds.push(eq(memoryTrash.subjectSlug, opts.filter.subjectSlug))
+  if (opts.filter?.valueClass) {
+    if (opts.filter.valueClass === VALUE_CLASS_UNEVALUATED) baseConds.push(isNull(memoryTrash.valueClass))
+    else if ((PROTECTED_VALUE_CLASSES as readonly string[]).includes(opts.filter.valueClass)) baseConds.push(eq(memoryTrash.valueClass, opts.filter.valueClass))
+  }
+  const conds = [...baseConds]
+  if (opts.before) {
+    conds.push(or(
+      lt(memoryTrash.deletedAt, opts.before.ts),
+      and(eq(memoryTrash.deletedAt, opts.before.ts), lt(memoryTrash.id, opts.before.id)),
+    ))
+  }
+  const rows = await db.select(TRASH_COLS).from(memoryTrash)
+    .where(conds.length > 0 ? and(...conds) : undefined)
+    .orderBy(desc(memoryTrash.deletedAt), desc(memoryTrash.id))
+    .limit(limit + 1).all()
+  const countRows = await db.select({ n: sql<number>`COUNT(*)` }).from(memoryTrash)
+    .where(baseConds.length > 0 ? and(...baseConds) : undefined).all()
+  const hasMore = rows.length > limit
+  const pageRows = rows.slice(0, limit)
+  const last = pageRows[pageRows.length - 1]
+  return {
+    items: pageRows.map(rowToTrash),
+    hasMore,
+    nextCursor: hasMore && last ? { ts: last.deletedAt, id: last.id } : null,
+    total: Number(countRows[0]?.n ?? 0),
+  }
+}
+
+/** 回收站详情（含反序列化 snapshot，恢复前预览）。 */
+export async function getTrash(db: DbClient, id: string): Promise<{ trash: TrashRow & { memory: Memory | null } } | null> {
+  const rows = await db.select().from(memoryTrash).where(eq(memoryTrash.id, id)).limit(1).all()
+  if (rows.length === 0) return null
+  const t = rowToTrash(rows[0]!)
+  return { trash: { ...t, memory: restoreFromSnapshot(rows[0]!.memorySnapshot) } }
+}
+
+/** 回收站四维筛选下拉（slugs/valueClasses 恒空——表无对应列，与 discards 同模式）。 */
+export async function listTrashFacets(db: DbClient): Promise<Facets> {
+  const projects = new Map<string, number>()
+  const projRows = await db.select({ v: memoryTrash.sourceCwd, n: sql<number>`COUNT(*)` })
+    .from(memoryTrash).where(isNotNull(memoryTrash.sourceCwd)).groupBy(memoryTrash.sourceCwd).all()
+  for (const r of projRows) if (r.v) projects.set(r.v, (projects.get(r.v) ?? 0) + Number(r.n))
+  const cats = new Map<string, number>()
+  const titleRows = await db.select({ t: memoryTrash.title }).from(memoryTrash).all()
+  for (const r of titleRows) {
+    const c = categoryFromTitle(r.t)
+    if (c) cats.set(c, (cats.get(c) ?? 0) + 1)
+  }
+  return { projects: sortFacets(projects), categories: sortFacets(cats), slugs: [], valueClasses: [] }
 }

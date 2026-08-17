@@ -75,6 +75,7 @@ export interface TabStatusCounts {
   memories: Record<string, number>
   discards: number
   distillRuns?: { total: number; allTime?: number }
+  trashCount?: number
 }
 
 /**
@@ -87,7 +88,7 @@ export interface TabStatusCounts {
  */
 export function tabTotalCount(
   s: TabStatusCounts | null,
-  tab: 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs',
+  tab: 'candidate' | 'approved' | 'rejected' | 'discards' | 'runs' | 'trash',
 ): number | null {
   if (!s) return null
   switch (tab) {
@@ -96,6 +97,7 @@ export function tabTotalCount(
     case 'rejected': return s.memories.rejected ?? 0
     case 'discards': return s.discards
     case 'runs': return s.distillRuns?.allTime ?? s.distillRuns?.total ?? 0
+    case 'trash': return s.trashCount ?? 0
   }
 }
 

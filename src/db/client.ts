@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications } from './schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications, memoryTrash } from './schema'
 
 export type DbClient = ReturnType<typeof openDb>
 
@@ -11,7 +11,7 @@ export function openDb(path: string) {
   const raw = new Database(path)
   raw.exec('PRAGMA journal_mode=WAL')
   raw.exec('PRAGMA synchronous=NORMAL')
-  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications } })
+  const db = drizzle(raw, { schema: { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, appSettings, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications, memoryTrash } })
   // Schema bootstrap (idempotent). DDL lives here so tests need no migration runner.
   raw.exec(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -143,6 +143,21 @@ export function openDb(path: string) {
     );
     CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications(ts);
     CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(read_at);
+    CREATE TABLE IF NOT EXISTS memory_trash (
+      id TEXT PRIMARY KEY,
+      memory_snapshot TEXT NOT NULL,
+      original_memory_id TEXT NOT NULL,
+      scope_type TEXT NOT NULL,
+      scope_id TEXT,
+      source_cwd TEXT,
+      runtime TEXT,
+      deleted_at INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      value_class TEXT,
+      subject_slug TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_trash_deleted_at ON memory_trash(deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_trash_original ON memory_trash(original_memory_id);
   `)
   // Idempotent migration: add source_cwd to pre-existing memories tables.
   // CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so a column

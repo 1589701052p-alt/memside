@@ -207,3 +207,24 @@ export const notifications = sqliteTable(
     readIdx: index('idx_notifications_read').on(t.readAt),
   }),
 )
+
+export const memoryTrash = sqliteTable(
+  'memory_trash',
+  {
+    id: text('id').primaryKey(),
+    memorySnapshot: text('memory_snapshot').notNull(), // 完整 Memory JSON
+    originalMemoryId: text('original_memory_id').notNull(),
+    scopeType: text('scope_type').notNull(),
+    scopeId: text('scope_id'),
+    sourceCwd: text('source_cwd'),
+    runtime: text('runtime'),
+    deletedAt: integer('deleted_at').notNull(),
+    title: text('title').notNull(),
+    valueClass: text('value_class'),
+    subjectSlug: text('subject_slug'),
+  },
+  (t) => ({
+    deletedAtIdx: index('idx_trash_deleted_at').on(t.deletedAt),
+    originalIdx: index('idx_trash_original').on(t.originalMemoryId),
+  }),
+)

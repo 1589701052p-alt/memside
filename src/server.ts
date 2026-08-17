@@ -4,11 +4,12 @@ import { and, count, desc, eq, gt, inArray, isNull, notInArray, or, sql } from '
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns, notifications } from '@/db/schema'
+import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memoryDistillRuns, notifications, memoryTrash } from '@/db/schema'
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, type PageCursor, type MemoryListFilter, type FacetScope } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, MemoryConflictError, type PageCursor, type MemoryListFilter, type FacetScope, bulkDeleteMemories, restoreFromTrash, emptyTrash, importMemories, listMemoriesForExport, listTrashPage, listTrashFacets, getTrash, type TrashRow } from '@/memory/store'
+import { serializeMemoriesJson, parseMemoriesJson, serializeMemoriesMd, parseMemoriesMd, detectExchangeFormat, MEMSIDE_JSON_FORMAT, MEMSIDE_JSON_VERSION } from '@/memory/exchange'
 import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NotificationNotFoundError } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, resolveSubagentTranscript } from '@/claude/transcript'
@@ -499,6 +500,7 @@ export function createApp(deps: AppDeps) {
       unreadDegradations: unreadByKind['degradation'] ?? 0,
       latestUnreadLlmError: latestErrRows[0] ?? null,
       waitingJobs: waitingCount[0]?.n ?? 0,
+      trashCount: (await deps.db.select({ n: count() }).from(memoryTrash).all())[0]?.n ?? 0,
       rescan: rescanState,
     })
   })
@@ -711,6 +713,106 @@ export function createApp(deps: AppDeps) {
     const r = await bulkRejectUnevaluated(deps.db)
     deps.broadcast({ type: 'memories.bulk-rejected', rejected: r.rejected })
     return c.json(r)
+  })
+
+  // --- 批量删除（移入回收站，spec §数据模型）--------------------------------
+  app.post('/api/memories/bulk-delete', async (c) => {
+    const body = await c.req.json().catch(() => ({ ids: [] as string[] }))
+    const ids: string[] = Array.isArray(body.ids) ? body.ids.filter((x: unknown) => typeof x === 'string') : []
+    if (ids.length === 0) return c.json({ error: 'ids is empty' }, 400)
+    const r = await bulkDeleteMemories(deps.db, ids)
+    deps.broadcast({ type: 'memories.bulk-deleted', deleted: r.deleted, skipped: r.skipped })
+    return c.json(r)
+  })
+
+  // --- 回收站（spec §数据模型）----------------------------------------------
+  app.get('/api/trash', async (c) => {
+    const filter: MemoryListFilter = {}
+    const project = c.req.query('project'); if (project) filter.sourceCwd = project
+    const category = c.req.query('category'); if (category) filter.category = category
+    const slug = c.req.query('slug'); if (slug) filter.subjectSlug = slug
+    const valueClass = c.req.query('valueClass'); if (valueClass) filter.valueClass = valueClass
+    const page = await listTrashPage(deps.db, { limit: Number(c.req.query('limit')), before: parseBefore(c), filter })
+    return c.json(page)
+  })
+
+  app.get('/api/trash/:id', async (c) => {
+    const t = await getTrash(deps.db, c.req.param('id'))
+    if (!t) return c.json({ error: 'not found' }, 404)
+    return c.json({ trash: t.trash })
+  })
+
+  app.post('/api/trash/:id/restore', async (c) => {
+    try {
+      const m = await restoreFromTrash(deps.db, c.req.param('id'), { conflict: 'skip' })
+      deps.broadcast({ type: 'memory.restored', memoryId: m.id, trashId: c.req.param('id') })
+      return c.json({ memory: m })
+    } catch (e) {
+      if (e instanceof MemoryNotFoundError) return c.json({ error: (e as Error).message }, 404)
+      return c.json({ error: (e as Error).message }, 409)
+    }
+  })
+
+  app.post('/api/trash/empty', async (c) => {
+    const r = await emptyTrash(deps.db)
+    deps.broadcast({ type: 'trash.emptied', emptied: r.emptied })
+    return c.json(r)
+  })
+
+  // --- 导出（spec §导出三档作用域 × 两格式）----------------------------------
+  app.post('/api/memories/export', async (c) => {
+    const body = await c.req.json().catch(() => ({ scope: 'all', format: 'json' }))
+    const format: 'json' | 'markdown' = body.format === 'markdown' ? 'markdown' : 'json'
+    const scope: 'selected' | 'filter' | 'all' = ['selected', 'filter', 'all'].includes(body.scope) ? body.scope : 'all'
+    const filter: MemoryListFilter = {}
+    if (body.filter?.sourceCwd) filter.sourceCwd = body.filter.sourceCwd
+    if (body.filter?.subjectSlug) filter.subjectSlug = body.filter.subjectSlug
+    if (body.filter?.category) filter.category = body.filter.category
+    if (body.filter?.valueClass) filter.valueClass = body.filter.valueClass
+    const statuses: MemoryStatus[] = Array.isArray(body.statuses) ? body.statuses.filter((s: unknown) => typeof s === 'string') : []
+    const rows = await listMemoriesForExport(deps.db, { scope, ids: body.ids, statuses, filter })
+    if (format === 'markdown') {
+      const md = serializeMemoriesMd(rows, Date.now())
+      c.header('Content-Disposition', 'attachment; filename="memside-export.md"')
+      c.header('Content-Type', 'text/markdown; charset=utf-8')
+      return c.body(md)
+    }
+    return c.json({ format: MEMSIDE_JSON_FORMAT, version: MEMSIDE_JSON_VERSION, exportedAt: Date.now(), memories: rows })
+  })
+
+  // --- 导入（spec §格式自动识别 + 三冲突策略 + 条数 cap）---------------------
+  app.post('/api/memories/import', async (c) => {
+    const conflict: 'skip' | 'overwrite' | 'newid' = ['skip', 'overwrite', 'newid'].includes(c.req.query('conflict') ?? '')
+      ? (c.req.query('conflict') as 'skip' | 'overwrite' | 'newid') : 'skip'
+    let fileContent: string
+    try {
+      const form = await c.req.parseBody()
+      const file = form['file']
+      if (!(file instanceof Blob)) return c.json({ error: 'no file uploaded' }, 400)
+      fileContent = await file.text()
+    } catch {
+      return c.json({ error: 'invalid upload' }, 400)
+    }
+    const fmt = detectExchangeFormat(fileContent)
+    if (fmt === 'json') {
+      const { memories: records, errors: parseErrors } = parseMemoriesJson(fileContent)
+      if (records.length > 10_000) return c.json({ error: 'too many records (max 10000)' }, 400)
+      const r = await importMemories(deps.db, records, { conflict })
+      deps.broadcast({ type: 'memories.imported', imported: r.imported, skipped: r.skipped, overwritten: r.overwritten })
+      // 合并解析期错误（invalid record 在 parseMemoriesJson 阶段已过滤并计入 errors，
+      // 不进 importMemories；不合并会让客户端少报拒收，spec §失败模式 #4）
+      return c.json({ ...r, errors: [...r.errors, ...parseErrors] })
+    }
+    // markdown 低保真 -> createCandidate 循环
+    const { inputs, errors: parseErrors } = parseMemoriesMd(fileContent)
+    if (inputs.length > 10_000) return c.json({ error: 'too many records (max 10000)' }, 400)
+    let imported = 0; const importErrors = [...parseErrors]
+    for (const inp of inputs) {
+      try { await createCandidate(deps.db, inp); imported += 1 }
+      catch (e) { importErrors.push(`failed: ${(e as Error).message}`) }
+    }
+    deps.broadcast({ type: 'memories.imported', imported, skipped: 0, overwritten: 0 })
+    return c.json({ imported, skipped: 0, overwritten: 0, errors: importErrors })
   })
 
   // --- Discards (AI 自动拒绝审计) -----------------------------------------
