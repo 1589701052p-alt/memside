@@ -1146,10 +1146,20 @@ function LlmSettings() {
     } catch (e) { setMsg(`保存失败: ${e}`) }
     finally { setBusy(false) }
   }
+  // 「清除」只清空输入框，不动已保存的 UI 级凭证（spec bug fix 2026-08-17：
+  // 旧版 onClear 发 {clear:true} 删整级 key，「当前生效」会回退到 settings.json/
+  // env 里的下层凭证，用户看到的「已保存 api 被换掉」实为凭证链回退）。要真正
+  // 删除已保存配置用下面的「删除已保存」（带二次确认 + 回退提示）。
   const onClear = async () => {
+    setBaseURL(''); setToken(''); setModel(''); setProtocol('anthropic')
+    setMsg('已清空输入框（未改动已保存配置）')
+  }
+  const onDelete = async () => {
+    if (!state?.saved) { setMsg('没有已保存配置可删除'); return }
+    if (!confirm('将删除已保存的 UI 配置，生效 API 会回退到 settings.json / 环境变量里的凭证。确认？')) return
     setBusy(true); setMsg(null)
-    try { setState(await saveLlmSettings({ clear: true })); setBaseURL(''); setModel(''); setProtocol('anthropic'); setMsg('已清除 UI 配置') }
-    catch (e) { setMsg(`清除失败: ${e}`) }
+    try { setState(await saveLlmSettings({ clear: true })); setBaseURL(''); setToken(''); setModel(''); setProtocol('anthropic'); setMsg('已删除已保存配置') }
+    catch (e) { setMsg(`删除失败: ${e}`) }
     finally { setBusy(false) }
   }
   const onTest = async () => {
@@ -1209,7 +1219,8 @@ function LlmSettings() {
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <button disabled={busy} onClick={() => void onSave()}>保存</button>
         <button disabled={busy} onClick={() => void onTest()}>测试连接</button>
-        <button disabled={busy} onClick={() => void onClear()}>清除</button>
+        <button disabled={busy} onClick={() => void onClear()}>清除输入</button>
+        <button disabled={busy || !state?.saved} onClick={() => void onDelete()} style={{ color: '#c00' }}>删除已保存</button>
         {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
         {msg ? <span style={{ color: msg.startsWith('连接失败') || msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
       </div>
