@@ -1,13 +1,12 @@
 // spec: docs/superpowers/specs/2026-08-17-runtime-path-config-design.md §3.6
 // 锁 4 个 /api/settings/runtime* 端点形状 + install/uninstall 经注入点（不碰真实 ~/.claude）。
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
-import { rmSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '@/db/client'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
-import { MEMSIDE_TAG } from '@/install'
 
 const root = join(import.meta.dir, '.tmp-settings-runtime-api')
 let dir = ''

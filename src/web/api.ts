@@ -521,7 +521,8 @@ export async function getRuntimeSettings(fetchFn: FetchLike = fetch): Promise<Ru
   return (await res.json()) as RuntimeSettingsState
 }
 
-/** PUT /api/settings/runtime — 字段级保存（空串=回默认）。返回更新后状态。 */
+/** PUT /api/settings/runtime — 字段级保存（空串=回默认）。返回更新后状态。
+ * 非 2xx 抛错（对齐 saveJudgeConfig），让 App.tsx onSave 的 try/catch 显 msg。 */
 export async function saveRuntimeSettings(
   patch: Partial<{ claudeDir: string; settingsFilename: string; opencodeDir: string }>,
   fetchFn: FetchLike = fetch,
@@ -531,7 +532,9 @@ export async function saveRuntimeSettings(
     body: JSON.stringify(patch),
     headers: { 'content-type': 'application/json' },
   })
-  return (await res.json()) as RuntimeSettingsState
+  const data = (await res.json()) as RuntimeSettingsState & { error?: string }
+  if (!res.ok) throw new Error(data.error ?? 'save runtime settings failed')
+  return data
 }
 
 /** POST /api/settings/runtime/install — 读已存路径装 hooks。失败返回 {ok:false,error}。 */

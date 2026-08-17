@@ -2,7 +2,7 @@
 // 「UI 配置存取 + token 打码」语义，spec: docs/superpowers/specs/2026-07-30-llm-settings-ui-design.md
 import { test, expect } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { openDb } from '../src/db/client'
 import { appSettings } from '../src/db/schema'
@@ -124,4 +124,20 @@ test('RuntimePaths 脏数据（非字符串）回默认不抛', () => {
   // 123 是字符串 -> 原样用；空串 -> 回默认
   expect(got.claudeDir).toBe('123')
   expect(got.settingsFilename).toBe('settings.json')
+})
+
+// 回归防护：IF-1 —— UI 配 ~/.cac 后 daemon 重启 / `memside install` 透传 `~`-前缀
+// 路径给 installHooks → mkdirSync('~/.cac') 建字面 `~` 目录 → hooks 写到
+// `./~/.cac/setting.json`，codeagent 读不到，闭环静默断。loadRuntimePaths 必须在
+// 返回前把 `~` 展开为真实 home，使 daemon/CLI/server 三处消费者拿到的都是绝对路径。
+// spec: docs/superpowers/specs/2026-08-17-runtime-path-config-design.md §4.2
+test('loadRuntimePaths: ~ 前缀 claudeDir 展开为绝对路径（IF-1 回归）', () => {
+  const db = tmpDb()
+  saveRuntimePaths(db, { claudeDir: '~/.cac' })
+  const got = loadRuntimePaths(db)
+  expect(got.claudeDir).not.toContain('~')
+  expect(got.claudeDir.endsWith('.cac')).toBe(true)
+  // 展开为真实 home/.cac（settings.test.ts 未 mock HOME，按 resolveHome 同序构造期望值）
+  const home = process.env.HOME || process.env.USERPROFILE || homedir()
+  expect(got.claudeDir).toBe(join(home, '.cac'))
 })

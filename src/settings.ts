@@ -114,6 +114,19 @@ function resolveHome(): string {
   return process.env.HOME || process.env.USERPROFILE || homedir()
 }
 
+/**
+ * Expand a leading `~` to the resolved home directory (IF-1 fix). Without this,
+ * a `~`-prefixed claudeDir saved from the UI (`~/.cac`) is passed verbatim to
+ * `installHooks` → `mkdirSync('~/.cac')` creates a literal `~` directory and
+ * hooks land in `./~/.cac/setting.json`, which codeagent never reads — silently
+ * breaking the capture→inject loop on daemon restart / `memside install`.
+ * Absolute paths and the defaults (already absolute) pass through unchanged.
+ */
+function expandTilde(p: string): string {
+  if (p.startsWith('~')) return join(resolveHome(), p.slice(1))
+  return p
+}
+
 export interface RuntimePaths {
   /** claude 配置目录，默认 ~/.claude。 */
   claudeDir: string
@@ -147,7 +160,7 @@ export function loadRuntimePaths(db: DbClient): RuntimePaths {
   const settingsFilename = map.get(RUNTIME_KEYS.settingsFilename)
   const opencodeDir = map.get(RUNTIME_KEYS.opencodeDir)
   return {
-    claudeDir: claudeDir && claudeDir.length > 0 ? claudeDir : d.claudeDir,
+    claudeDir: expandTilde(claudeDir && claudeDir.length > 0 ? claudeDir : d.claudeDir),
     settingsFilename: settingsFilename && settingsFilename.length > 0 ? settingsFilename : d.settingsFilename,
     opencodeDir: opencodeDir && opencodeDir.length > 0 ? opencodeDir : d.opencodeDir,
   }

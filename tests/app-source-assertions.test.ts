@@ -2,7 +2,7 @@
 // 运行时组件兜底面（CLAUDE.md 最低要求）：RuntimeSettings section 挂载点 + 安装/卸载按钮。
 // App.tsx 无法在 bun test 直接渲染（需 vite/浏览器），靠源码层文本断言锁接线存在。
 import { test, expect } from 'bun:test'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 

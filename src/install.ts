@@ -207,6 +207,12 @@ export function uninstallHooks(opts: { baseDir?: string; settingsFilename?: stri
     hooks[ev] = groups
   }
 
+  // N-3: no memside-managed markers anywhere -> don't rewrite the file. Re-serializing
+  // would reformat the user's settings.json (indentation / trailing newline) even
+  // though no group was removed. We already parsed to detect the hooks field, so
+  // the read wasn't wasted; we just skip the write.
+  if (removed === 0) return { removed: 0, settingsPath }
+
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
   return { removed, settingsPath }
 }

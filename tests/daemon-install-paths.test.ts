@@ -67,3 +67,24 @@ test('startDaemon without installClaudeHooks does not write settings', async () 
     expect(existsSync(join(fakeHome, '.claude', 'settings.json'))).toBe(false)
   } finally { server.stop() }
 })
+
+// 回归防护：IF-1 —— 用户在 UI 配 ~/.cac（~ 前缀）后，daemon 重启读 loadRuntimePaths
+// 必须把 ~ 展开为真实 HOME 再透传 installHooks。未展开会让 mkdirSync 建字面 `~`
+// 目录、hooks 落到 ./~/.cac/setting.json，codeagent 读不到，闭环静默断。
+// fakeHome 即 beforeEach 设的 process.env.HOME，~ 展开应指向它。
+test('startDaemon expands ~ in configured claudeDir instead of creating a literal ~ dir (IF-1)', async () => {
+  // 预存 ~ 前缀路径（codeagent 用户在 UI 配 ~/.cac）
+  const db = openDb(dbPath)
+  saveRuntimePaths(db, { claudeDir: '~/.cac', settingsFilename: 'setting.json' })
+  db.$client.close()
+
+  const { server } = await startDaemon({ dbPath, port: 17804, installClaudeHooks: true })
+  try {
+    // ~ 展开为 fakeHome：hooks 落到 fakeHome/.cac/setting.json
+    expect(existsSync(join(fakeHome, '.cac', 'setting.json'))).toBe(true)
+    // 不得出现字面 `~` 目录（未展开的回归特征）
+    expect(existsSync(join(fakeHome, '~', '.cac', 'setting.json'))).toBe(false)
+    const raw = JSON.parse(readFileSync(join(fakeHome, '.cac', 'setting.json'), 'utf-8'))
+    expect(JSON.stringify(raw.hooks)).toContain(MEMSIDE_TAG)
+  } finally { server.stop() }
+})
