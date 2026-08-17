@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { openDb } from '@/db/client'
 import { startDaemon } from '@/daemon'
 import { saveRuntimePaths } from '@/settings'
-import { MEMSIDE_TAG, installOpencodePlugin } from '@/install'
+import { MEMSIDE_TAG } from '@/install'
 
 const pluginSrcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'opencode-plugin')
 
