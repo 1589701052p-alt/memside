@@ -22,7 +22,7 @@ jobs:
       - uses: crazy-max/ghaction-chocolatey@v3
         with:
           args: install nsis -y
-      - name: Install EnVar NSIS plugin  # choco nsis 不带 EnVar 第三方插件，installer.nsi 依赖 EnVar:: 调用
+      - name: Install EnVar NSIS plugin + add makensis to PATH  # choco nsis 不带 EnVar 第三方插件（installer.nsi 依赖 EnVar::）；choco 装的 nsis 不写 PATH（makensis 找不到），本 step 同时把 NSIS 目录加到 GITHUB_PATH
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -32,7 +32,10 @@ jobs:
           Invoke-WebRequest -Uri 'https://github.com/GsNSIS/EnVar/releases/download/v0.3.1/EnVar-Plugin.zip' -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath $nsisDir -Force
           if (-not (Test-Path "$nsisDir\Plugins\x86-unicode\EnVar.dll")) { throw "EnVar.dll missing after extract" }
-          Write-Host "EnVar plugin installed to $nsisDir\Plugins\x86-unicode\EnVar.dll"
+          # choco nsis 把 makensis.exe 放在 nsisDir 根，但不写 PATH —— 注入 GITHUB_PATH 让后续 step 能直接调 makensis
+          if (-not (Test-Path "$nsisDir\makensis.exe")) { throw "makensis.exe not found: $nsisDir\makensis.exe" }
+          Add-Content -Path $env:GITHUB_PATH -Value "$nsisDir"
+          Write-Host "EnVar plugin + makensis on PATH: $nsisDir"
       - run: bun run build:installer  # installer/memside-setup.exe（makensis 读 installer/installer.nsi）
         working-directory: ${{ github.workspace }}
       - name: Upload to GitHub Release
