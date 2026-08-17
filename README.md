@@ -21,6 +21,10 @@ AI agent（Claude Code / opencode）的本地记忆 sidecar。它监听你的 AI
 
 ---
 
+<img width="1051" height="1067" alt="屏幕截图 2026-08-17 175514" src="https://github.com/user-attachments/assets/efbbb22f-65f4-4e32-b2ea-9b7bd76bd746" />
+
+---
+
 ## 安装
 
 三种方式，**选一种**即可。装好后都得到同一个命令 `memside`，使用方式完全一样。
