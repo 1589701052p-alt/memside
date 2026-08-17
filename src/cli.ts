@@ -21,6 +21,9 @@ import { startDaemon } from './daemon'
 import { installHooks, installOpencodePlugin } from './install'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { openDb } from './db/client'
+import { loadRuntimePaths } from './settings'
 
 const cmd = process.argv[2]
 const PORT = Number(process.env.MEMSIDE_PORT ?? 7777)
@@ -32,7 +35,10 @@ if (cmd === 'start') {
   await startDaemon({ port: PORT, installClaudeHooks: false })
   console.log(`memside daemon on http://127.0.0.1:${PORT}`)
 } else if (cmd === 'install') {
-  installHooks({ port: PORT })
+  const db = openDb(join(homedir(), '.memside', 'memside.db'))
+  const rp = loadRuntimePaths(db)
+  db.$client.close()
+  installHooks({ port: PORT, baseDir: rp.claudeDir, settingsFilename: rp.settingsFilename })
   installOpencodePlugin({ port: PORT, pluginSrcDir })
   console.log('hooks installed into ~/.claude/settings.json; opencode plugin installed into ~/.config/opencode/')
 } else if (cmd === 'start-and-install') {

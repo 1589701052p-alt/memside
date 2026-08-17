@@ -10,7 +10,7 @@ import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
 import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
 import { resolveCallLLMProtocol, type LLMCall, type LLMCallOpts } from '@/llm'
-import { loadUiLlmConfig, loadJudgeConfig, type UiLlmConfig } from './settings'
+import { loadUiLlmConfig, loadJudgeConfig, loadRuntimePaths, type UiLlmConfig, type RuntimePaths } from './settings'
 import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
@@ -176,7 +176,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   // /hooks/opencode/inject 走它；capture 路由与 plugin 安装在 Task 5/6/7 落地。
   const opencodeAdapter = new OpencodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
-  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, staticAssets: opts.serveStaticAssets, tracker, callLLM: resolveCallLLM({}, db) })
+  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, staticAssets: opts.serveStaticAssets, tracker, callLLM: resolveCallLLM({}, db), port })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {
@@ -190,7 +190,14 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   }
   const stopLoop = startMemoryDistillLoop(db, tickDeps)
 
-  if (opts.installClaudeHooks) installHooks({ port })
+  if (opts.installClaudeHooks) {
+    // 读 UI 配置的运行环境路径（codeagent 用 ~/.cac/setting.json 等）。存储异常降级默认。
+    let rp: RuntimePaths
+    try { rp = loadRuntimePaths(db) } catch {
+      rp = { claudeDir: join(homedir(), '.claude'), settingsFilename: 'settings.json', opencodeDir: join(homedir(), '.config', 'opencode') }
+    }
+    installHooks({ port, baseDir: rp.claudeDir, settingsFilename: rp.settingsFilename })
+  }
 
   return {
     server,
