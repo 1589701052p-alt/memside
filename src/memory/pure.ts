@@ -274,6 +274,34 @@ function turnPriority(t: TranscriptTurn): number {
   return 4
 }
 
+const TASK_NOTIFICATION_MARKER = '<task-notification>'
+const COMPACT_CONTINUATION_PREFIX = 'This session is being continued from a previous conversation'
+
+/**
+ * 剔除 distiller 输入里的两类 user-role 噪声（spec 2026-08-17 §1.1）：
+ *   1. task-notification 块：content 含 `<task-notification>` XML（harness 后台 task 回调，零记忆价值）。
+ *   2. compact 续接块：content 以 `This session is being continued from a previous conversation` 开头
+ *      （历史压缩摘要，非本会话原话，作 evidence 出处不可靠；distiller 的 priorContext 段已单独提供背景）。
+ *
+ * 纯函数 + 永不抛：任何异常降级为返回原 turns（保守保留）。只识别 user role。
+ * 在 filterTranscriptForDistill 的 compact/budget 之前执行。
+ */
+export function stripNoiseTurns(turns: readonly TranscriptTurn[]): TranscriptTurn[] {
+  if (!Array.isArray(turns)) return []
+  try {
+    return turns.filter((t) => {
+      if (t.role !== 'user') return true
+      const c = t.content
+      if (typeof c !== 'string') return true
+      if (c.includes(TASK_NOTIFICATION_MARKER)) return false
+      if (c.trimStart().startsWith(COMPACT_CONTINUATION_PREFIX)) return false
+      return true
+    })
+  } catch {
+    return [...turns]
+  }
+}
+
 /**
  * Filter a parsed transcript for distill-time input: compact file-source tool
  * results to a one-line placeholder, cap command/test outputs, keep errors
@@ -289,7 +317,8 @@ export function filterTranscriptForDistill(
 ): TranscriptTurn[] {
   if (!Array.isArray(turns)) return []
   try {
-    const compacted = turns.map((t) =>
+    const denoised = stripNoiseTurns(turns)
+    const compacted = denoised.map((t) =>
       t.role === 'tool' ? compactToolTurn(t) : { ...t, content: truncate(t.content, NON_TOOL_CAP_CHARS) },
     )
     const used = () => compacted.reduce(
