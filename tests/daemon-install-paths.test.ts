@@ -3,11 +3,14 @@
 // 用真实 startDaemon + 临时 db + 临时 HOME，断言 hooks 落到自定义路径。
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { openDb } from '@/db/client'
 import { startDaemon } from '@/daemon'
 import { saveRuntimePaths } from '@/settings'
-import { MEMSIDE_TAG } from '@/install'
+import { MEMSIDE_TAG, installOpencodePlugin } from '@/install'
+
+const pluginSrcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'opencode-plugin')
 
 // EBUSY-safe pattern (同 daemon-static.test.ts)：startDaemon 内部自开 db 且 stop()
 // 不 close handle，Windows 上重删会 EBUSY。root 仅在 beforeAll 清一次；每测试用
@@ -86,5 +89,73 @@ test('startDaemon expands ~ in configured claudeDir instead of creating a litera
     expect(existsSync(join(fakeHome, '~', '.cac', 'setting.json'))).toBe(false)
     const raw = JSON.parse(readFileSync(join(fakeHome, '.cac', 'setting.json'), 'utf-8'))
     expect(JSON.stringify(raw.hooks)).toContain(MEMSIDE_TAG)
+  } finally { server.stop() }
+})
+
+// spec 2026-08-17-runtime-settings-redesign §3.2：startDaemon 经 DaemonOpts.opencodePluginSource
+// 把 install/uninstall 接缝注入 createApp。锁：有 source → install 端点可用并真装文件；
+// 无 source → install 返回 ok:false 不可用，但 uninstall 恒可用（不依赖 source）。
+test('startDaemon with opencodePluginSource.srcDir → createApp 收到能装的 installOpencodePluginFn', async () => {
+  const db = openDb(dbPath)
+  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode') })
+  db.$client.close()
+
+  const { server } = await startDaemon({
+    dbPath, port: 17810,
+    opencodePluginSource: { srcDir: pluginSrcDir },
+  })
+  try {
+    // 直接打 install 端点（经 UI 按钮的同款路径）
+    const res = await fetch(`http://127.0.0.1:17810/api/settings/runtime/install?target=opencode`, { method: 'POST' })
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.pluginPath).toContain('memside-opencode')
+    expect(existsSync(join(fakeHome, 'opencode', 'memside-opencode', 'memside.js'))).toBe(true)
+  } finally { server.stop() }
+})
+
+test('startDaemon with opencodePluginSource.files → install 用 files 模式', async () => {
+  const db = openDb(dbPath)
+  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode2') })
+  db.$client.close()
+
+  const { server } = await startDaemon({
+    dbPath, port: 17811,
+    opencodePluginSource: { files: { 'memside.js': 'port=__MEMSIDE_PORT__;', 'package.json': '{"name":"memside"}' } },
+  })
+  try {
+    const res = await fetch(`http://127.0.0.1:17811/api/settings/runtime/install?target=opencode`, { method: 'POST' })
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    const js = readFileSync(join(fakeHome, 'opencode2', 'memside-opencode', 'memside.js'), 'utf-8')
+    expect(js).toBe('port=17811;') // 端口烘焙
+  } finally { server.stop() }
+})
+
+test('startDaemon without opencodePluginSource → install?target=opencode 返回 ok:false 不可用', async () => {
+  const db = openDb(dbPath)
+  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode3') })
+  db.$client.close()
+
+  const { server } = await startDaemon({ dbPath, port: 17812 })
+  try {
+    const res = await fetch(`http://127.0.0.1:17812/api/settings/runtime/install?target=opencode`, { method: 'POST' })
+    const body = await res.json()
+    expect(body.ok).toBe(false)
+    expect(body.error).toContain('不可用')
+  } finally { server.stop() }
+})
+
+test('startDaemon always provides uninstallOpencodePluginFn (even without source)', async () => {
+  const db = openDb(dbPath)
+  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode4') })
+  db.$client.close()
+
+  const { server } = await startDaemon({ dbPath, port: 17813 }) // 不传 source
+  try {
+    const res = await fetch(`http://127.0.0.1:17813/api/settings/runtime/uninstall?target=opencode`, { method: 'POST' })
+    const body = await res.json()
+    expect(body.ok).toBe(true) // uninstall 不依赖 source，恒可用
+    expect(body.removed).toBe(0)
   } finally { server.stop() }
 })

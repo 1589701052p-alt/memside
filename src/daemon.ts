@@ -15,7 +15,7 @@ import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
 import { OpencodeAdapter } from './adapter/opencode'
-import { installHooks } from './install'
+import { installHooks, installOpencodePlugin, uninstallOpencodePlugin } from './install'
 import { createActivityTracker } from './activity'
 
 export interface DaemonOpts {
@@ -28,6 +28,11 @@ export interface DaemonOpts {
   /** 内存静态资产（exe 模式）：透传 createApp.staticAssets，与 serveStaticDir 互斥。
    * dev/npm 用 serveStaticDir 走磁盘。 */
   serveStaticAssets?: { indexHtml: string; assets: Record<string, Uint8Array> }
+  /** opencode 插件源（让 UI 的「保存并安装」能在请求时装/卸 opencode，spec runtime-settings-redesign §3.2）。
+   *  - dev/npm：cli.ts 传 { srcDir: <repo>/opencode-plugin }
+   *  - exe：launcher 传 { files: { memside.js, 'package.json' } }
+   *  缺省 → daemon 不暴露 opencode install 能力（端点 ok:false + 说明）；uninstall 仍可用。 */
+  opencodePluginSource?: { srcDir: string } | { files: { 'memside.js': string; 'package.json': string } }
 }
 
 /**
@@ -176,7 +181,17 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   // /hooks/opencode/inject 走它；capture 路由与 plugin 安装在 Task 5/6/7 落地。
   const opencodeAdapter = new OpencodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
-  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, staticAssets: opts.serveStaticAssets, tracker, callLLM: resolveCallLLM({}, db), port })
+  // opencode 插件 install/uninstall 接缝（spec runtime-settings-redesign §3.2）。
+  // install 依赖 source（srcDir/files）；uninstall 不依赖 source，恒注入真实实现。
+  const installOpencodePluginFn = opts.opencodePluginSource
+    ? (o: { baseDir?: string }) => {
+        const src = opts.opencodePluginSource as { srcDir?: string; files?: { 'memside.js': string; 'package.json': string } }
+        if (src.srcDir) installOpencodePlugin({ port, baseDir: o.baseDir, pluginSrcDir: src.srcDir })
+        else if (src.files) installOpencodePlugin({ port, baseDir: o.baseDir, files: src.files })
+      }
+    : undefined
+  const uninstallOpencodePluginFn = (o: { baseDir?: string }) => uninstallOpencodePlugin(o)
+  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, staticAssets: opts.serveStaticAssets, tracker, callLLM: resolveCallLLM({}, db), port, installOpencodePluginFn, uninstallOpencodePluginFn })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {
