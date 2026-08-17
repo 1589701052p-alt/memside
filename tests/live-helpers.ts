@@ -104,6 +104,31 @@ export function makeFixture(): TranscriptTurn[] {
   ]
 }
 
+/**
+ * 大输入 fixture（spec §3.3）：~360 turn / ~12K tokens。
+ * 模拟长寿会话：大量 assistant rationale + tool turn + 明确可提炼规则。
+ * 用于 live e2e 逼出真实路径（124 tokens 的小 fixture 测不出 empty_output/parse_error）。
+ * 含明确业务规则确保模型应产出 ≥1 候选（非 empty_output）。
+ */
+export function makeLargeFixture(): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = []
+  // 开场：用户陈述明确规则（必被提炼）
+  turns.push({ role: 'user', content: 'Team rule: all deployments must pass the smoke test before promote to production. No exceptions.' })
+  turns.push({ role: 'assistant', content: 'Understood. Deployments require a passing smoke test before production promote; I will enforce this gate.' })
+  turns.push({ role: 'thinking', content: 'The smoke-test-before-promote rule is a hard deployment invariant the user stated explicitly.' })
+  // 中段：大量 rationale + tool（模拟长寿会话，撑大输入）
+  for (let i = 0; i < 90; i++) {
+    turns.push({ role: 'assistant', content: `Investigating step ${i}: I am checking the deployment config and reviewing the test output to confirm the gate is wired correctly. The smoke test must run against the staging endpoint before any promote action is taken, and the result must be a clean pass.` })
+    turns.push({ role: 'assistant', content: '[tool:Bash]', toolName: 'Bash', toolCall: `{"command":"kubectl get deploy -n staging","description":"check staging deploy"}` })
+    turns.push({ role: 'tool', content: `NAME READY STATUS\napp-${i} 1/1 Running\ncheck-${i} 1/1 Running`, toolName: 'Bash' })
+    turns.push({ role: 'thinking', content: `The staging deploy ${i} is ready. The smoke test gate is in place. Before any promote I must confirm the smoke test passed.` })
+  }
+  // 收尾：另一条明确规则（确保多候选）
+  turns.push({ role: 'user', content: 'Also: the rollback window is 30 minutes after promote. Past that, escalate to on-call instead of auto-rollback.' })
+  turns.push({ role: 'assistant', content: 'Noted: rollback allowed within 30 minutes of promote; after that, escalate to on-call rather than auto-rollback.' })
+  return turns
+}
+
 /** Evidence judge system prompt：只判 evidence 摘句是否真出自 transcript 原文。 */
 export const JUDGE_SYSTEM_PROMPT_EVIDENCE = `你是 memside 的 evidence 审查员。判断每条候选记忆的 evidence（原话摘句）是否真实出现在给定的 transcript 原文中。
 只输出纯 JSON 对象，不要 markdown 围栏，不要解释文字：

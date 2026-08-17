@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test'
 import { distillTranscript } from '@/memory/distiller'
-import { realCallLLM, judgeCallLLM, LIVE_GUARD, makeFixture, judgeEvidence } from './live-helpers'
+import { realCallLLM, judgeCallLLM, LIVE_GUARD, makeFixture, judgeEvidence, makeLargeFixture } from './live-helpers'
 
 /**
  * Live distill e2e（spec 2026-08-16 §5 检查 ①②③）。
@@ -46,6 +46,35 @@ test.skipIf(!LIVE_GUARD)(
           `候选 #${v.index} 的 evidence 被判为伪造（贴金）`,
         ).toBe(true)
       }
+    }
+  },
+  { timeout: 300_000 },
+)
+
+/**
+ * Live distill 大输入 e2e（spec §3.3）。
+ * 用 ~10-15K tokens 真实规模 fixture，逼出真实路径（小 fixture 124 tokens 测不出）。
+ * 断言中等输入下模型应产出 ≥1 候选（非空字符串/非 empty_output）。
+ */
+test.skipIf(!LIVE_GUARD)(
+  'live distill 大输入: 中等规模应产出候选（非空返回）',
+  async () => {
+    const turns = makeLargeFixture()
+    const result = await distillTranscript({
+      turns,
+      runtime: 'claude-code',
+      cwd: '/live-test/proj',
+      existingSlugs: [],
+      callLLM: realCallLLM,
+    })
+    // 检查①：不报错
+    expect(result.callThrew).toBe(false)
+    expect(result.errorMessage).toBe(null)
+    // 中等输入含明确规则，模型应产出 ≥1 候选（非空字符串/非 empty_output）
+    expect(result.rawCount).toBeGreaterThan(0)
+    expect(result.candidates.length).toBeGreaterThanOrEqual(1)
+    for (const c of result.candidates) {
+      expect(c.title).toContain('[category:')
     }
   },
   { timeout: 300_000 },
