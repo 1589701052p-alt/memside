@@ -30,6 +30,8 @@ afterEach(() => {
 function makeApp(overrides: {
   installHooksFn?: (opts: { port: number; baseDir?: string; settingsFilename?: string }) => void
   uninstallHooksFn?: (opts: { baseDir?: string; settingsFilename?: string }) => { removed: number; settingsPath: string }
+  installOpencodePluginFn?: (opts: { baseDir?: string }) => void
+  uninstallOpencodePluginFn?: (opts: { baseDir?: string }) => { removed: number; pluginPath: string; dirRemoved: boolean }
 } = {}) {
   return createApp({
     db,
@@ -137,4 +139,81 @@ test('install endpoint expands ~ in claudeDir before calling installHooksFn', as
   await req(app, '/api/settings/runtime/install', post('/api/settings/runtime/install'))
   expect(called!.baseDir).not.toContain('~') // ~ 已展开为真实 home
   expect(called!.baseDir!.endsWith('.cac')).toBe(true)
+})
+
+test('POST install?target=opencode 调 installOpencodePluginFn 传已存 opencodeDir + port', async () => {
+  let called: { baseDir?: string } | null = null
+  const app = makeApp({ installOpencodePluginFn: (opts) => { called = opts } })
+  await req(app, '/api/settings/runtime', putJson({ opencodeDir: '/home/u/.config/opencode' }))
+  const { status, body } = await req(app, '/api/settings/runtime/install?target=opencode', post('/api/settings/runtime/install?target=opencode'))
+  expect(status).toBe(200)
+  expect(body.ok).toBe(true)
+  expect(body.pluginPath).toBeTruthy()
+  expect(called!.baseDir).toBe('/home/u/.config/opencode')
+})
+
+test('POST install?target=opencode 缺 installOpencodePluginFn → ok:false 含不可用提示', async () => {
+  const app = makeApp() // 不注入 installOpencodePluginFn
+  await req(app, '/api/settings/runtime', putJson({ opencodeDir: '/x/opencode' }))
+  const { body } = await req(app, '/api/settings/runtime/install?target=opencode', post('/api/settings/runtime/install?target=opencode'))
+  expect(body.ok).toBe(false)
+  expect(body.error).toContain('不可用')
+})
+
+test('POST install?target=opencode 抛错 → ok:false error', async () => {
+  const app = makeApp({ installOpencodePluginFn: () => { throw new Error('ro locked') } })
+  await req(app, '/api/settings/runtime', putJson({ opencodeDir: '/x' }))
+  const { body } = await req(app, '/api/settings/runtime/install?target=opencode', post('/api/settings/runtime/install?target=opencode'))
+  expect(body.ok).toBe(false)
+  expect(body.error).toContain('ro locked')
+})
+
+test('POST uninstall?target=opencode 调 uninstallOpencodePluginFn 返回 removed/dirRemoved', async () => {
+  let called: { baseDir?: string } | null = null
+  const app = makeApp({ uninstallOpencodePluginFn: (opts) => { called = opts; return { removed: 1, pluginPath: '/x/opencode.json', dirRemoved: true } } })
+  await req(app, '/api/settings/runtime', putJson({ opencodeDir: '/x/opencode' }))
+  const { status, body } = await req(app, '/api/settings/runtime/uninstall?target=opencode', post('/api/settings/runtime/uninstall?target=opencode'))
+  expect(status).toBe(200)
+  expect(body.ok).toBe(true)
+  expect(body.removed).toBe(1)
+  expect(body.dirRemoved).toBe(true)
+  expect(body.pluginPath).toBe('/x/opencode.json')
+  expect(called!.baseDir).toBe('/x/opencode')
+})
+
+test('POST uninstall?target=opencode 抛错 → ok:false error', async () => {
+  const app = makeApp({ uninstallOpencodePluginFn: () => { throw new Error('perm') } })
+  await req(app, '/api/settings/runtime', putJson({ opencodeDir: '/x' }))
+  const { body } = await req(app, '/api/settings/runtime/uninstall?target=opencode', post('/api/settings/runtime/uninstall?target=opencode'))
+  expect(body.ok).toBe(false)
+  expect(body.error).toContain('perm')
+})
+
+test('install?target=opencode 展开 ~ in opencodeDir', async () => {
+  let called: { baseDir?: string } | null = null
+  const app = makeApp({ installOpencodePluginFn: (opts) => { called = opts } })
+  await req(app, '/api/settings/runtime', putJson({ opencodeDir: '~/.config/opencode' }))
+  await req(app, '/api/settings/runtime/install?target=opencode', post('/api/settings/runtime/install?target=opencode'))
+  expect(called!.baseDir).not.toContain('~')
+  // 平台归一化：Windows path.join 产出反斜杠；brief 原断言 endsWith('.config/opencode') 假设 POSIX。
+  expect(called!.baseDir!.replace(/\\/g, '/').endsWith('.config/opencode')).toBe(true)
+})
+
+test('install?target=claude（默认）与既有行为逐字节一致（回归锁）', async () => {
+  let called: { port: number; baseDir?: string; settingsFilename?: string } | null = null
+  const app = makeApp({ installHooksFn: (opts) => { called = opts } })
+  await req(app, '/api/settings/runtime', putJson({ claudeDir: '/home/u/.cac', settingsFilename: 'setting.json' }))
+  // 不带 target query
+  const { body } = await req(app, '/api/settings/runtime/install', post('/api/settings/runtime/install'))
+  expect(body.ok).toBe(true)
+  expect(body.settingsPath).toBe(join('/home/u/.cac', 'setting.json'))
+  expect(called!.baseDir).toBe('/home/u/.cac')
+  expect(called!.settingsFilename).toBe('setting.json')
+})
+
+test('install?target=invalid → 400', async () => {
+  const app = makeApp()
+  const { status, body } = await req(app, '/api/settings/runtime/install?target=bogus', post('/api/settings/runtime/install?target=bogus'))
+  expect(status).toBe(400)
+  expect(body.error).toBeTruthy()
 })
