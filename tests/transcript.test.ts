@@ -431,6 +431,21 @@ test('resolveSubagentTranscript: 直连路径不存在 -> agentTranscriptPathExi
   expect(turns).toEqual([])
 })
 
+test('resolveSubagentTranscript: 直连路径指向目录 -> agentTranscriptPathExists:false（契约是"存在且为文件"，目录不算）', () => {
+  // 锁 code-review finding：existsSync 对目录也 true，会误判为"文件存在"，
+  // 污染观测决策树（误触发"修读路径逻辑"分支）。safeIsFile 用 statSync().isFile() 收紧。
+  mkdirSync(join(dir, 'main', 'subagents'), { recursive: true })
+  const mainPath = join(dir, 'main.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
+  const dirAsDirect = join(dir, 'a-directory')   // 一个目录而非文件
+  mkdirSync(dirAsDirect, { recursive: true })
+  const { turns, diag } = resolveSubagentTranscript(mainPath, 'AG', dirAsDirect)
+  expect(diag.agentTranscriptPath).toBe(dirAsDirect)
+  expect(diag.agentTranscriptPathExists).toBe(false)   // 目录不是文件
+  expect(diag.derivedExists).toBe(false)
+  expect(turns).toEqual([])
+})
+
 test('resolveSubagentTranscript: 第三参数空串/undefined/null -> agentTranscriptPath=null、agentTranscriptPathExists=false（向后兼容回归锁）', () => {
   // 夹具：derivedPath 不存在，主会话存在。无论第三参数缺省/空串/null，diag 两字段恒
   // null/false，且 derivedExists/turns/derivedPath 与旧版（不传第三参数）逐字节一致。
@@ -495,7 +510,9 @@ test('resolveSubagentTranscript: derivedPath 存在（正常路径）-> turns �
 test('resolveSubagentTranscript: 源码层文本守卫——取证两字段赋值行存在（防 refactor 误删，spec §测试策略 #6）', async () => {
   const src = await Bun.file(join(import.meta.dir, '..', 'src', 'claude', 'transcript.ts')).text()
   expect(src).toContain('diag.agentTranscriptPath = typeof agentTranscriptPath')
-  expect(src).toContain('diag.agentTranscriptPathExists = !!diag.agentTranscriptPath && existsSync(diag.agentTranscriptPath)')
+  expect(src).toContain('diag.agentTranscriptPathExists = !!diag.agentTranscriptPath && safeIsFile(diag.agentTranscriptPath)')
+  // safeIsFile 用 statSync().isFile() 收紧"存在且为文件"契约（code-review finding：existsSync 对目录也 true）
+  expect(src).toContain('return statSync(p).isFile()')
   // 接口两字段存在
   expect(src).toContain('agentTranscriptPath: string | null')
   expect(src).toContain('agentTranscriptPathExists: boolean')

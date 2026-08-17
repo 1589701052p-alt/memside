@@ -174,6 +174,15 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
 }
 
 /**
+ * `statSync(p).isFile()` 的永不抛包装：路径不存在/指向目录/畸形/无权限 → false。
+ * 取证专用（agentTranscriptPathExists 契约是"存在且为文件"，existsSync 对目录
+ * 也 true 会误判）。
+ */
+function safeIsFile(p: string): boolean {
+  try { return statSync(p).isFile() } catch { return false }
+}
+
+/**
  * Derive the subagent's own transcript file path from a SubagentStop payload's
  * `transcript_path` (main-session `<dir>/<sid>.jsonl`) + `agent_id`. The
  * subagent file lives at `<dir>/<sid>/subagents/agent-<agentId>.jsonl`
@@ -249,7 +258,10 @@ export function resolveSubagentTranscript(
     // 方案 A 取证：记 payload 的 agent_transcript_path 直连路径值 + 它指向文件的存在性。
     // 仅赋值，绝不参与 derivedExists/turns 决策（控制流一字不动）。
     diag.agentTranscriptPath = typeof agentTranscriptPath === 'string' && agentTranscriptPath ? agentTranscriptPath : null
-    diag.agentTranscriptPathExists = !!diag.agentTranscriptPath && existsSync(diag.agentTranscriptPath)
+    // 用 statSync().isFile() 而非 existsSync：契约是"存在且为文件"（直连路径指向目录时
+    // existsSync 仍 true，会误判为"文件存在"，污染观测决策树）。statSync 抛错（路径畸形/
+    // 不存在）被外层 try/catch 兜底，diag 保持初始 false。
+    diag.agentTranscriptPathExists = !!diag.agentTranscriptPath && safeIsFile(diag.agentTranscriptPath)
     if (subPath && existsSync(subPath)) {
       diag.derivedExists = true
       const turns = parseTranscriptFile(subPath)
