@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { installHooks, MEMSIDE_TAG } from '@/install'
+import { installHooks, uninstallHooks, MEMSIDE_TAG } from '@/install'
 
 // Test isolation: point HOME at a scratch dir so we never touch the real
 // ~/.claude/settings.json. install.ts honors HOME first (see resolveHome in
@@ -111,4 +111,67 @@ test('hook command uses a curl header marker, not a shell comment (cmd.exe-safe)
     // --max-time 2 guard is preserved (collector must not block the hook)
     expect(cmd).toContain('--max-time 2')
   }
+})
+
+test('installHooks writes to custom settingsFilename (e.g. codeagent setting.json)', () => {
+  // 在 fakeHome 下模拟 codeagent 的 ~/.cac/setting.json
+  const cacDir = join(fakeHome, '.cac')
+  mkdirSync(cacDir, { recursive: true })
+  installHooks({ port: 7777, baseDir: cacDir, settingsFilename: 'setting.json' })
+  // 文件名是 setting.json 不是 settings.json
+  expect(existsSync(join(cacDir, 'setting.json'))).toBe(true)
+  expect(existsSync(join(cacDir, 'settings.json'))).toBe(false)
+  const raw = JSON.parse(readFileSync(join(cacDir, 'setting.json'), 'utf-8'))
+  expect(JSON.stringify(raw.hooks)).toContain(MEMSIDE_TAG)
+  expect(JSON.stringify(raw.hooks)).toContain('/hooks/claude/Stop')
+})
+
+test('installHooks without settingsFilename defaults to settings.json (regression)', () => {
+  // 不传 settingsFilename -> 必须写 settings.json（旧行为，零回归）
+  installHooks({ port: 7777 })
+  expect(existsSync(join(fakeHome, '.claude', 'settings.json'))).toBe(true)
+})
+
+test('uninstallHooks removes memside-managed groups, preserves user hooks', () => {
+  // 先装 + 加一个用户自写 hook
+  installHooks({ port: 7777 })
+  const settingsPath = join(fakeHome, '.claude', 'settings.json')
+  const raw = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+  // 注入一个用户自写 hook（无 MEMSIDE_TAG marker）
+  raw.hooks.Stop.push({ matcher: '*', hooks: [{ type: 'command', command: 'echo user-keep' }] })
+  writeFileSync(settingsPath, JSON.stringify(raw))
+
+  const r = uninstallHooks({})
+  expect(r.removed).toBeGreaterThan(0)
+  expect(r.settingsPath).toBe(settingsPath)
+  const after = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+  // memside marker 消失
+  expect(JSON.stringify(after.hooks)).not.toContain(MEMSIDE_TAG)
+  // 用户自写 hook 保留
+  expect(JSON.stringify(after.hooks.Stop)).toContain('echo user-keep')
+})
+
+test('uninstallHooks on missing file returns removed:0, no throw', () => {
+  // 先删 settings.json
+  rmSync(join(fakeHome, '.claude', 'settings.json'), { force: true })
+  const r = uninstallHooks({})
+  expect(r.removed).toBe(0)
+})
+
+test('uninstallHooks is idempotent (second run removes nothing)', () => {
+  installHooks({ port: 7777 })
+  uninstallHooks({})
+  const second = uninstallHooks({})
+  expect(second.removed).toBe(0)
+})
+
+test('uninstallHooks respects custom settingsFilename', () => {
+  const cacDir = join(fakeHome, '.cac')
+  mkdirSync(cacDir, { recursive: true })
+  installHooks({ port: 7777, baseDir: cacDir, settingsFilename: 'setting.json' })
+  const r = uninstallHooks({ baseDir: cacDir, settingsFilename: 'setting.json' })
+  expect(r.removed).toBeGreaterThan(0)
+  expect(r.settingsPath).toBe(join(cacDir, 'setting.json'))
+  const after = JSON.parse(readFileSync(join(cacDir, 'setting.json'), 'utf-8'))
+  expect(JSON.stringify(after.hooks)).not.toContain(MEMSIDE_TAG)
 })
