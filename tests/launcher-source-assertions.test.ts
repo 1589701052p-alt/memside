@@ -1,8 +1,9 @@
 import { test, expect } from 'bun:test'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { loadEmbeddedAssets } from '@/exe/assets'
+import { assembleAssets, loadEmbeddedAssets, type Manifest } from '@/exe/assets'
 
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const exeDir = join(srcDir, 'exe')
@@ -81,40 +82,70 @@ test('manifest.ts 由 gen-manifest.ts 生成并含四段资产', () => {
 })
 
 /**
- * 功能性 round-trip：assets.ts 在 dev 下可直接 import（manifest 是普通 TS
- * 模块），故可实跑 loadEmbeddedAssets() 验字节级正确——比纯源码断言更强。
- * 锁定：index.html 文本、assets key 形如 assets/<file> 且字节与 dist 一致、
+ * 功能性 round-trip：assembleAssets 是纯函数（相对 Bun 运行时），相同 manifest
+ * 产出相同 EmbeddedAssets。本测试用自造 tmp fixture 喂它——**不读磁盘 dist、
+ * 不读 git manifest、不跑 gen-manifest**，彻底切断「进 git 的 manifest」与
+ * 「不进 git 的 dist」的脱节依赖（root cause：两者本就是两次独立命令产物）。
+ *
+ * 锁定：index.html 文本透传、assets base64 解码二进制安全（含非 ASCII 字节）、
  * pluginJs 含 __MEMSIDE_PORT__ 占位（安装时烘焙）、pluginPkg 是合法 JSON 文本。
  */
-test('loadEmbeddedAssets() 装配统一对象，字节级匹配 dist + 插件源', async () => {
-  const ea = await loadEmbeddedAssets()
+test('assembleAssets() 装配统一对象，字节级匹配自造 fixture（自给自足，不读磁盘 dist）', () => {
+  // 自造 tmp 目录 + fixture（不跑 gen-manifest，不读磁盘 dist）。
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'memside-asset-'))
+  const tmpIndex = join(tmpRoot, 'index.html')
+  const tmpAssetsDir = join(tmpRoot, 'assets')
+  const tmpJs = join(tmpAssetsDir, 'x.js')
+  const tmpPluginJs = join(tmpRoot, 'memside.js')
+  const tmpPluginPkg = join(tmpRoot, 'package.json')
 
-  // index.html
-  const idxOrig = readFileSync(join(srcDir, 'web', 'dist', 'index.html'), 'utf-8')
-  expect(ea.indexHtml).toBe(idxOrig)
+  const indexHtmlContent =
+    '<!doctype html><html><head><title>TEST</title></head><body><div id="root"></div></body></html>'
+  // 含非 ASCII（中文 + emoji），验 base64 解码二进制安全。
+  const jsContent = '你好世界 🌍 console.log(1)'
+  const pluginJsContent = 'const P = "__MEMSIDE_PORT__";'
+  const pluginPkgContent = '{"name":"memside-opencode","version":"1.0.0"}'
 
-  // assets：key 形如 assets/<file>，字节与磁盘 dist 一致
-  for (const [key, bytes] of Object.entries(ea.assets)) {
-    expect(key).toMatch(/^assets\//)
-    const orig = readFileSync(join(srcDir, 'web', 'dist', key))
-    expect(bytes).toBeInstanceOf(Uint8Array)
-    expect(bytes.byteLength).toBe(orig.byteLength)
-    // 字节级比对
-    let identical = orig.byteLength === bytes.byteLength
-    for (let i = 0; i < bytes.length && identical; i++) {
-      if (orig[i] !== bytes[i]) identical = false
-    }
-    expect(identical).toBe(true)
+  mkdirSync(tmpAssetsDir, { recursive: true })
+  writeFileSync(tmpIndex, indexHtmlContent, 'utf-8')
+  writeFileSync(tmpJs, jsContent, 'utf-8')
+  writeFileSync(tmpPluginJs, pluginJsContent, 'utf-8')
+  writeFileSync(tmpPluginPkg, pluginPkgContent, 'utf-8')
+
+  // 构 Manifest 对象（直接用刚写的 tmp 文件内容，不读 src/web/dist、不读 git manifest）。
+  const manifest: Manifest = {
+    INDEX_HTML: readFileSync(tmpIndex, 'utf-8'),
+    ASSET_FILES: [['assets/x.js', readFileSync(tmpJs).toString('base64')]],
+    PLUGIN_JS: readFileSync(tmpPluginJs, 'utf-8'),
+    PLUGIN_PKG: readFileSync(tmpPluginPkg, 'utf-8'),
   }
 
-  // pluginJs：含端口占位（installOpencodePlugin 烘焙依赖）
-  const pjOrig = readFileSync(join(srcDir, '..', 'opencode-plugin', 'memside.js'), 'utf-8')
-  expect(ea.pluginJs).toBe(pjOrig)
+  const ea = assembleAssets(manifest)
+
+  // index.html 文本透传
+  expect(ea.indexHtml).toBe(manifest.INDEX_HTML)
+  expect(ea.indexHtml).toBe(indexHtmlContent)
+
+  // assets：base64 解码为 Uint8Array，字节级匹配 tmp 原始字节（含非 ASCII）
+  const jsBytes = ea.assets['assets/x.js']
+  expect(jsBytes).toBeInstanceOf(Uint8Array)
+  const origJsBuf = Buffer.from(readFileSync(tmpJs))
+  expect(jsBytes.byteLength).toBe(origJsBuf.byteLength)
+  // 逐字节比对（Buffer 是 Uint8Array 子类，直接比较底层字节）
+  expect(Buffer.from(jsBytes)).toEqual(origJsBuf)
+  // 显式验非 ASCII 字节确实存活（你好世界 🌍 的 UTF-8 字节非全 ASCII）
+  const decodedBack = Buffer.from(jsBytes).toString('utf-8')
+  expect(decodedBack).toBe(jsContent)
+  expect(decodedBack).toContain('你好世界')
+  expect(decodedBack).toContain('🌍')
+
+  // pluginJs：透传 + 含端口占位（installOpencodePlugin 烘焙依赖）
+  expect(ea.pluginJs).toBe(manifest.PLUGIN_JS)
+  expect(ea.pluginJs).toBe(pluginJsContent)
   expect(ea.pluginJs).toContain('__MEMSIDE_PORT__')
 
   // pluginPkg：JSON 文本字符串（非解析对象），写盘前可 JSON.parse
-  const ppOrig = readFileSync(join(srcDir, '..', 'opencode-plugin', 'package.json'), 'utf-8')
-  expect(ea.pluginPkg).toBe(ppOrig)
+  expect(ea.pluginPkg).toBe(manifest.PLUGIN_PKG)
   expect(typeof ea.pluginPkg).toBe('string')
   expect(JSON.parse(ea.pluginPkg).name).toBe('memside-opencode')
 })
