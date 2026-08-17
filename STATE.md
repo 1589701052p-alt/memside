@@ -1154,3 +1154,29 @@ follow-up 清单：scheduler digest 接线测试（spec §8 #12 缺口，quality
 
 - 首次有有效凭证环境跑通 `npm run test:live`：三阶段耗时、候选数、evidence judge 判定结果。
 - 401/凭证失效在 live-distill 是否稳定抓到（检查①）。
+
+## 蒸馏输入噪声剔除（2026-08-17，诚实更正）
+
+`filterTranscriptForDistill`（`src/memory/pure.ts`）新增 `stripNoiseTurns`，剔除 task-notification XML 块与 compact 续接块两类 user-role 噪声。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-17-distill-noise-filter*`。
+
+### 诊断反转（重要，勿重复犯错）
+
+**原判断**：8 月 17 日蒸馏记录大量 empty_output/parse_error，归因于「user role 的 task-notification(~70KB)+compact(~31KB) 噪声没被 filter 识别，占满 255KB 喂模型」。
+
+**实测真相（合并后验证）**：最终喂模型的内容里 task-notification/compact 残留 = **0**。budget 裁剪（`x.p > 1`，user priority=0 永不丢的逻辑下，这些噪声在更早路径已被消化）。最终 248KB 真实构成：**assistant 129.8KB（rationale）+ tool 114.1KB（已压缩工具结果）+ user 4.3KB**。
+
+**结论**：stripNoiseTurns 没解决 empty_output/parse_error 根因——因为噪声本来就不在最终喂模型的内容里。它只在「原始层」减了 ~111KB（DB 中间处理/存储有意义），对「喂模型 248KB 仍超窗口」无改善。
+
+### stripNoiseTurns 仍有价值（保留合并）
+
+- 原始 transcript 层减容 111KB（965.7KB→854.8KB），对 events 存储/中间处理有意义。
+- 纯函数、永不抛、零回归（1068 pass / 0 fail），实现正确。
+- 只是它不是 empty_output 的解。
+
+### empty_output/parse_error 真因（待新 spec）
+
+最终喂模型 248KB 仍过大，真实构成 assistant 130KB + tool 114KB：
+- **assistant rationale 130KB**：长寿会话大量 assistant 解释文本，NON_TOOL_CAP_CHARS=20000 单条 cap 但总量不控。
+- **tool 114KB**：已压缩（TOOL_RESULT_CAP_CHARS=3000）但长会话累积大量 tool turn。
+
+直击真因需针对 assistant/tool 总量做 budget 级减容（非单条 cap），新开 brainstorming。
