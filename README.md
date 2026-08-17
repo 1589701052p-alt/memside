@@ -32,10 +32,10 @@ AI agent (Claude Code / opencode) 的本地记忆 sidecar。它监听你的 AI a
 **npm（跨平台，需先装 [bun](https://bun.sh)）**：
 
 ```bash
-bunx memside start-and-install   # 启动 daemon + 装 claude hooks + 装 opencode 插件 -> http://localhost:7777
+bunx @memside-h/memside start-and-install   # 启动 daemon + 装 claude hooks + 装 opencode 插件 -> http://localhost:7777
 ```
 
-> `bun:sqlite` 是 Bun 专有，npm 包跑在 bun 运行时上，纯 Node 不可用。`npm i -g memside` 后 PATH 里的 `memside` 在装了 bun 的环境可用，但 `bunx memside` 最稳（保证 bun 运行时）。
+> npm 包名是 `@memside-h/memside`（scoped），但装后的命令名仍是 `memside`——`bunx @memside-h/memside` 或 `npm i -g @memside-h/memside` 后终端敲 `memside`。`bun:sqlite` 是 Bun 专有，npm 包跑在 bun 运行时上，纯 Node 不可用。`bunx @memside-h/memside` 最稳（保证 bun 运行时）。
 
 成品跑起来后，**正常用 claude code / opencode 即可**——不用改使用习惯。
 

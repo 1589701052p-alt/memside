@@ -1,8 +1,11 @@
 {
-  "name": "memside",
+  "name": "@memside-h/memside",
   "version": "0.1.0",
   "private": false,
   "files": ["src", "opencode-plugin", "tsconfig.json"],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "memside": "src/cli.ts"
