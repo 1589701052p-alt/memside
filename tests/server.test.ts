@@ -258,6 +258,52 @@ test('collector SubagentStop: payload 缺 agent_id -> 同样走 degradation（�
   expect(detail.derivedPath).toBeNull()
 })
 
+// spec 2026-08-17 §测试策略 #7（源码层文本守卫）+ #7 端到端透传：SubagentStop 分支必须
+// 把 body.agent_transcript_path 透传给 resolveSubagentTranscript 第三参数；降级 detail 的
+// diag spread 自动带出 agentTranscriptPath 值 + agentTranscriptPathExists 存在性两字段。
+// 这条测试钉死透传链路，防未来 refactor 丢第三参数。
+test('collector SubagentStop: body.agent_transcript_path 透传 -> 降级 detail 含 agentTranscriptPath 值 + agentTranscriptPathExists:true（端到端透传锁，spec §测试策略 #7）', async () => {
+  // 夹具：主会话 main.jsonl 存在，但 subagents 目录下无 agent-AG.jsonl（derivedExists=false，
+  // 走降级）。直连路径 agent_transcript_path 指向一个真实 tmp 文件——模拟 claude code 对
+  // 异常子 agent 用了不同落盘位置。透传到位时 detail.agentTranscriptPathExists=true。
+  const mainPath = join(dir, 'main-diag.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN DIAG' } }) + '\n')
+  const directPath = join(dir, 'direct-agent.jsonl')
+  writeFileSync(directPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'DIRECT' } }) + '\n')
+  const r = await req('/hooks/claude/SubagentStop', {
+    method: 'POST',
+    body: JSON.stringify({
+      sourceEventId: 'e-diag', cwd: '/r', session_id: 's-diag',
+      transcript_path: mainPath, agent_id: 'AG', agent_transcript_path: directPath,
+    }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  await new Promise((res) => setTimeout(res, 50))
+  // derivedPath 不存在 -> 不入队 + 降级
+  expect(enqueueCalls.length).toBe(0)
+  const degs = await db.select().from(memoryDegradations)
+  const miss = degs.find((d) => d.kind === 'subagent_transcript_missing' && d.sessionId === 's-diag')
+  expect(miss).toBeDefined()
+  const detail = JSON.parse(miss!.detail!)
+  // 透传到位：直连路径值 + 存在性如实进入 diag（spread 进 detail）
+  expect(detail.agentTranscriptPath).toBe(directPath)
+  expect(detail.agentTranscriptPathExists).toBe(true)
+  // 推导路径仍不存在（直连路径不进决策）——锁定取证不污染控制流
+  expect(detail.derivedExists).toBe(false)
+  expect(detail.payloadKeys).toContain('agent_transcript_path')
+})
+
+test('collector SubagentStop: 源码层文本守卫——server.ts SubagentStop 分支透传第三参数 agentTranscriptPath（spec §测试策略 #7，防 refactor 丢参数）', async () => {
+  const src = await Bun.file(join(import.meta.dir, '..', 'src', 'server.ts')).text()
+  // 第三参数必须出现：resolveSubagentTranscript(transcriptPath, agentId, agentTranscriptPath)
+  expect(src).toContain('resolveSubagentTranscript(transcriptPath, agentId, agentTranscriptPath)')
+  // body.agent_transcript_path 读取 + ?? '' 兜底（缺失时传空串 -> diag 判空 -> null/false）
+  expect(src).toContain("body.agent_transcript_path ?? ''")
+  // body 的 inline 类型含 agent_transcript_path（透传契约对齐 Task 1 新签名）
+  expect(src).toContain('agent_transcript_path?: string')
+})
+
 test('collector Stop reads session_id and keys the session waiting job by it', async () => {
   // 第五轮：hook payload 的 session_id 是增量蒸馏的会话键。server.ts 必须读取并
   // 落到 job.sessionId，否则 tick 无法按 session 切片偏移。

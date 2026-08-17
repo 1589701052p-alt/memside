@@ -256,7 +256,7 @@ export function createApp(deps: AppDeps) {
   app.post('/hooks/claude/:event', async (c) => {
     const event = c.req.param('event')
     const body = await c.req.json().catch(() => ({}) as {
-      transcript_path?: string; cwd?: string; sourceEventId?: string; session_id?: string; agent_id?: string
+      transcript_path?: string; cwd?: string; sourceEventId?: string; session_id?: string; agent_id?: string; agent_transcript_path?: string
     })
     const cwd: string = body.cwd ?? ''
     const sessionId: string = body.session_id ?? ''
@@ -312,11 +312,12 @@ export function createApp(deps: AppDeps) {
     if (event === 'SubagentStop') {
       const agentId: string = body.agent_id ?? ''
       const transcriptPath: string = body.transcript_path ?? ''
+      const agentTranscriptPath: string = body.agent_transcript_path ?? ''
       const sourceEventId: string = body.sourceEventId ?? `${event}-${Date.now()}`
       const debounceKey = `${cwd}:${event}`
       void (async () => {
         try {
-          const { turns, diag } = resolveSubagentTranscript(transcriptPath, agentId)
+          const { turns, diag } = resolveSubagentTranscript(transcriptPath, agentId, agentTranscriptPath)
           if (turns.length > 0) {
             const { jobId } = await deps.enqueueDistillJob(deps.db, {
               sourceEventId, runtime: 'claude-code', cwd, debounceKey, sourceAgentId: agentId || null,
