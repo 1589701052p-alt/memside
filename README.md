@@ -167,14 +167,13 @@ bun run demo.ts
 
 - **[Bun](https://bun.sh) ≥ 1.3**。方式 A（exe）已内嵌 Bun 运行时，无需另装；方式 B / C 需自行安装。
 - **Claude Code**（CLI）。
-- **LLM 凭证**，三选一：
-  - **火山引擎 Ark / 其他 Anthropic 兼容代理**，配在 `~/.claude/settings.json`（`ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` + `ANTHROPIC_DEFAULT_HAIKU_MODEL`），或
-  - **官方 Anthropic API key**，设 `ANTHROPIC_API_KEY`（distiller 调 `api.anthropic.com` + `claude-haiku-4-5-20251001`），或
-  - **OpenAI 兼容 API**（如内部部署的 OpenAI 格式大模型），设 `OPENAI_API_KEY` + `OPENAI_BASE_URL` + `OPENAI_MODEL`（distiller 走 `/chat/completions`、Bearer 鉴权）。无 Anthropic 凭证时用这条。
+- **LLM 凭证**：
+  - **Anthropic API key**
+  - **OpenAI 兼容 API**
 
 memside 直接读 Claude Code 自己的 settings，所以 **Claude Code 能跑，distiller 就能用同一套凭证**。
 
-后端选择：有 `OPENAI_API_KEY` 时自动用 OpenAI 后端，否则用 Anthropic；可用 `MEMSIDE_LLM_BACKEND=anthropic|openai` 显式覆盖（设错值会在 daemon 启动时报错，不静默回退）。
+后端选择：有 `OPENAI_API_KEY` 时自动用 OpenAI 后端，否则用 Anthropic；可用 `MEMSIDE_LLM_BACKEND=anthropic|openai` 显式覆盖。
 
 ## 配置参考
 
