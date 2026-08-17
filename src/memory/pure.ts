@@ -390,9 +390,10 @@ export function categoryFromTitle(title: unknown): string | null {
 export const RAW_TEXT_CAP_CHARS = 24_000
 const RAW_TEXT_HEAD_CHARS = 8_000
 
-/** null/空串 -> null；<= cap 原样；超 cap 保留头 8000 + 尾 16000 并标记省略字数。 */
+/** null -> null；空串 -> ''（落盘）；<= cap 原样；超 cap 保留头 8000 + 尾 16000 并标记省略字数。 */
 export function capRawText(raw: string | null): string | null {
-  if (!raw) return null
+  if (raw === null) return null
+  if (raw.length === 0) return ''   // 空字符串也落盘（spec §3.2），区别于 null
   if (raw.length <= RAW_TEXT_CAP_CHARS) return raw
   const head = raw.slice(0, RAW_TEXT_HEAD_CHARS)
   const tail = raw.slice(-(RAW_TEXT_CAP_CHARS - RAW_TEXT_HEAD_CHARS))

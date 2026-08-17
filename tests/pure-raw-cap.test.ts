@@ -1,9 +1,9 @@
 import { test, expect } from 'bun:test'
 import { capRawText, RAW_TEXT_CAP_CHARS } from '@/memory/pure'
 
-test('capRawText: null/空串 -> null；不超 cap 原样', () => {
+test('capRawText: null -> null；空串 -> 空串（非 null，不丢现场）；不超 cap 原样', () => {
   expect(capRawText(null)).toBeNull()
-  expect(capRawText('')).toBeNull()
+  expect(capRawText('')).toBe('')   // 空字符串也落盘（spec §3.2），区别于 null（无数据）
   const s = 'x'.repeat(1000)
   expect(capRawText(s)).toBe(s)
 })
