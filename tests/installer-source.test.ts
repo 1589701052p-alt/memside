@@ -51,6 +51,10 @@ test('.github/workflows/release.yml 存在并含两 job', () => {
   // 缺此 step 首次 v* tag 发版时 makensis 编译期红（EnVar.dll not found）。
   expect(src).toMatch(/EnVar/i)
   expect(src).toMatch(/GsNSIS\/EnVar/)
+  // makensis PATH 注入回归防护：choco 装的 nsis 不写 PATH，build:installer 会 command not found。
+  // 必须把 NSIS 目录注入 GITHUB_PATH 让后续 step 找到 makensis（v0.1.0 首跑 CI 复现的 bug）。
+  expect(src).toMatch(/GITHUB_PATH/)
+  expect(src).toMatch(/makensis\.exe/)
   // F3 回归防护：build:exe 已含 vite build，不得再显式跑一遍 bun run build（冗余浪费）。
   expect(src).not.toMatch(/bun run build\s+# vite dist/)
 })
