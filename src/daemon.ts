@@ -25,6 +25,9 @@ export interface DaemonOpts {
   /** 一键启动（生产模式）：vite build 产物目录，透传为 createApp 的
    * staticDir。不传则 daemon 不托管静态文件（裸 daemon 语义不变）。 */
   serveStaticDir?: string
+  /** 内存静态资产（exe 模式）：透传 createApp.staticAssets，与 serveStaticDir 互斥。
+   * dev/npm 用 serveStaticDir 走磁盘。 */
+  serveStaticAssets?: { indexHtml: string; assets: Record<string, Uint8Array> }
 }
 
 /**
@@ -173,7 +176,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   // /hooks/opencode/inject 走它；capture 路由与 plugin 安装在 Task 5/6/7 落地。
   const opencodeAdapter = new OpencodeAdapter(db)
   const broadcast = (msg: unknown) => { /* WS fan-out placeholder; MVP polls /api/memories */ void msg }
-  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, tracker, callLLM: resolveCallLLM({}, db) })
+  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, staticAssets: opts.serveStaticAssets, tracker, callLLM: resolveCallLLM({}, db) })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {

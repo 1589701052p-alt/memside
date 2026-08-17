@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test'
-import { rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { rmSync, readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { openDb } from '@/db/client'
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
@@ -62,4 +63,12 @@ test('staticAssets: 缺失资产 404', async () => {
   const res = await app.fetch(new Request('http://x/assets/missing.js'))
   expect(res.status).toBe(404)
   db.$client.close()
+})
+
+// Task 2 源码层断言兜底：startDaemon 透传 serveStaticAssets 到 createApp。
+// 无法直接对 startDaemon 做内存资产集成测（要起真端口+DB），靠源码层文本锁接线。
+test('daemon.ts 透传 serveStaticAssets 到 createApp', () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.ts'), 'utf-8')
+  expect(src).toContain('serveStaticAssets')
+  expect(src).toMatch(/createApp\(\{[^}]*staticAssets:\s*opts\.serveStaticAssets/s)
 })
