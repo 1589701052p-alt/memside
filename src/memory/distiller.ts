@@ -230,11 +230,15 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     if (!parsed || !Array.isArray(parsed.candidates)) {
       // filteredTurns 恒为过滤快照（调用前已算出，与调用成败无关）。
       // 历史 bug 曾在 callThrew 时清空 -> llm_error job 丢失 source input（spec §source input 修复）。
+      // 空字符串/纯空白 = 模型无产出（与 {"candidates":[]} 同义），归 empty_output 非 parse_error。
+      // 非空但解析失败 = 真 parse_error。callThrew 与 parseError 互斥不变。
+      // lastAttemptRaw null（onAttempt 未触发，如全 call 抛错）时 fallback 原 parseError 逻辑。
+      // 注：写法用 `(lastAttemptRaw ?? '').trim()` 而非 `lastAttemptRaw != null && lastAttemptRaw.trim()`
+      // ——后者被 TS CFA 误窄为 never（closure 赋值不可见，只剩 =null 初始化），无法通过 typecheck。
+      const isEmpty = (lastAttemptRaw ?? '').trim() === ''
       return { candidates: [], filteredTurns: filtered, rawOutput, rawCount: 0, callThrew,
         errorMessage: callThrew ? lastErrorMessage : null,
-        // 未抛错却拿不到合法结构 = 解析失败（spec 2026-08-15 §4）。callThrew 与 parseError
-        // 互斥：末次 attempt 非抛即报。防御兜底 '解析失败：无错误描述' 理论不可达。
-        parseError: callThrew ? null : (lastAttemptError ?? '解析失败：无错误描述'),
+        parseError: callThrew ? null : (isEmpty ? null : (lastAttemptError ?? '解析失败：无错误描述')),
         lastRawText: callThrew ? null : lastAttemptRaw }
     }
     const rawCount = parsed.candidates.length
