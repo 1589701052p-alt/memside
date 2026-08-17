@@ -51,19 +51,28 @@ expects，95 文件；基线 1060 → +17 测试）。无新运行时依赖（Bu
 
 ### 上线后观测（硬要求，结论回填本节）
 
-1. **CI 首跑**（打首个 `v*` tag）：`bun build --compile` 实跑验证（本地 win-only 未跑）；
-   EnVar 插件 choco nsis 官方包**不带**——build:installer 较大概率编译期红，预案：
-   choco 装 nsis 后补抓 EnVar 插件 zip 解到 NSIS Plugins 目录（或回退 WriteRegStr
-   HKCU "Environment" "PATH" + SendMessage HWND_BROADCAST）。
+1. **CI 首跑**（`v0.1.0` tag，2026-08-17）：**端到端跑通**，暴露并修复两个真实问题：
+   - ✅ `bun build --compile`：CI windows job 产 `memside.exe`（99MB）成功。
+   - ✅ EnVar 插件获取：fix wave（PR #70 前置）加的 `Install EnVar NSIS plugin` step 生效，DLL 落位正确。
+   - ⚠️→✅ **makensis 不在 PATH**：choco 装的 nsis 把 `makensis.exe` 放在
+     `C:\Program Files (x86)\NSIS\` 但**不写 PATH**，`bun run build:installer` 报
+     `command not found: makensis`。修法（PR #72）：EnVar step 末尾
+     `Add-Content $env:GITHUB_PATH $nsisDir` + 断言 `makensis.exe` 存在；测试锁回归。
+   - ⚠️→✅ **npm publish 2FA 拦截**：账号开 2FA 时 Granular token 发布报
+     `E403 ... Two-factor authentication or granular access token with bypass 2fa
+     enabled is required`。修法（用户侧）：账号 2FA 设为 "Auth only"（仅登录要 2FA，
+     发布不要），重跑后过。`@memside-h/memside@0.1.0` 已发布（npm 包名 `memside` 被
+     外部占用，改 scoped `@memside-h/memside`，PR #70；bin 命令仍 `memside`）。
+   - ✅ Release 资产上传：`memside.exe` + `memside-setup.exe` 双资产挂 v0.1.0 Release。
 2. 未签名 exe SmartScreen 拦截率 + 用户反馈——决定 v1.1 是否上代码签名。
-3. npm 包下载量 + `bunx memside` vs `npm i -g` 占比——决定是否优化 PATH shim。
+3. npm 包下载量 + `bunx @memside-h/memside` vs `npm i -g @memside-h/memside` 占比——决定是否优化 PATH shim。
 4. NSIS 安装器安装/卸载成功率 + 卸载后用户数据保留验证（抽样）。
-5. exe 体积（Bun runtime ~90MB + JS + dist，用户友好优先于体积，观测是否需瘦身）。
+5. exe 体积（Bun runtime ~99MB + JS + dist，用户友好优先于体积，观测是否需瘦身）。
 
 ### deferred minor（非阻塞，建议 follow-up）
 
-1. EnVar 插件 CI 验证（见上线后观测 1）。
-2. `build:exe` 未本地实跑验证（CI 首跑验证）。
+1. ~~EnVar 插件 CI 验证~~ → **已闭环**（CI 首跑验证，见上线后观测 1）。
+2. ~~`build:exe` 未本地实跑验证~~ → **已闭环**（CI 首跑验证，exe 产出正常）。
 3. workflow_dispatch 无 tag_name 兜底（手动调试受影响，tag 主路径无影响）。
 4. npm 版本号 `0.1.0` 与 `v*` tag 无自动联动（无 npm version 同步步骤）。
 5. Task 1 F1：缺 staticAssets+staticDir 同时传优先级显式测试（if/else if 结构保证）。
