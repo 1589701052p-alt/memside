@@ -59,3 +59,51 @@ test('stripNoiseTurns: 不误伤含相似词的正常 user turn', () => {
   expect(out.some((t) => t.content === 'finish the task now')).toBe(true)
   expect(out.every((t) => !t.content.includes('This session is being continued'))).toBe(true)
 })
+
+// ---------------------------------------------------------------------------
+// §6.1 #5 永不抛边界（spec 2026-08-17 §6）：stripNoiseTurns 任何异常输入都不抛，
+// 降级为返回原 turns 或空数组（保守保留 / 空输入）。
+// ---------------------------------------------------------------------------
+
+test('stripNoiseTurns: 非数组输入返回 []', () => {
+  expect(stripNoiseTurns(null as unknown as TranscriptTurn[])).toEqual([])
+  expect(stripNoiseTurns(undefined as unknown as TranscriptTurn[])).toEqual([])
+})
+
+test('stripNoiseTurns: turn content 非字符串时保留（不抛）', () => {
+  const weird = [{ role: 'user', content: 123 as unknown as string }] as TranscriptTurn[]
+  const out = stripNoiseTurns(weird)
+  expect(out.length).toBe(1) // 非 string 走 typeof c !== 'string' -> 保留
+})
+
+test('stripNoiseTurns: 空数组返回空数组', () => {
+  expect(stripNoiseTurns([])).toEqual([])
+})
+
+// ---------------------------------------------------------------------------
+// §1.2 关键 bug 回归锁（spec 2026-08-17 §6）：剔除前，task-notification 噪声以
+// user priority=0 强留，在超预算裁剪时把 assistant rationale（priority=2）挤掉；
+// 剔除后噪声不进 budget 计算，rationale 不再被噪声挤光。budget=500 给 assistant
+// 留足空间（去噪后全部 content 远低于预算，什么都不裁），锁定两个核心不变量：
+// task-notification 零残留 + 至少 1 条 assistant rationale 保留。
+// ---------------------------------------------------------------------------
+
+test('filterTranscriptForDistill: 噪声剔除后 budget 不再挤掉 assistant rationale（§1.2 回归）', () => {
+  const turns: TranscriptTurn[] = []
+  // 20 条 task-notification 噪声（每条 ~200 字符，若不剔除会以 user priority=0 抢预算）
+  for (let i = 0; i < 20; i++) {
+    turns.push(user(`<task-notification><task-id>${i}</task-id><output>${'x'.repeat(150)}</output></task-notification>`))
+  }
+  // 3 条 assistant rationale（有价值）
+  turns.push({ role: 'assistant', content: 'The 14-day refund rule is a hard invariant we must enforce.' })
+  turns.push({ role: 'assistant', content: 'We decided to use bun test exclusively.' })
+  turns.push({ role: 'assistant', content: 'Git push needs openssl backend due to proxy.' })
+  // 1 条正常 user
+  turns.push(user('refunds within 14 days'))
+
+  const out = filterTranscriptForDistill(turns, 500)
+  // task-notification 全部被 stripNoiseTurns 剔除（不进 budget 计算）
+  expect(out.every((t) => !t.content.includes('<task-notification>'))).toBe(true)
+  // assistant rationale 至少保留一条（噪声不占预算，budget=500 下完整保留）
+  expect(out.some((t) => t.role === 'assistant')).toBe(true)
+})
