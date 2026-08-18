@@ -17,6 +17,7 @@ InstallDir "$LOCALAPPDATA\memside"
 ; ------ finish 页引导（2026-08-18-exe-autostart-browser）：装完勾选立即启动 exe → 开浏览器 ------
 !define MUI_FINISHPAGE_RUN "$INSTDIR\memside.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动 memside"
+!define MUI_FINISHPAGE_RUN_CHECKED
 
 ; ------ MUI ------
 !insertmacro MUI_PAGE_WELCOME

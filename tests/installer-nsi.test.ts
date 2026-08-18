@@ -16,6 +16,11 @@ describe('installer.nsi finish 页引导', () => {
     expect(nsi).toMatch(/立即启动/)
   })
 
+  test('finish 页启动勾选默认勾选（checked-by-default）', () => {
+    // Spec §3.6：默认勾选「立即启动」；MUI2 无此 define 时 finish-run 复选框默认不勾选。
+    expect(nsi).toContain('MUI_FINISHPAGE_RUN_CHECKED')
+  })
+
   test('MUI_PAGE_FINISH 仍存在', () => {
     expect(nsi).toContain('MUI_PAGE_FINISH')
   })
