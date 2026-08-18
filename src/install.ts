@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -291,4 +291,47 @@ export function installOpencodePlugin(opts: InstallOpencodePluginOpts): void {
   plugin.push(destDir.replace(/\\/g, '/'))
   cfg.plugin = plugin
   writeFileSync(settingsPath, JSON.stringify(cfg, null, 2) + '\n')
+}
+
+/**
+ * Remove the memside opencode plugin — the idempotent-merge dual of
+ * `installOpencodePlugin`. Deletes the `memside-opencode/` directory and
+ * filters any `memside-opencode` entries out of `opencode.json`'s `plugin`
+ * array (preserving user-authored plugins).
+ *
+ * `baseDir` defaults to `~/.config/opencode`. `~` expansion is NOT done here
+ * — callers (server endpoint) expand it before calling, mirroring
+ * `uninstallHooks`'s contract that baseDir is an absolute path.
+ *
+ * Never throws on missing file or malformed JSON (treated as empty document).
+ * IO errors from rmSync/writeFileSync surface per existing install contract.
+ * Returns `{ removed, pluginPath, dirRemoved }`: `removed` = plugin-array
+ * entries filtered; `dirRemoved` = whether the dest dir existed pre-delete.
+ */
+export function uninstallOpencodePlugin(opts: { baseDir?: string }): { removed: number; pluginPath: string; dirRemoved: boolean } {
+  const ocdDir = opts.baseDir ?? join(resolveHome(), '.config', 'opencode')
+  const destDir = join(ocdDir, 'memside-opencode')
+  const dirExisted = existsSync(destDir)
+  rmSync(destDir, { recursive: true, force: true })
+
+  const settingsPath = join(ocdDir, 'opencode.json')
+  let cfg: Record<string, unknown> = {}
+  let parsed = false
+  if (existsSync(settingsPath)) {
+    try {
+      const p = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+      if (p && typeof p === 'object' && !Array.isArray(p)) { cfg = p as Record<string, unknown>; parsed = true }
+    } catch { /* malformed -> empty doc */ }
+  }
+  if (!parsed) return { removed: 0, pluginPath: settingsPath, dirRemoved: dirExisted }
+
+  const plugin = Array.isArray(cfg.plugin) ? (cfg.plugin as unknown[]) : []
+  const before = plugin.length
+  const filtered = plugin.filter((p) => !(typeof p === 'string' && p.includes('memside-opencode')))
+  const removed = before - filtered.length
+  if (removed > 0) {
+    cfg.plugin = filtered
+    writeFileSync(settingsPath, JSON.stringify(cfg, null, 2) + '\n')
+  }
+  return { removed, pluginPath: settingsPath, dirRemoved: dirExisted }
 }

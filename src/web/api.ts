@@ -537,16 +537,21 @@ export async function saveRuntimeSettings(
   return data
 }
 
-/** POST /api/settings/runtime/install — 读已存路径装 hooks。失败返回 {ok:false,error}。 */
-export async function installRuntimeHooks(fetchFn: FetchLike = fetch): Promise<{ ok: boolean; settingsPath?: string; error?: string }> {
-  const res = await fetchFn('/api/settings/runtime/install', { method: 'POST' })
-  return (await res.json()) as { ok: boolean; settingsPath?: string; error?: string }
+/** POST /api/settings/runtime/install?target=claude|opencode — 读已存路径装 hooks/plugin。
+ * 默认 claude 保后兼容。失败返回 {ok:false,error}。claude 成功带 settingsPath，opencode 带 pluginPath。 */
+export async function installRuntimeHooks(
+  target: 'claude' | 'opencode' = 'claude', fetchFn: FetchLike = fetch,
+): Promise<{ ok: boolean; settingsPath?: string; pluginPath?: string; error?: string }> {
+  const res = await fetchFn(`/api/settings/runtime/install?target=${target}`, { method: 'POST' })
+  return (await res.json()) as { ok: boolean; settingsPath?: string; pluginPath?: string; error?: string }
 }
 
-/** POST /api/settings/runtime/uninstall — 移除 memside-managed hooks（保留用户自写）。 */
-export async function uninstallRuntimeHooks(fetchFn: FetchLike = fetch): Promise<{ ok: boolean; removed?: number; settingsPath?: string; error?: string }> {
-  const res = await fetchFn('/api/settings/runtime/uninstall', { method: 'POST' })
-  return (await res.json()) as { ok: boolean; removed?: number; settingsPath?: string; error?: string }
+/** POST /api/settings/runtime/uninstall?target=claude|opencode — 移除 memside-managed 项（保留用户自写）。 */
+export async function uninstallRuntimeHooks(
+  target: 'claude' | 'opencode' = 'claude', fetchFn: FetchLike = fetch,
+): Promise<{ ok: boolean; removed?: number; settingsPath?: string; pluginPath?: string; dirRemoved?: boolean; error?: string }> {
+  const res = await fetchFn(`/api/settings/runtime/uninstall?target=${target}`, { method: 'POST' })
+  return (await res.json()) as { ok: boolean; removed?: number; settingsPath?: string; pluginPath?: string; dirRemoved?: boolean; error?: string }
 }
 
 // --- 回收站 + 批量删除 + 导出/导入 client（spec 2026-08-16）----------------

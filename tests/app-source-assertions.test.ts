@@ -28,7 +28,8 @@ test('RuntimeSettings section uses standard section convention', () => {
   // 与 LlmSettings/JudgeSettings 同款 section + h3 结构
   const fnStart = src.indexOf('function RuntimeSettings()')
   expect(fnStart).toBeGreaterThan(-1)
-  const fnSlice = src.slice(fnStart, fnStart + 3000)
+  // 双分组重构后函数体变大（两组 handler + 预览），窗口需覆盖到 return 的 <section>。
+  const fnSlice = src.slice(fnStart, fnStart + 5000)
   expect(fnSlice).toContain('<section')
   expect(fnSlice).toContain('<h3')
 })

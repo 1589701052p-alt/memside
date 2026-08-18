@@ -20,6 +20,7 @@ import {
 } from './api'
 import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody, SLUG_BADGE_TIP } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
+import { resolveClaudePath, resolveOpencodePath } from './runtime-paths'
 
 /**
  * 徽章 chip 通用样式（spec 2026-08-11-ui-clarity §6.1 规则 1）。语义映射全部在
@@ -2090,82 +2091,120 @@ function ImportTrigger({ conflict, onConflictChange, onResult }: {
 }
 
 /**
- * 运行环境路径配置区块（spec 2026-08-17-runtime-path-config §3.7）。
- * codeagent 读 ~/.cac/setting.json（目录 + 文件名双双不同于标准），
- * 用户在此配置路径 + 一键安装/卸载 hooks。复用既有 section 约定。
- * 三路径输入框 + 保存 + 安装 + 卸载；fetch/操作失败显错误不静默。
+ * 运行环境设置（spec runtime-settings-redesign §3.6）。
+ * 双分组：claude/codeagent（claude-code fork）+ opencode/nga（opencode fork）。
+ * 每组：可见标签字段 + 实时「→ 将写入」预览 + 「保存并安装」（先存再装，消除改了没存的脚枪）+「卸载」。
+ * fetch/操作失败显错误不静默（CLAUDE.md 状态可见性）。不做持久「已装」徽标（无法可靠自检）。
  */
 function RuntimeSettings() {
   const [state, setState] = useState<RuntimeSettingsState | null>(null)
   const [claudeDir, setClaudeDir] = useState('')
   const [settingsFilename, setSettingsFilename] = useState('')
   const [opencodeDir, setOpencodeDir] = useState('')
-  const [msg, setMsg] = useState<string | null>(null)
+  const [claudeMsg, setClaudeMsg] = useState<string | null>(null)
+  const [opencodeMsg, setOpencodeMsg] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [claudeBusy, setClaudeBusy] = useState(false)
+  const [opencodeBusy, setOpencodeBusy] = useState(false)
 
   const refresh = async () => {
     try {
       const s = await getRuntimeSettings()
       setState(s)
-      setClaudeDir(s.claudeDir)
-      setSettingsFilename(s.settingsFilename)
-      setOpencodeDir(s.opencodeDir)
+      setClaudeDir(s.claudeDir); setSettingsFilename(s.settingsFilename); setOpencodeDir(s.opencodeDir)
       setError(null)
     } catch (e) { setError(String(e)) }
   }
   useEffect(() => { void refresh() }, [])
 
-  const onSave = async () => {
-    setBusy(true); setMsg(null)
+  const defaults = state?.defaults ?? { claudeDir: '~/.claude', settingsFilename: 'settings.json', opencodeDir: '~/.config/opencode' }
+  const claudePreview = resolveClaudePath(claudeDir, settingsFilename, defaults)
+  const opencodePreview = resolveOpencodePath(opencodeDir, defaults)
+
+  const onClaudeInstall = async () => {
+    setClaudeBusy(true); setClaudeMsg(null)
     try {
-      const s = await saveRuntimeSettings({ claudeDir, settingsFilename, opencodeDir })
-      setState(s); setClaudeDir(s.claudeDir); setSettingsFilename(s.settingsFilename); setOpencodeDir(s.opencodeDir)
-      setMsg('已保存')
-    } catch (e) { setMsg(`保存失败: ${e}`) }
-    finally { setBusy(false) }
+      const s = await saveRuntimeSettings({ claudeDir, settingsFilename })
+      setState(s); setClaudeDir(s.claudeDir); setSettingsFilename(s.settingsFilename)
+      const r = await installRuntimeHooks('claude')
+      setClaudeMsg(r.ok ? `✓ 已安装到 ${r.settingsPath ?? claudePreview}` : `安装失败: ${r.error ?? '未知错误'}`)
+    } catch (e) { setClaudeMsg(`操作失败: ${e}`) }
+    finally { setClaudeBusy(false) }
   }
-  const onInstall = async () => {
-    setBusy(true); setMsg(null)
+  const onClaudeUninstall = async () => {
+    setClaudeBusy(true); setClaudeMsg(null)
     try {
-      const r = await installRuntimeHooks()
-      setMsg(r.ok ? `已安装到 ${r.settingsPath}` : `安装失败: ${r.error ?? '未知错误'}`)
-    } catch (e) { setMsg(`安装失败: ${e}`) }
-    finally { setBusy(false) }
+      const r = await uninstallRuntimeHooks('claude')
+      setClaudeMsg(r.ok ? `✓ 已移除 ${r.removed ?? 0} 个 hook 组` : `卸载失败: ${r.error ?? '未知错误'}`)
+    } catch (e) { setClaudeMsg(`卸载失败: ${e}`) }
+    finally { setClaudeBusy(false) }
   }
-  const onUninstall = async () => {
-    setBusy(true); setMsg(null)
+  const onOpencodeInstall = async () => {
+    setOpencodeBusy(true); setOpencodeMsg(null)
     try {
-      const r = await uninstallRuntimeHooks()
-      setMsg(r.ok ? `已移除 ${r.removed} 个 hook 组（${r.settingsPath}）` : `卸载失败: ${r.error ?? '未知错误'}`)
-    } catch (e) { setMsg(`卸载失败: ${e}`) }
-    finally { setBusy(false) }
+      const s = await saveRuntimeSettings({ opencodeDir })
+      setState(s); setOpencodeDir(s.opencodeDir)
+      const r = await installRuntimeHooks('opencode')
+      setOpencodeMsg(r.ok ? `✓ 已安装到 ${r.pluginPath ?? opencodePreview}` : `安装失败: ${r.error ?? '未知错误'}`)
+    } catch (e) { setOpencodeMsg(`操作失败: ${e}`) }
+    finally { setOpencodeBusy(false) }
   }
+  const onOpencodeUninstall = async () => {
+    setOpencodeBusy(true); setOpencodeMsg(null)
+    try {
+      const r = await uninstallRuntimeHooks('opencode')
+      setOpencodeMsg(r.ok
+        ? `✓ 已移除 ${r.removed ?? 0} 个 plugin 条目${r.dirRemoved ? ' + 插件目录' : ''}`
+        : `卸载失败: ${r.error ?? '未知错误'}`)
+    } catch (e) { setOpencodeMsg(`卸载失败: ${e}`) }
+    finally { setOpencodeBusy(false) }
+  }
+
+  const msgStyle = (m: string | null) => m === null ? undefined : (m.includes('失败') ? { color: '#b00' } : { color: '#080' })
 
   return (
     <section style={{ margin: '12px 0', padding: 12, border: '1px solid #ddd', borderRadius: 8 }}>
       <h3 style={{ margin: '0 0 8px' }}>运行环境</h3>
       <p style={{ margin: '0 0 10px', fontSize: 13, color: '#666' }}>
-        公司内部 agent（如 codeagent）配置文件路径与官方不同。在此填写你所用 agent 实际读取的配置路径，装好 hooks 才能抓取会话 + 注入记忆。
+        memside 往你所用 agent 的配置里写 hooks/plugin，才能抓取会话 + 注入记忆。官方 Claude Code / opencode 用默认路径、无需改动；公司内部 agent（如 codeagent 读 <code>~/.cac/setting.json</code>）才需改路径。
       </p>
       {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <input style={{ flex: '2 1 260px' }} placeholder={state?.defaults.claudeDir ?? '~/.claude'}
-          value={claudeDir} onChange={(e) => setClaudeDir(e.target.value)} />
-        <input style={{ flex: '1 1 180px' }} placeholder={state?.defaults.settingsFilename ?? 'settings.json'}
-          value={settingsFilename} onChange={(e) => setSettingsFilename(e.target.value)} />
-        <input style={{ flex: '2 1 260px' }} placeholder={state?.defaults.opencodeDir ?? '~/.config/opencode'}
-          value={opencodeDir} onChange={(e) => setOpencodeDir(e.target.value)} />
+
+      <div style={{ margin: '12px 0', padding: 10, border: '1px solid #eee', borderRadius: 6 }}>
+        <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>Claude Code / codeagent <span style={{ fontSize: 12, color: '#888' }}>claude-code fork</span></h4>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+          <label style={{ flex: '2 1 260px', fontSize: 12, color: '#555' }}>配置目录
+            <input style={{ width: '100%', marginTop: 2 }} placeholder={defaults.claudeDir} value={claudeDir} onChange={(e) => setClaudeDir(e.target.value)} />
+          </label>
+          <label style={{ flex: '1 1 180px', fontSize: 12, color: '#555' }}>文件名
+            <input style={{ width: '100%', marginTop: 2 }} placeholder={defaults.settingsFilename} value={settingsFilename} onChange={(e) => setSettingsFilename(e.target.value)} />
+          </label>
+        </div>
+        <div style={{ margin: '4px 0 8px', fontSize: 12, color: '#888' }}>→ 将写入：<code>{claudePreview}</code></div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button disabled={claudeBusy} onClick={() => void onClaudeInstall()}>保存并安装</button>
+          <button disabled={claudeBusy} onClick={() => void onClaudeUninstall()}>卸载</button>
+          {claudeBusy ? <span style={{ color: '#888' }}>处理中…</span> : null}
+          {claudeMsg ? <span style={msgStyle(claudeMsg)}>{claudeMsg}</span> : null}
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <button disabled={busy} onClick={() => void onSave()}>保存路径</button>
-        <button disabled={busy} onClick={() => void onInstall()}>安装 hooks</button>
-        <button disabled={busy} onClick={() => void onUninstall()}>卸载 hooks</button>
-        {busy ? <span style={{ color: '#888' }}>处理中…</span> : null}
-        {msg ? <span style={{ color: msg.includes('失败') ? '#b00' : '#080' }}>{msg}</span> : null}
+
+      <div style={{ margin: '12px 0', padding: 10, border: '1px solid #eee', borderRadius: 6 }}>
+        <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>opencode / nga <span style={{ fontSize: 12, color: '#888' }}>opencode fork</span></h4>
+        <label style={{ display: 'block', fontSize: 12, color: '#555', marginBottom: 6 }}>配置目录
+          <input style={{ width: '100%', marginTop: 2 }} placeholder={defaults.opencodeDir} value={opencodeDir} onChange={(e) => setOpencodeDir(e.target.value)} />
+        </label>
+        <div style={{ margin: '4px 0 8px', fontSize: 12, color: '#888' }}>→ 将写入：<code>{opencodePreview}</code></div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button disabled={opencodeBusy} onClick={() => void onOpencodeInstall()}>保存并安装</button>
+          <button disabled={opencodeBusy} onClick={() => void onOpencodeUninstall()}>卸载</button>
+          {opencodeBusy ? <span style={{ color: '#888' }}>处理中…</span> : null}
+          {opencodeMsg ? <span style={msgStyle(opencodeMsg)}>{opencodeMsg}</span> : null}
+        </div>
       </div>
+
       <div style={{ marginTop: 6, fontSize: 12, color: '#888' }}>
-        提示：codeagent 用户通常填 claude 目录 <code>~/.cac</code> + 文件名 <code>setting.json</code>。安装前请确认此路径是你所用 agent 实际读取的配置文件。卸载只移除 memside 管理的 hook，不影响你自己写的 hook。
+        提示：codeagent 用户通常填 claude 目录 <code>~/.cac</code> + 文件名 <code>setting.json</code>。安装仅写入上述路径，请确认是 agent 实际读取的配置文件。卸载只移除 memside 管理的项，不影响你自己写的 hooks/plugins。
       </div>
     </section>
   )

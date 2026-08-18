@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installOpencodePlugin } from '@/install'
+import { installOpencodePlugin, uninstallOpencodePlugin } from '@/install'
 
 // 这些测试锁 Task 7 的 install 扩展：installOpencodePlugin 复制 Task 6 的
 // opencode-plugin/ 到 baseDir/memside-opencode/、烘焙端口占位、并幂等合并
@@ -100,4 +100,69 @@ test('files 内容模式：opencode.json 幂等合并', () => {
 
 test('files 与 pluginSrcDir 都缺抛错', () => {
   expect(() => installOpencodePlugin({ port: 9999, baseDir: join(tmpRoot, 'case-err') })).toThrow()
+})
+
+test('uninstallOpencodePlugin: 先 install 再 uninstall → 目录消失 + plugin 条目移除', () => {
+  const baseDir = join(tmpRoot, 'uninstall-1')
+  installOpencodePlugin({ port: 7777, baseDir, pluginSrcDir })
+  expect(existsSync(join(baseDir, 'memside-opencode', 'memside.js'))).toBe(true)
+  const r = uninstallOpencodePlugin({ baseDir })
+  expect(r.removed).toBeGreaterThanOrEqual(1)
+  expect(r.dirRemoved).toBe(true)
+  expect(existsSync(join(baseDir, 'memside-opencode'))).toBe(false)
+  const cfg = JSON.parse(readFileSync(join(baseDir, 'opencode.json'), 'utf-8'))
+  expect((cfg.plugin as string[]).filter((p) => p.includes('memside-opencode'))).toHaveLength(0)
+  expect(r.pluginPath).toBe(join(baseDir, 'opencode.json'))
+})
+
+test('uninstallOpencodePlugin: 保留用户既有 plugin 条目', () => {
+  const baseDir = join(tmpRoot, 'uninstall-2')
+  mkdirSync(baseDir, { recursive: true })
+  writeFileSync(join(baseDir, 'opencode.json'),
+    JSON.stringify({ plugin: ['superpowers@git+https://github.com/foo/superpowers'] }))
+  installOpencodePlugin({ port: 7777, baseDir, pluginSrcDir })
+  uninstallOpencodePlugin({ baseDir })
+  const cfg = JSON.parse(readFileSync(join(baseDir, 'opencode.json'), 'utf-8'))
+  expect((cfg.plugin as string[]).some((p) => p.includes('superpowers'))).toBe(true)
+})
+
+test('uninstallOpencodePlugin: 目录与文件都不存在 → removed:0 dirRemoved:false 不抛', () => {
+  const baseDir = join(tmpRoot, 'uninstall-3')
+  const r = uninstallOpencodePlugin({ baseDir })
+  expect(r.removed).toBe(0)
+  expect(r.dirRemoved).toBe(false)
+  expect(r.pluginPath).toBe(join(baseDir, 'opencode.json'))
+})
+
+test('uninstallOpencodePlugin: malformed opencode.json → removed:0 不抛，dir 若存在仍删', () => {
+  const baseDir = join(tmpRoot, 'uninstall-4')
+  mkdirSync(join(baseDir, 'memside-opencode'), { recursive: true })
+  writeFileSync(join(baseDir, 'memside-opencode', 'memside.js'), 'x')
+  writeFileSync(join(baseDir, 'opencode.json'), '{not json')
+  const r = uninstallOpencodePlugin({ baseDir })
+  expect(r.removed).toBe(0)
+  expect(r.dirRemoved).toBe(true) // 目录存在就删，不依赖 json 解析
+  expect(existsSync(join(baseDir, 'memside-opencode'))).toBe(false)
+})
+
+test('uninstallOpencodePlugin: 重复 uninstall（已无痕迹）→ removed:0 dirRemoved:false 幂等', () => {
+  const baseDir = join(tmpRoot, 'uninstall-5')
+  uninstallOpencodePlugin({ baseDir }) // 空目录首次
+  const r = uninstallOpencodePlugin({ baseDir }) // 再来一次
+  expect(r.removed).toBe(0)
+  expect(r.dirRemoved).toBe(false)
+})
+
+test('uninstallOpencodePlugin: baseDir 缺省走 ~/.config/opencode', () => {
+  // 用 fake HOME 避免碰真实目录
+  const realHome = process.env.HOME
+  ;(process.env as any).HOME = join(tmpRoot, 'fake-home-uninstall')
+  delete process.env.USERPROFILE
+  try {
+    const r = uninstallOpencodePlugin({})
+    expect(r.removed).toBe(0)
+    expect(r.pluginPath).toBe(join((process.env as any).HOME, '.config', 'opencode', 'opencode.json'))
+  } finally {
+    ;(process.env as any).HOME = realHome
+  }
 })

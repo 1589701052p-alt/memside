@@ -68,6 +68,12 @@ export interface AppDeps {
    * 缺省走真实 install.ts 实现；测试注入假实现，不碰真实 ~/.claude。 */
   installHooksFn?: (opts: { port: number; baseDir?: string; settingsFilename?: string }) => void
   uninstallHooksFn?: (opts: { baseDir?: string; settingsFilename?: string }) => { removed: number; settingsPath: string }
+  /** opencode plugin install/uninstall 注入点（spec runtime-settings-redesign §3.3）。
+   *  install 依赖插件源（srcDir/files），由 daemon 启动时注入；缺省 = undefined
+   *  → opencode install 端点返回 ok:false + 说明（exe/dev 之外罕见启动路径降级）。
+   *  uninstall 不依赖源，daemon 无条件注入真实实现。测试注入 fake 不碰真实目录。 */
+  installOpencodePluginFn?: (opts: { baseDir?: string }) => void
+  uninstallOpencodePluginFn?: (opts: { baseDir?: string }) => { removed: number; pluginPath: string; dirRemoved: boolean }
 }
 
 /** Portably resolve the user home directory. Mirrors resolveHome in
@@ -163,6 +169,8 @@ export function createApp(deps: AppDeps) {
   const port = deps.port ?? 7777
   const doInstall = deps.installHooksFn ?? ((opts: { port: number; baseDir?: string; settingsFilename?: string }) => installHooks(opts))
   const doUninstall = deps.uninstallHooksFn ?? ((opts: { baseDir?: string; settingsFilename?: string }) => uninstallHooks(opts))
+  const doInstallOpencode = deps.installOpencodePluginFn
+  const doUninstallOpencode = deps.uninstallOpencodePluginFn
 
   /** 按协议解析当前生效 creds，统一为 {source, apiKey, baseURL?, model?}；无 creds 返回 null。 */
   function resolveEffective(
@@ -1026,24 +1034,58 @@ export function createApp(deps: AppDeps) {
   })
 
   app.post('/api/settings/runtime/install', (c) => {
+    const target = (c.req.query('target') ?? 'claude') as 'claude' | 'opencode'
+    if (target !== 'claude' && target !== 'opencode') {
+      return c.json({ error: `invalid target: ${target}` }, 400)
+    }
     const rp = loadRuntimePaths(deps.db)
-    // ~ 展开：claudeDir 若以 ~ 开头走 resolveHome（spec §6.3）；绝对路径原样用。
-    const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
+    if (target === 'claude') {
+      // ~ 展开：claudeDir 若以 ~ 开头走 resolveHome（spec §6.3）；绝对路径原样用。
+      const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
+      try {
+        doInstall({ port, baseDir, settingsFilename: rp.settingsFilename })
+        const settingsPath = join(baseDir, rp.settingsFilename)
+        return c.json({ ok: true, settingsPath })
+      } catch (e) {
+        return c.json({ ok: false, error: (e as Error).message })
+      }
+    }
+    // target === 'opencode'
+    if (!doInstallOpencode) {
+      return c.json({ ok: false, error: 'opencode 插件源在本启动模式下不可用（仅 dev/exe 启动支持），请用命令行安装' })
+    }
+    const baseDir = rp.opencodeDir.startsWith('~') ? join(resolveHome(), rp.opencodeDir.slice(1)) : rp.opencodeDir
     try {
-      doInstall({ port, baseDir, settingsFilename: rp.settingsFilename })
-      const settingsPath = join(baseDir, rp.settingsFilename)
-      return c.json({ ok: true, settingsPath })
+      doInstallOpencode({ baseDir })
+      return c.json({ ok: true, pluginPath: join(baseDir, 'memside-opencode') })
     } catch (e) {
       return c.json({ ok: false, error: (e as Error).message })
     }
   })
 
   app.post('/api/settings/runtime/uninstall', (c) => {
+    const target = (c.req.query('target') ?? 'claude') as 'claude' | 'opencode'
+    if (target !== 'claude' && target !== 'opencode') {
+      return c.json({ error: `invalid target: ${target}` }, 400)
+    }
     const rp = loadRuntimePaths(deps.db)
-    const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
+    if (target === 'claude') {
+      const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
+      try {
+        const r = doUninstall({ baseDir, settingsFilename: rp.settingsFilename })
+        return c.json({ ok: true, removed: r.removed, settingsPath: r.settingsPath })
+      } catch (e) {
+        return c.json({ ok: false, error: (e as Error).message })
+      }
+    }
+    // target === 'opencode'
+    if (!doUninstallOpencode) {
+      return c.json({ ok: false, error: 'opencode 卸载在本启动模式下不可用' })
+    }
+    const baseDir = rp.opencodeDir.startsWith('~') ? join(resolveHome(), rp.opencodeDir.slice(1)) : rp.opencodeDir
     try {
-      const r = doUninstall({ baseDir, settingsFilename: rp.settingsFilename })
-      return c.json({ ok: true, removed: r.removed, settingsPath: r.settingsPath })
+      const r = doUninstallOpencode({ baseDir })
+      return c.json({ ok: true, removed: r.removed, pluginPath: r.pluginPath, dirRemoved: r.dirRemoved })
     } catch (e) {
       return c.json({ ok: false, error: (e as Error).message })
     }
