@@ -965,11 +965,13 @@ export function createApp(deps: AppDeps) {
   // POST /api/distill-runs/:jobId/abandon — abandonJob：status='done' + finishedAt，
   // 放弃重试。best-effort 推进 session offset 到事件存档的 fullLength（spec P5：避免
   // 下次同 session 重新蒸馏同一段）。offset 推进失败只 warn（优化非正确性依赖）。
+  // 非 paused job -> 409（与 retry 契约对齐：不打扰正常流转 / 已结束的 job）。
   app.post('/api/distill-runs/:jobId/abandon', async (c) => {
     const jobId = c.req.param('jobId')
     const jobRows = await deps.db.select({ status: memoryDistillJobs.status, sessionId: memoryDistillJobs.sessionId })
       .from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).limit(1).all()
     if (jobRows.length === 0) return c.json({ error: 'job not found' }, 404)
+    if (jobRows[0]!.status !== 'paused') return c.json({ error: `job is '${jobRows[0]!.status}', not 'paused'` }, 409)
     await abandonJob(deps.db, jobId)
     const sid = jobRows[0]!.sessionId
     if (sid) {

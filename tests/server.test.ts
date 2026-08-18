@@ -1346,6 +1346,29 @@ test('POST /api/distill-runs/:jobId/abandon 无 session 的 job 只标 done（of
   expect(job.status).toBe('done')
 })
 
+// Task 10 carry-forward：abandon 409-on-not-paused 守卫（与 retry 契约对齐）。
+// abandon 只应作用于 paused job——非 paused job（如 running / done）说明还在正常流转
+// 或已结束，UI 误点 abandon 不应静默改状态。锁 spec 2026-08-18 §6（abandon 路由）。
+test('POST /api/distill-runs/:jobId/abandon 非 paused job -> 409（不打扰正常流转）', async () => {
+  const now = Date.now()
+  // running job：scheduler 正在跑，abandon 会与执行器抢状态
+  db.insert(memoryDistillJobs).values({
+    id: 'ab1', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code',
+    status: 'running', attempts: 0, nextRunAt: now, createdAt: now,
+  }).run()
+  const r = await req('/api/distill-runs/ab1/abandon', { method: 'POST' })
+  expect(r.status).toBe(409)
+  expect(r.body.error).toMatch(/not 'paused'/i)
+  // 状态未变（abandon 被拒，未副作用）
+  const job = db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'ab1')).all()[0]!
+  expect(job.status).toBe('running')
+})
+
+test('POST /api/distill-runs/:jobId/abandon 不存在的 job -> 404', async () => {
+  const r = await req('/api/distill-runs/abandon-nope/abandon', { method: 'POST' })
+  expect(r.status).toBe(404)
+})
+
 test('GET /api/memories/pending-review 列出 pending_review 候选（spec §6.4）', async () => {
   const c = await createCandidate(db, {
     scopeType: 'project', scopeId: '/p1', title: 'pr1', bodyMd: 'b', tags: [],

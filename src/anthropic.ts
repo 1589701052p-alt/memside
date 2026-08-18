@@ -78,7 +78,24 @@ export function makeLLMCall(deps: AnthropicDeps = {}): LLMCall {
       },
       { timeout: 600_000 },
     )
-    const msg = await stream.finalMessage()
+    let msg
+    try {
+      msg = await stream.finalMessage()
+    } catch (e) {
+      // 诊断化（spec §缺陷3 / Task 10）：SDK 抛出的裸 "the operation was aborted" /
+      // "Connection error" 不可诊断——执行器 classifyFailure 虽能识别 aborted，但
+      // reasons / paused job stepError 里落的是原文，用户/日志看不出是网关掐断还是
+      // 超时。这里把消息包装成可诊断描述，供 runLlmSession 接续重试落盘 + UI 可见。
+      //
+      // P6 不变量：memside 与 LLM/网关解耦——不设主动 setTimeout / AbortController
+      // 掐断（已有的 timeout:600_000 是 SDK 硬上限兜底，流式字节流动期间不触发）。
+      // 只改错误文案，不改流式语义、不加主动超时。
+      const raw = e instanceof Error ? e.message : String(e)
+      throw new Error(
+        `LLM 调用被中断，可能是网关掐断或超时；memside 会自动接续重试（原始错误：${raw}）`,
+        { cause: e },
+      )
+    }
     // extract text from content blocks (TextBlock has type:'text' + text:string;
     // ToolUseBlock is silently dropped). The `ContentBlock` union doesn't narrow
     // through `.filter` without a type predicate, so narrow explicitly.
