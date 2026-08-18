@@ -240,3 +240,52 @@ test('带记忆接续：distill 第 1 轮中断，第 2 轮追问带历史接续
   expect(rows[0]!.status).toBe('done')
   expect(await getSessionOffset(db, 's-retry')).toBe(3)
 })
+
+// final-fix-1（judge 双重入库窗口）：judge 成功后若在 createCandidate 循环与
+// setJobCheckpoint('digest') 之间崩溃 → job 回 pending → 下 tick judge 的 loadHistory
+// 末轮-ok 路径零 LLM 调用复放同一裁决（llmSession.ts:46-51）→ 再次 createCandidate →
+// 重复候选行。修复：插入新裁决前先 deleteCandidatesForJob 清掉旧 candidate 行。
+test('final-fix-1: judge 成功后崩溃于 checkpoint 前 → 重跑不产生重复候选行', async () => {
+  const jobId = await seedDueJob('s-fix1')
+  // 2 候选（不同标题，dedup 不合并），judge 全 keep
+  const callLLM = async (sys: string) => {
+    if (sys.includes('memside-distiller')) {
+      return JSON.stringify({
+        candidates: [
+          { title: '[category:x] keep-a', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' },
+          { title: '[category:x] keep-b', bodyMd: 'b2', scope: 'project', runtime: null, distillAction: 'new' },
+        ],
+      })
+    }
+    return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }, { index: 1, category: 'decision' }] })
+  }
+  // tick1：第 1 个 createCandidate 真实入库后，第 2 个抛错——模拟 createCandidate
+  // 循环中 DB 故障（窗口：第一个 createCandidate 与 setJobCheckpoint('digest') 之间）。
+  let createCalls = 0
+  let tick1Crashed = false
+  const createCrashOn2nd = async (_db: unknown, input: unknown) => {
+    createCalls++
+    if (createCalls === 2 && !tick1Crashed) {
+      tick1Crashed = true
+      throw new Error('simulate DB crash mid-create')
+    }
+    return createCandidate(db, input as never)
+  }
+  await tick(db, { loadTranscript: () => loadTranscript(), callLLM, createCandidate: createCrashOn2nd as never, loadJudgeConfig: () => ECONOMY })
+  // tick1 崩溃 → 外层 catch → job 回 pending（非 done）
+  const after1 = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(after1[0]!.status).toBe('pending')
+  // 1 个候选已入库（第 1 个成功后第 2 个抛错）
+  const candsAfter1 = await db.select().from(memories).where(eq(memories.distillJobId, jobId))
+  expect(candsAfter1).toHaveLength(1)
+  // tick2：重跑。judge loadHistory 末轮-ok 复放（零 LLM 调用）→ deleteCandidatesForJob
+  // 清掉旧 candidate → 重新插入 2 个。无重复（未修会是 1 旧 + 2 新 = 3）。
+  await forceDue(jobId)
+  await tick(db, { loadTranscript: () => loadTranscript(), callLLM, createCandidate: createCandidate as never, loadJudgeConfig: () => ECONOMY })
+  const cands = await db.select().from(memories).where(eq(memories.distillJobId, jobId))
+  expect(cands).toHaveLength(2)  // 核心：无重复候选行
+  expect(cands.every((c) => c.status === 'candidate')).toBe(true)
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('done')
+  expect(await getSessionOffset(db, 's-fix1')).toBe(3)
+})

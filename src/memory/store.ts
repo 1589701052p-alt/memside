@@ -113,6 +113,17 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     subjectSlug: input.subjectSlug ?? null, origin: input.origin ?? null, evidence: input.evidence ?? null })
 }
 
+/**
+ * 删除某 job 的候选行（status='candidate'）——让 judge 重跑幂等（spec 2026-08-18 §5
+ * final-fix-1）：judge 成功后若在 createCandidate 循环与 setJobCheckpoint('digest')
+ * 之间崩溃，job 回 pending 重跑时 loadHistory 复放上一轮裁决（零 LLM 调用）并再次
+ * 入库 → 重复候选行。本 helper 在插入新裁决前先清掉旧 candidate 行，仅清 candidate
+ * （不动 approved/rejected/pending_review 等用户已处置的行）。
+ */
+export async function deleteCandidatesForJob(db: DbClient, jobId: string): Promise<void> {
+  await db.delete(memories).where(and(eq(memories.distillJobId, jobId), eq(memories.status, 'candidate'))).run()
+}
+
 export async function getMemoryById(db: DbClient, id: string): Promise<{ memory: Memory } | null> {
   const rows = await db.select().from(memories).where(eq(memories.id, id)).limit(1)
   if (rows.length === 0) return null
@@ -698,6 +709,12 @@ export interface DistillRunListRow {
   pausedStep: string | null
   /** job 整体尝试轮次（attempts 列，spec §6 重试轮次显示）。孤儿 run=0。 */
   attempts: number
+  /** 当前步骤失败计数（step_attempts 列，final-fix-3：暂停徽标读真实步骤重试轮次，
+   *  非 attempts——后者仅外层 catch 累加，LLM 步骤失败不动）。孤儿 run=0。 */
+  stepAttempts: number
+  /** 当前断点步骤（current_step 列，final-fix-3：状态栏「某步骤第 N 轮重试中」用）。
+   *  孤儿 run=null（新任务语义同 'distill'，但 UI 仅在非空时显示）。 */
+  currentStep: string | null
 }
 
 const RUN_LIST_COLS = {
@@ -753,6 +770,8 @@ async function attachRunJobMeta(
       hasDegradations: degJobIds.has(r.distillJobId),
       pausedStep: r.pausedStep ?? null,
       attempts: j?.attempts ?? 0,
+      stepAttempts: j?.stepAttempts ?? 0,
+      currentStep: j?.currentStep ?? null,
     }
   })
 }

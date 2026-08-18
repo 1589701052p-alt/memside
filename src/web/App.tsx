@@ -1732,8 +1732,8 @@ function DistillRunRow({ r, onOpen, onRetry, onAbandon }: { r: DistillRunListIte
               ⏸ 已暂停-{r.pausedStep}失败
             </span>
           ) : null}
-          {paused && r.attempts ? (
-            <span style={{ color: '#888', fontSize: 11, marginLeft: 6 }}>第 {r.attempts} 轮重试</span>
+          {paused && r.stepAttempts ? (
+            <span style={{ color: '#888', fontSize: 11, marginLeft: 6 }}>第 {r.stepAttempts} 轮重试</span>
           ) : null}
         </span>
         <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{formatRunCounts({ distilled: r.rawCount, deduped: r.dedupedCount, filtered: r.filteredCount, stored: r.storedCount })}</span>

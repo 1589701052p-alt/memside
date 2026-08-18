@@ -255,6 +255,10 @@ export interface DistillRunListItem {
   pausedStep?: string | null
   /** job 整体尝试轮次（spec §6 重试轮次显示）；详情端点不带，故可选。 */
   attempts?: number
+  /** 当前步骤失败计数（step_attempts 列，final-fix-3：暂停徽标读真实步骤重试轮次）。 */
+  stepAttempts?: number
+  /** 当前断点步骤（current_step 列，final-fix-3：状态栏「某步骤第 N 轮重试中」用）。 */
+  currentStep?: string | null
 }
 
 export interface DistillRunDetail extends DistillRunListItem {

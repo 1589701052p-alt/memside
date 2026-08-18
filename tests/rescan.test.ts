@@ -181,10 +181,12 @@ test('judge LLM 失败 -> 合成 job 暂停 + 汇总通知 + 该批判 pending_r
   const rows = await db.select().from(memories)
   expect(rows).toHaveLength(2)
   expect(rows.every((r) => r.status === 'pending_review')).toBe(true)
-  // 合成 job 暂停 + 一条汇总通知
+  // 合成 job 不暂停（final-fix-2：markJobPaused 会让无 run 行的合成 job 进 pausedJobs
+  // 横幅死胡同）。保持 done 终态，失败由通知 + pending_review + report.stopped 传达。
   const jobs = await db.select().from(memoryDistillJobs)
   expect(jobs).toHaveLength(1)
-  expect(jobs[0]!.status).toBe('paused')
+  expect(jobs[0]!.status).toBe('done')
+  expect(jobs[0]!.status).not.toBe('paused')  // 不污染 pausedJobs 横幅
   const notifs = await db.select().from(notifications)
   expect(notifs.filter((n) => n.kind === 'llm_error' && n.title === 'judge_failed')).toHaveLength(1)
   // 未进审计表（不丢弃）

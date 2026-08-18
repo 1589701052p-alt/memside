@@ -1,5 +1,39 @@
 # STATE.md - memside 构建状态
 
+## LLM 失败处理重构：4 步断点续跑 agent 会话执行器（2026-08-18）
+
+把 memside 与 LLM 的关系从「一次性大请求、失败即丢」重构为「带历史、可中断、可接续的多轮 agent 对话」——任何 LLM 调用失败都不再被当正常业务结果静默吞掉，而是有记忆地重试接续，失败全程可见，内容绝不丢失。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-18-llm-failure-handling*`。根因：内测 distill 阶段连续 360s 网关掐断（aborted），旧代码「失败也标 done + 推 offset + 候选全部未评估」→ 内容永久跳过、judge 全保留冒充成功。
+
+1. **4 步断点步骤机**（`src/memory/stepState.ts` + `src/scheduler.ts` tick 改 checkpoint 步骤机）：每 job 四步 distill→dedup→judge→digest，每步 checkpoint 落 `current_step`/`step_attempts`/`step_error`（schema `memory_distill_jobs` 三新列 + `memory_distill_runs.paused_step`）。成功同 tick 续下一步；失败回 pending + 指数退避，**单 tick 单步一轮 LLM**；`stepAttempts` 累计 3 次 → `markJobPaused` + 一条任务级 `llm_error` 通知，job 停在 paused 等人处置。
+2. **可接续 LLM 会话执行器**（`src/memory/llmSession.ts` + `src/memory/stepPrompt.ts`）：`runLlmSession` 多轮带历史接续——`loadHistory` 末轮失败 → 拼 `buildFollowupPrompt`（含上轮响应）追问；末轮已成功 → **零 LLM 调用复用落盘响应**（P3：成功后崩溃不重算）。硬中断（callLLM throw）走 `classifyFailure(error, null)`（response=null）命中 aborted。`anthropic.ts` AbortError 诊断化（P6：无主动超时，仅改文案 + 保留 cause）。
+3. **judge 静默兜底废除**（`src/memory/valueFilter.ts` + `agentJudge.ts`）：`keepNull`/`keepAll` 彻底删——judge 失败返回 `{failed:true,reasons}` 冒泡给 scheduler 暂停（非全保留冒充成功、非全丢弃丢内容）。成功路径 `verdictsFromCategories` + taming override 逐字不变。
+4. **offset 仅四步全成推进**（P5，`scheduler.ts` 收官块 `nextStep('digest')===null`）：唯一推 offset + 唯一标 done 处。失败 / 暂停不动 offset → 失败那批对话不再永久跳过。原 `scheduler.ts:478` 无条件标 done + `:482` 推 offset 的 bug 根治。
+5. **步骤间隔离 + 失败可见**（P4/P7/P8）：步骤间只传 candidates/deduped/judged 干净结果，历史按步隔离（`listLlmRounds(db, jobId, step)`）。`llm_error`/`parse_error` 通知仅暂停时发（旧每失败必发删）。UI 三面可见：状态栏琥珀 banner（`pausedJobs` 计数跳转 runs tab）+ runs tab ⏸ 已暂停-{step}失败 标记 + 第 N 轮重试 + 重试/放弃按钮 + 候选 tab ⏸ 待审查 区块（`pending_review` 候选复用 MemoryCard approve/reject/edit）。
+6. **final-fix wave**（本批）：(a) judge 双重入库窗口——插入新裁决前先 `deleteCandidatesForJob` 清旧 candidate 行让重跑幂等；(b) rescan 不再 `markJobPaused` 合成 job（保持 `done`，不污染 `pausedJobs` 横幅死胡同）；(c) runs 列表透出 `stepAttempts`/`currentStep`，UI「第 N 轮重试」徽标读 `stepAttempts`（`attempts` 仅外层 catch 累加，步骤失败不动）。
+
+执行：subagent-driven（10 实现 task + 各 task review + 1 final whole-branch review + 1 final-fix wave）。`bun run typecheck && bun test` 1253 pass / 6 skip / 0 fail（基线 1252 → +1 final-fix-1 测试）。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. **judge 双重入库窗口**（final-fix-1）：真实崩溃下观察重跑后候选行无重复（`SELECT count(*) FROM memories WHERE distill_job_id=? AND status='candidate'` 与 expected 一致，非 2×）；若仍有窗口考虑加 `(distill_job_id, title)` 幂等键。
+2. **rescan paused-jobs 横幅**（final-fix-2）：rescan 批 judge 失败后 `/api/status` 的 `pausedJobs` 不含合成 rescan job；runs tab 无「指空」死胡同。
+3. **360s 网关掐断**：distill/judge 遇 aborted → 3 轮带历史重试 → 仍失败 → paused + 通知（非旧「标 done + 全未评估 + 推 offset」）；用户点「重试」清 `stepAttempts` 续跑。
+4. **失败批次不再永久跳过**（P5）：job 失败后 `session_offsets` 不动；重试成功后 offset 才推进，切出范围不错乱。
+5. **pending_review 候选**：judge 暂停的候选进「⏸ 待审查」区块，可手动 approve/reject/edit；重试成功后占位 pending_review 行自动退役、重判候选正式入队。
+
+### deferred minor（非阻塞，已 triage — 携自 final review ledger）
+
+1. judge 双重入库窗口已 mitigate（deleteCandidatesForJob）未根除——更严的 `(distill_job_id, title)` 唯一键属 store 契约，defer-to-followup。
+2. rescan 失败批的 `pending_review` 行不被 `listAllCandidatesForRescan` 自动重判（只选 `candidate`）——跨 UI 后续。
+3. 质量模式 agent judge（`agentJudge.ts`）未跨 tick 断点续跑（agent loop 不按步机 persistRound/loadHistory）——经济模式已覆盖。
+4. `classifyStepReason` 在 digest 失败时可能误标 aborted（`reasons[0]` 前缀匹配不中）。
+5. `abandonJob` 放弃时 offset 推进选行无序（abandon 语义不保证顺序）。
+6. 中间失败 tick 不写 run 记录（与 P7 一致，但 `/api/status` 重试期缺失该 job 的 run 行）。
+7. 空字符串 = 失败推翻 2026-08-17 §3.1 spec（旧 spec stale，待同步）。
+8. infra 外层 catch 极窄路径可能翻转刚暂停 job（pre-existing 模式）。
+9. `maxAttempts=0` 退化空 reasons；`persistRound` 无错误处理（fail-fast）；`jobId` pass-through 在执行器内未用。
+10. spec §6.1 状态栏「某步骤第 N 轮重试中」中间态指示器未实现（当前仅暂停后徽标读 `stepAttempts`；pending 重试期的全局状态栏指示待补）。
+
 ## 运行环境设置重设计（2026-08-17，双分组 UI + opencode 安装/卸载生效）
 
 前作「运行环境自定义路径配置」落地了路径配置 + claude 侧 install/uninstall，但留两类产品缺陷：UI 不清晰（三框三按钮无标签、按钮与框关系不明、改了没存就点安装会静默装旧路径）+ opencodeDir 字段存了但 install/uninstall 不读它（opencode 装/卸从未经 UI 生效）。本变重设计 UI 成双分组并让 opencode 真正闭环。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-17-runtime-settings-redesign*`。

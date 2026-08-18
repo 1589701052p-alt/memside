@@ -1427,10 +1427,15 @@ test('GET /api/distill-runs 列表含 pausedStep + attempts（spec §6 UI 可见
   // markJobPaused 写 pausedStep 到 run 行
   const { markJobPaused } = await import('@/memory/store')
   await markJobPaused(db, 'pj1', 'judge')
+  // final-fix-3：stepAttempts + currentStep 也经列表透出（UI「第 N 轮重试」徽标读 stepAttempts）
+  db.update(memoryDistillJobs).set({ stepAttempts: 2, currentStep: 'judge' })
+    .where(eq(memoryDistillJobs.id, 'pj1')).run()
   const r = await req('/api/distill-runs?limit=10')
   expect(r.status).toBe(200)
   const item = r.body.items.find((x: any) => x.distillJobId === 'pj1')
   expect(item).toBeTruthy()
   expect(item.pausedStep).toBe('judge')
   expect(item.attempts).toBe(2)
+  expect(item.stepAttempts).toBe(2)
+  expect(item.currentStep).toBe('judge')
 })

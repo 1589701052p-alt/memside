@@ -13,7 +13,7 @@ import { judgeValueAgentic } from '@/memory/agentJudge'
 import { DEFAULT_JUDGE_CONFIG, type JudgeConfig } from '@/memory/judgeConfig'
 import {
   listAllCandidatesForRescan, listApprovedByScope, logDiscards, updateJudgedFields,
-  saveLlmRound, markJobPaused, logStepFailureNotification,
+  saveLlmRound, logStepFailureNotification,
   type Memory,
 } from '@/memory/store'
 
@@ -132,7 +132,11 @@ export async function rescanCandidates(
         continue
       }
       if (judgeFailed) {
-        await markJobPaused(db, jobId, 'judge')
+        // final-fix-2（rescan 不污染 paused-jobs 横幅）：合成 rescan job 无 run 行，
+        // markJobPaused 会把它计入 status.pausedJobs → UI 横幅「N 个蒸馏任务已暂停」
+        // 指向一个 runs tab 没有行的死胡同。失败已由 logStepFailureNotification +
+        // pending_review 标记 + report.stopped=true 充分传达（P8），合成 job 保持原
+        // `done` 终态即可，不进 pausedJobs。
         await logStepFailureNotification(db, { jobId, step: 'judge', reasons: judgeFailed.reasons })
         for (const m of batch) {
           try {

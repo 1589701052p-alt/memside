@@ -10,7 +10,7 @@ import {
   saveSourceInput, saveDistillRun, getSessionDigest, upsertSessionDigest, listWaitingJobs,
   consumeFlush, releaseWaitingJob, logDegradation, getSessionOffset, updateDistillRunDigestMs,
   getJobCheckpoint, setJobCheckpoint, saveLlmRound, listLlmRounds, markJobPaused,
-  logStepFailureNotification, saveStepOutput, getStepOutput,
+  logStepFailureNotification, saveStepOutput, getStepOutput, deleteCandidatesForJob,
   type DiscardRecord,
 } from '@/memory/store'
 import { advanceStep, nextStep, type DistillStep } from '@/memory/stepState'
@@ -595,6 +595,12 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
             // Best-effort audit log: a DB failure here must not block distill.
             try { await logDiscards(db, job.id, discarded) } catch (e) { console.warn('memside: logDiscards failed', e) }
           }
+          // final-fix-1（judge 幂等重跑）：插入新裁决前先清掉本 job 旧 candidate 行。
+          // 若 createCandidate 循环与 setJobCheckpoint('digest') 之间崩溃 → job 回 pending
+          // → 下 tick loadHistory 复放同一裁决（零 LLM 调用）再次入库 → 重复候选行。
+          // 仅清 candidate（不动 approved/rejected/pending_review）。
+          try { await deleteCandidatesForJob(db, job.id) }
+          catch (e) { console.warn('memside: judge candidate cleanup failed', e) }
           for (const k of keepWithClass) {
             await deps.createCandidate(db, {
               scopeType: k.cand.scopeType,
