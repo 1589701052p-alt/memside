@@ -18,7 +18,10 @@ test.skipIf(!LIVE_GUARD)(
       { title: '[category:convention] use bun test not npm test', bodyMd: 'All tests run via bun test.', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null },
     ]
 
-    const verdicts = await judgeValue(candidates, realCallLLM)
+    const r = await judgeValue(candidates, realCallLLM)
+    // Task 6：judgeValue 现返回 JudgeResult union；live 成功路径应得到 verdicts 数组。
+    expect(Array.isArray(r)).toBe(true)
+    const verdicts = r as Exclude<typeof r, { failed: true }>
 
     // 检查 ④ judge：judgeValue 不崩、返回与候选数等长的 verdicts
     expect(verdicts.length).toBe(candidates.length)

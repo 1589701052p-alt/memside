@@ -100,14 +100,21 @@ export async function rescanCandidates(
       const batch = kindGroup.slice(i, i + RESCAN_BATCH)
       const cands = batch.map(toCandidate)
       // 故障倒向保留:单批判定抛错不中断整个回扫,该批全部保留并计数。
+      // WIP 过渡（Task 6）：judgeValue/judgeValueAgentic 失败现在返回 {failed:true}
+      // 而非全保留 verdicts。本调用点暂把 failed 当空 verdicts 过渡（与原 catch 保留
+      // 语义对齐：空 verdicts -> for 循环全部走 keptUpdated 分支）。Task 7 接正式暂停。
       let verdicts
       try {
-        verdicts = cfg.mode === 'economy'
-          ? await judgeValue(cands, deps.callLLM)
-          : (await judgeValueAgentic(cands, {
-              callLLM: deps.callLLM, rootDir, approvedTitles,
-              sourceKind, maxRounds: cfg.maxRounds, timeBudgetMs: cfg.timeBudgetS * 1000,
-            })).verdicts
+        if (cfg.mode === 'economy') {
+          const r = await judgeValue(cands, deps.callLLM)
+          verdicts = Array.isArray(r) ? r : []
+        } else {
+          const r = await judgeValueAgentic(cands, {
+            callLLM: deps.callLLM, rootDir, approvedTitles,
+            sourceKind, maxRounds: cfg.maxRounds, timeBudgetMs: cfg.timeBudgetS * 1000,
+          })
+          verdicts = 'failed' in r ? [] : r.verdicts
+        }
       } catch (e) {
         console.warn('memside: rescan batch judge failed, keeping batch', e)
         report.keptUpdated += batch.length

@@ -46,6 +46,14 @@ export interface AgentJudgeResult {
   trace: AgentStep[]
 }
 
+/**
+ * Task 6（2026-08-18 spec §缺陷2/§8.4）：judge 失败绝不走 keepAll 全保留冒充成功。
+ * agent 终审失败（LLM 报错/预算耗尽/final 形状不对）时返回 {failed:true,reasons}，
+ * 由 scheduler 据此暂停任务（Task 7 接正式暂停）。成功路径 taming 守卫最后跑，
+ * 覆盖 stated 免疫（安全 > stated 免疫）。
+ */
+export type AgentJudgeResultOrFailed = AgentJudgeResult | { failed: true; reasons: string[] }
+
 const AGENT_DISCARD_CATEGORIES: ReadonlySet<string> = new Set(['public-knowledge', 'derivable', 'fleeting', 'duplicate'])
 
 /**
@@ -66,20 +74,16 @@ function renderAgentUserPrompt(candidates: DistillCandidate[], opts: AgentJudgeO
 }
 
 /**
- * 质量模式判定器(spec §4.5):agent 终审全部候选。永不抛——任何故障
- * (LLM 报错/预算耗尽/格式乱)倒向 R3 全保留兜底。taming 守卫最后跑,覆盖 stated 免疫。
+ * 质量模式判定器(spec §4.5):agent 终审全部候选。Task 6：失败不再 keepAll 全保留
+ * 冒充成功——返回 {failed:true,reasons} 让 scheduler 暂停（Task 7 接正式暂停）。
+ * 成功路径 taming 守卫最后跑，覆盖 stated 免疫。
  */
 export async function judgeValueAgentic(
   candidates: DistillCandidate[],
   opts: AgentJudgeOpts,
-): Promise<AgentJudgeResult> {
+): Promise<AgentJudgeResultOrFailed> {
   const n = candidates.length
   if (n === 0) return { verdicts: [], trace: [] }
-  const keepAll = (): ValueVerdict[] =>
-    candidates.map((c, i) => ({
-      index: i, keep: true,
-      valueClass: c.origin === 'agent-observed' ? null : 'decision',
-    }))
   try {
     const tools: RepoTools = opts.rootDir ? makeRepoTools(opts.rootDir) : NO_REPO_TOOLS
     const loop = await runAgentLoop({
@@ -90,11 +94,10 @@ export async function judgeValueAgentic(
     })
     const final = loop.final as { verdicts?: unknown } | null
     if (!final || !Array.isArray(final.verdicts)) {
-      // 预算耗尽 / LLM 报错 / final 形状不对 -> 全保留兜底;trace 保底留一条停止原因,
-      // 让落盘的 agentTrace 能解释「为什么这批是全保留」。
-      const trace = loop.trace.length > 0 ? loop.trace
-        : [{ kind: 'correction' as const, text: `agent loop ended without final: ${loop.stopReason}` }]
-      return { verdicts: keepAll(), trace }
+      // 预算耗尽 / LLM 报错 / final 形状不对 -> 失败标识（不再 keepAll 冒充成功）。
+      // Task 7 接 scheduler 暂停逻辑；loop.stopReason 进 reasons 备查（trace 暂丢弃，
+      // 与 brief 的 failed 变体对齐——Task 7 若需落盘 agentTrace 再扩 failed 变体）。
+      return { failed: true, reasons: [`agent loop ended without final: ${loop.stopReason}`] }
     }
     const entries = (final.verdicts as unknown[]).filter(
       (v): v is { index: number; category: string } =>
@@ -109,7 +112,7 @@ export async function judgeValueAgentic(
         : v,
     )
     return { verdicts, trace: loop.trace }
-  } catch {
-    return { verdicts: keepAll(), trace: [] }
+  } catch (e) {
+    return { failed: true, reasons: [e instanceof Error ? e.message : String(e)] }
   }
 }

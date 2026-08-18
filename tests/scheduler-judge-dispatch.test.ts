@@ -102,7 +102,9 @@ test('mode=economy -> 走单发 judge(无 agent 协议段)', async () => {
   expect(judgeSystems[0]).not.toContain(AGENT_PROTOCOL_LINE)
 })
 
-test('质量模式 agent LLM 报错 -> 候选仍入库(全保留兜底),job done 非 failed', async () => {
+test('质量模式 agent LLM 报错 -> failed 标识 -> 0 候选入库（WIP 过渡，Task 7 接暂停）, job done 非 failed', async () => {
+  // Task 6（2026-08-18 §缺陷2/§8.4）：agent 失败不再 keepAll 全保留冒充成功，返回
+  // failed 标识。scheduler 过渡态把 failed 当空 verdicts（0 候选入库）；Task 7 改正式暂停 + 通知。
   const jobId = await seedDueJob(dir)  // 真实存在的 cwd -> 走 agent 路径
   let createCalls = 0
   await tick(db, {
@@ -115,7 +117,8 @@ test('质量模式 agent LLM 报错 -> 候选仍入库(全保留兜底),job done
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
     loadJudgeConfig: () => ({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 }),
   })
-  expect(createCalls).toBe(1)  // 全保留兜底:候选照样入库(valueClass=null,人工审批兜底)
+  // WIP 过渡：agent 失败 -> 空 verdicts -> 0 候选入库（旧 keepAll 全保留已废）。
+  expect(createCalls).toBe(0)
   const jobs = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(jobs[0]!.status).toBe('done')
 })
@@ -195,12 +198,15 @@ test('judgeValueAgentic 纵深防御:rootDir=null 时工具为 stub,永不构造
     if (calls === 1) return '{"tool": "read", "args": {"path": "src/scheduler.ts"}}'
     return '{"final": {"verdicts": [{"index": 0, "category": "trap"}]}}'
   }
-  const { verdicts, trace } = await judgeValueAgentic(
+  const r = await judgeValueAgentic(
     [{ title: 'T', bodyMd: 'b', scopeType: 'project', runtime: 'claude-code', distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }],
     { callLLM, rootDir: null, approvedTitles: [], sourceKind: 'conversation', maxRounds: 5, timeBudgetMs: 60_000 },
   )
+  // Task 6：judgeValueAgentic 现返回 union；此成功路径应得到 verdicts + trace。
+  expect('failed' in r).toBe(false)
+  const { verdicts, trace } = r as Exclude<typeof r, { failed: true }>
   expect(verdicts[0]).toEqual({ index: 0, keep: true, valueClass: 'trap' })
-  const toolSteps = trace.filter((s) => s.kind === 'tool')
+  const toolSteps = trace.filter((s: { kind: string }) => s.kind === 'tool')
   expect(toolSteps.length).toBe(1)
   expect(toolSteps[0]!.toolResult).toContain('工具不可用')
   expect(toolSteps[0]!.toolResult).not.toContain('judgeValue')  // 没读到真文件内容

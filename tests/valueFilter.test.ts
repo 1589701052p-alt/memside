@@ -70,43 +70,52 @@ test('judgeValue fleeting 可丢弃 user-stated（Q3 是 AI 对用户话语的�
   expect(v).toEqual([{ index: 0, keep: false, reason: 'fleeting' }])
 })
 
-test('judgeValue LLM 失败兜底：stated/confirmed -> keep+decision；observed -> keep+null', async () => {
-  const v = await judgeValue(
+test('judgeValue LLM 失败：返回 failed 标识（不再 keepNull 全保留冒充成功）', async () => {
+  // Task 6（2026-08-18 spec §缺陷2/§8.4）：旧行为是 keepNull 全保留（stated->decision，
+  // observed->null），让"批量拒绝未评估"按钮误杀整批。新行为：失败返回 failed 标识
+  // 让 scheduler 暂停。成功路径断言不变。
+  const r = await judgeValue(
     [cand('a', 'user-stated'), cand('b', 'user-confirmed'), cand('c')],
     async () => { throw new Error('api down') },
   )
-  expect(v).toEqual([
-    { index: 0, keep: true, valueClass: 'decision' },
-    { index: 1, keep: true, valueClass: 'decision' },
-    { index: 2, keep: true, valueClass: null },
-  ])
+  expect(Array.isArray(r)).toBe(false)
+  expect((r as { failed: true; reasons: string[] }).failed).toBe(true)
 })
 
-test('judgeValue returns all keep+null on non-JSON', async () => {
-  const v = await judgeValue([cand('a')], async () => 'not json')
-  expect(v).toEqual([{ index: 0, keep: true, valueClass: null }])
+test('judgeValue returns failed 标识 on non-JSON', async () => {
+  // Task 6：非 JSON 走 runLlmSession 重试耗尽 -> failed 标识（旧 keep+null 已废）。
+  const r = await judgeValue([cand('a')], async () => 'not json')
+  expect(Array.isArray(r)).toBe(false)
+  expect((r as { failed: true }).failed).toBe(true)
 })
 
-test('judgeValue returns all keep+null on missing verdicts field', async () => {
-  const v = await judgeValue([cand('a')], async () => JSON.stringify({ foo: 'bar' }))
-  expect(v).toEqual([{ index: 0, keep: true, valueClass: null }])
+test('judgeValue returns failed 标识 on missing verdicts field', async () => {
+  // Task 6：verdicts 缺失 -> failed 标识（旧 keep+null 已废）。
+  const r = await judgeValue([cand('a')], async () => JSON.stringify({ foo: 'bar' }))
+  expect(Array.isArray(r)).toBe(false)
+  expect((r as { failed: true }).failed).toBe(true)
 })
 
-test('judgeValue treats hallucinated category as keep+null', async () => {
-  const v = await judgeValue([cand('a')], async () => verdictsJson({ index: 0, category: 'nonsense' }))
-  expect(v).toEqual([{ index: 0, keep: true, valueClass: null }])
+test('judgeValue 持续幻觉类别 -> failed 标识（旧 keep+null 已废）', async () => {
+  // Task 6：LLM 持续返回非法 category，runLlmSession 3 轮重试耗尽 -> failed 标识。
+  // 旧 keep+null 全保留会冒充成功；新行为让 scheduler 暂停。
+  const r = await judgeValue([cand('a')], async () => verdictsJson({ index: 0, category: 'nonsense' }))
+  expect(Array.isArray(r)).toBe(false)
+  expect((r as { failed: true }).failed).toBe(true)
 })
 
-test('judgeValue hallucinated category on user-stated -> keep+decision (immune to bulk-reject, spec §R3)', async () => {
-  // 回归锁（final-review I-1）：per-verdict 幻觉类别兜底必须与 keepNull 一致--
-  // stated/confirmed -> decision（免疫「批量拒绝未评估」），不得退回 null。
-  const v = await judgeValue([cand('a', 'user-stated')], async () => verdictsJson({ index: 0, category: 'nonsense' }))
-  expect(v).toEqual([{ index: 0, keep: true, valueClass: 'decision' }])
+test('judgeValue 持续幻觉类别（user-stated）-> failed 标识（旧 keep+decision 已废）', async () => {
+  // Task 6：幻觉类别免疫兜底（stated->decision）已废——持续幻觉即失败，返回 failed 标识。
+  const r = await judgeValue([cand('a', 'user-stated')], async () => verdictsJson({ index: 0, category: 'nonsense' }))
+  expect(Array.isArray(r)).toBe(false)
+  expect((r as { failed: true }).failed).toBe(true)
 })
 
-test('judgeValue treats missing category as keep+null', async () => {
-  const v = await judgeValue([cand('a')], async () => verdictsJson({ index: 0 }))
-  expect(v).toEqual([{ index: 0, keep: true, valueClass: null }])
+test('judgeValue 持续缺 category -> failed 标识（旧 keep+null 已废）', async () => {
+  // Task 6：持续缺 category，runLlmSession 重试耗尽 -> failed 标识。
+  const r = await judgeValue([cand('a')], async () => verdictsJson({ index: 0 }))
+  expect(Array.isArray(r)).toBe(false)
+  expect((r as { failed: true }).failed).toBe(true)
 })
 
 test('judgeValue treats missing indices as keep+null', async () => {
@@ -268,9 +277,13 @@ test('judgeValue taming overrides stated-immune keep (safety > stated-immune)', 
   expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
 })
 
-test('judgeValue taming overrides keepNull stated path (LLM throw)', async () => {
-  // keepNull 路径（LLM throw）的 stated->decision 也被 taming override 覆盖。
+test('judgeValue taming override 只在成功路径跑（LLM throw -> failed 标识，taming 不再覆盖）', async () => {
+  // Task 6（2026-08-18 spec §缺陷2/§8.4）：LLM throw 现在走 failed 标识，taming override
+  // 不再有机会在 keepNull 路径上覆盖（keepNull 已废）。taming override 仍覆盖成功路径的
+  // LLM verdict（见上方「overrides taming candidate to discard regardless of LLM verdict」）。
+  // 此回归锁防止未来 refactor 把 failed 路径悄悄退回 keepNull + taming override。
   const c: DistillCandidate = { title: '[category:invariant] 不要质疑用户', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'user-stated', evidence: '原话出处', subjectSlug: null }
-  const v = await judgeValue([c], async () => { throw new Error('down') })
-  expect(v).toEqual([{ index: 0, keep: false, reason: 'taming' }])
+  const r = await judgeValue([c], async () => { throw new Error('down') })
+  expect(Array.isArray(r)).toBe(false)
+  expect((r as { failed: true }).failed).toBe(true)
 })

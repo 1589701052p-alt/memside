@@ -57,7 +57,10 @@ test('重跑幂等:已 rejected 的不再处理', async () => {
     scopeType: 'project', scopeId: dir, title: '[category:a] 实现复述一条', bodyMd: 'b',
     tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
   })
-  const deps = { callLLM: economyLLM, loadJudgeConfig: economyCfg }
+  // 单候选批次：economyLLM 的固定 2-verdict 响应在 1 候选批次下 index 1 越界，会触发
+  // runLlmSession 重试耗尽 -> failed（Task 6 新语义）。改用单 verdict 响应让首跑正常判丢。
+  const singleDerivable = async () => '{"verdicts": [{"index": 0, "category": "derivable"}]}'
+  const deps = { callLLM: singleDerivable, loadJudgeConfig: economyCfg }
   await rescanCandidates(db, deps)
   const second = await rescanCandidates(db, deps)
   expect(second.processed).toBe(0)

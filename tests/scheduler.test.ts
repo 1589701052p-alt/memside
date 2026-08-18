@@ -76,11 +76,17 @@ test('tick passes sourceCwd from job.cwd into createCandidate', async () => {
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
+  let callCount = 0
   await tick(db, {
     loadTranscript: async () => ({ turns: [{ role: 'user', content: 'something' }], fullLength: 1, prefixTurns: [] }),
-    callLLM: async () => JSON.stringify({
-      candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'global', runtime: null, distillAction: 'new' }],
-    }),
+    callLLM: async () => {
+      callCount++
+      // call 1 = distill；call 2 = judge（dedup 在 1 候选无 existing 时短路）。
+      if (callCount === 1) return JSON.stringify({
+        candidates: [{ title: '[category:invariant] x', bodyMd: 'b', scope: 'global', runtime: null, distillAction: 'new' }],
+      })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
   expect(captured.sourceCwd).toBe('/proj/x')
@@ -322,7 +328,10 @@ test('tick 入库候选携带 origin/evidence（用户陈述类端到端入库�
   expect(captured.evidence).toBe('任何改动必须走分支+PR')
 })
 
-test('tick keeps all as valueClass=null when judgeValue LLM throws, job still done', async () => {
+test('tick: judgeValue LLM throws -> failed 标识 -> 空 verdicts（WIP 过渡，Task 7 接暂停）, job still done', async () => {
+  // Task 6（2026-08-18 §缺陷2/§8.4）：judgeValue 失败不再 keepNull 全保留冒充成功，
+  // 返回 failed 标识。scheduler 过渡态把 failed 当空 verdicts（无候选入库）；Task 7
+  // 改正式暂停 + 通知。
   const { jobId } = await enqueueDistillJob(db, { sourceEventId: 'e1', runtime: 'claude-code', cwd: '/r', debounceKey: 'k1', debounceMs: 0 })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
@@ -338,8 +347,9 @@ test('tick keeps all as valueClass=null when judgeValue LLM throws, job still do
     },
     createCandidate: async (_db, input) => { captured = input; createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
-  expect(createCalls).toBe(1)
-  expect(captured.valueClass).toBeNull()
+  // WIP 过渡：judge 失败 -> 空 verdicts -> 0 候选入库（旧 keepNull 全保留已废）。
+  expect(createCalls).toBe(0)
+  expect(captured).toBeNull()
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(rows[0]!.status).toBe('done')
 })
@@ -919,11 +929,16 @@ test('tick: subagent job (sourceAgentId set) -> sourceKind=subagent in createCan
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
+  let callCount = 0
   await tick(db, {
     // Task 8 起 subagent job 有琐碎下限（<1000 字 -> skipped_trivial 不调 LLM）；
     // 本用例锁 sourceKind 传播，需越过琐碎下限。
     loadTranscript: async () => ({ turns: [{ role: 'user', content: `subagent did X ${'y'.repeat(1200)}` }], fullLength: 1, prefixTurns: [] }),
-    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:architecture] subagent rationale', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:architecture] subagent rationale', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
   expect(captured.sourceKind).toBe('subagent')
@@ -955,9 +970,14 @@ test('tick: main-session job (no sourceAgentId) still uses sourceKind=conversati
   })
   await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
   let captured: any = null
+  let callCount = 0
   await tick(db, {
     loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 7, prefixTurns: [] }),
-    callLLM: async () => JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }),
+    callLLM: async () => {
+      callCount++
+      if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] t', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
   expect(captured.sourceKind).toBe('conversation')

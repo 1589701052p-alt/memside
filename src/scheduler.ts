@@ -370,10 +370,15 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
       try {
         const agentRootDir = job.cwd && existsSync(job.cwd) && parsePath(job.cwd).root !== job.cwd ? job.cwd : null
         if (judgeCfg.mode === 'economy' || deduped.length === 0) {
-          verdicts = await judgeValue(deduped, tracked)
+          // WIP 过渡（Task 6）：judgeValue 失败现在返回 {failed:true,reasons} 而非全保留
+          // verdicts。本调用点暂把 failed 当空 verdicts 过渡——Task 7 接正式暂停 + 通知。
+          const r = await judgeValue(deduped, tracked)
+          verdicts = Array.isArray(r) ? r : []
         } else if (agentRootDir === null) {
           judgeFallback = 'economy:no-root-dir'
-          verdicts = await judgeValue(deduped, tracked)
+          // WIP 过渡（Task 6）：同上，failed -> 空 verdicts，Task 7 改正式暂停。
+          const r = await judgeValue(deduped, tracked)
+          verdicts = Array.isArray(r) ? r : []
         } else {
           // 质量模式(spec §4.5):agent 终审。approvedTitles 复用 distiller 接线的
           // 同一份清单（查询失败已在上方落 titles_query_failed 降级）。
@@ -382,8 +387,15 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
             sourceKind: job.sourceAgentId ? 'subagent' : 'conversation',
             maxRounds: judgeCfg.maxRounds, timeBudgetMs: judgeCfg.timeBudgetS * 1000,
           })
-          verdicts = r.verdicts
-          agentTrace = r.trace
+          // WIP 过渡（Task 6）：agent 失败现在返回 {failed:true,reasons}。暂当空
+          // verdicts + null trace 过渡；Task 7 改正式暂停 + 通知。
+          if ('failed' in r) {
+            verdicts = []
+            agentTrace = null
+          } else {
+            verdicts = r.verdicts
+            agentTrace = r.trace
+          }
         }
       } finally { judgePhase = pJudge.end() }
       const judgeMs = judgePhase.calls > 0 ? judgePhase.ms : null
