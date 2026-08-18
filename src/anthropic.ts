@@ -32,7 +32,7 @@ export const DISTILL_MODEL = 'claude-haiku-4-5-20251001'
 
 /**
  * Build the `callLLM(system, user, opts?)` seam the distiller / dedup /
- * valueFilter (via callWithRetry) consume. Production wires the real
+ * valueFilter (via runLlmSession) consume. Production wires the real
  * `@anthropic-ai/sdk` client using `loadClaudeCreds`; tests inject a mock
  * `callLLM` directly (or `loadClaudeCreds` here).
  *

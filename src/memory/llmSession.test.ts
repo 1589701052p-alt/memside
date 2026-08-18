@@ -88,6 +88,25 @@ describe('runLlmSession', () => {
     expect(calls).toBe(3)
   })
 
+  // Task 7（spec 2026-08-18 §3.3 不变量 3）：末轮已成功的会话不重发 LLM，直接复用
+  // 落盘成功响应——覆盖「round 落库后、断点推进前」的崩溃窗口，绝不重算已成功步骤。
+  test('loadHistory 末轮已成功 → 复用落盘响应，不再调 LLM', async () => {
+    const history: RoundRecord[] = [
+      { round: 1, request: 'u', response: '{"candidates":[]}', result: { ok: true } },
+    ]
+    let calls = 0
+    const r = await runLlmSession({
+      callLLM: async () => { calls++; return '{"candidates":[{"title":"x"}]}' },
+      system: 's', initialUser: 'u', step: 'distill', jobId: 'j8',
+      persistRound: async () => {},
+      loadHistory: async () => history,
+      shouldRetry: () => null,
+    })
+    expect(r.ok).toBe(true)
+    expect(calls).toBe(0)  // 未重发 LLM
+    if (r.ok) expect(r.parsed).toEqual({ candidates: [] })  // 复用的是落盘响应
+  })
+
   // 锁 parse-fail 分支（llmSession.ts §58-64）：callLLM 返回非 JSON → 内层
   // JSON.parse 抛错 → classifyFailure(null, raw) → persist → continue → 下一轮成功。
   // 非 JSON 字符串 classifyFailure 落 'format'（无 '{' → format，stepPrompt.ts §19）。

@@ -1,6 +1,7 @@
 import type { DistillCandidate } from '@/memory/distiller'
 import type { MemoryScope, MemoryStatus } from '@/memory/pure'
-import { callWithRetry } from './retry'
+import { runLlmSession, type RoundRecord } from './llmSession'
+import { STEP_MAX_ATTEMPTS } from './stepState'
 import type { LLMCall } from '@/llm'
 
 export interface ExistingMemoryForDedup {
@@ -16,11 +17,22 @@ export interface DedupInput {
   newCandidates: DistillCandidate[]
   existing: ExistingMemoryForDedup[]
   callLLM: LLMCall
+  /**
+   * Task 7 断点续跑接线（spec 2026-08-18 §5）：传 loadHistory 即带历史接续，
+   * 单次只跑一轮新回合（多 scope 组各有独立对话，历史按「request 以本组 prompt
+   * 开头」过滤，组间不串线）。缺省 = 无记忆 3 轮（独立调用语义）。
+   */
+  jobId?: string
+  persistRound?: (r: RoundRecord) => Promise<void>
+  loadHistory?: () => Promise<RoundRecord[]>
 }
 
 export type DedupVerdict =
   | { index: number; duplicate: false }
   | { index: number; duplicate: true; duplicateOfId: string }
+
+/** Task 7：LLM 失败/重试耗尽返回失败标识（spec P1），scheduler 据此走 step 失败分支。 */
+export type DedupJudgeResult = DedupVerdict[] | { failed: true; reasons: string[] }
 
 export const DEDUP_SYSTEM_PROMPT = `You are memside-dedup. Decide whether each new candidate memory is a SEMANTIC DUPLICATE of any other item in the same scope — the same rule or fact, even if worded differently or tagged with a different [category:] prefix.
 
@@ -85,13 +97,13 @@ function dedupShouldRetry(existingIds: Set<string>): (parsed: unknown) => string
  * Judge each new candidate against same-scope existing memories for semantic
  * duplication. Pure + injectable `callLLM` (same seam as the distiller).
  *
- * Conservative fallback (never throws, never drops info): on LLM error, non-JSON,
- * missing `verdicts`, missing indices, or a hallucinated `duplicateOfId` not in
- * `existing`, the affected candidate is treated as `duplicate:false` (kept). When
- * `existing` is empty AND `newCandidates` has <= 1 candidate, or `newCandidates` is empty,
- * the LLM is not called; with >= 2 candidates and no existing, it is called to compare siblings.
+ * Task 7（spec 2026-08-18 P1）：LLM 失败/重试耗尽不再保守全保留（旧 catch 兜底
+ * 已废）——返回 `{failed:true, reasons}` 由调用方走 step 失败分支。成功响应内
+ * 的单条幻觉（越界 index / 非法 duplicateOfId）仍按原语义保守判 not-duplicate。
+ * When `existing` is empty AND `newCandidates` has <= 1 candidate, the LLM is
+ * not called; with >= 2 candidates and no existing, it is called to compare siblings.
  */
-export async function judgeDuplicates(input: DedupInput): Promise<DedupVerdict[]> {
+export async function judgeDuplicates(input: DedupInput): Promise<DedupJudgeResult> {
   const n = input.newCandidates.length
   if (n === 0) return []
   // Skip the LLM only when there is nothing to compare against: no existing
@@ -101,31 +113,40 @@ export async function judgeDuplicates(input: DedupInput): Promise<DedupVerdict[]
     return input.newCandidates.map((_, i) => ({ index: i, duplicate: false }))
   }
   const existingIds = new Set(input.existing.map((e) => e.id))
-  try {
-    const parsed = await callWithRetry({
-      call: input.callLLM,
-      system: DEDUP_SYSTEM_PROMPT,
-      user: renderUserPrompt(input.newCandidates, input.existing),
-      shouldRetry: dedupShouldRetry(existingIds),
-    }) as { verdicts?: unknown } | undefined
-    if (!parsed || !Array.isArray(parsed.verdicts)) {
-      return input.newCandidates.map((_, i) => ({ index: i, duplicate: false }))
-    }
-    const byIndex = new Map<number, DedupVerdict>()
-    for (const v of parsed.verdicts) {
-      if (!v || typeof v !== 'object') continue
-      const o = v as { index?: unknown; isDuplicate?: unknown; duplicateOfId?: unknown }
-      if (typeof o.index !== 'number' || o.index < 0 || o.index >= n) continue
-      if (o.isDuplicate === true && typeof o.duplicateOfId === 'string' && isValidDuplicateOf(o.duplicateOfId, o.index, existingIds)) {
-        byIndex.set(o.index, { index: o.index, duplicate: true, duplicateOfId: o.duplicateOfId })
-      } else {
-        // isDuplicate:false OR hallucinated duplicateOfId -> treat as new
-        byIndex.set(o.index, { index: o.index, duplicate: false })
-      }
-    }
-    // Any index the LLM omitted -> new (conservative)
-    return input.newCandidates.map((_, i) => byIndex.get(i) ?? { index: i, duplicate: false })
-  } catch {
-    return input.newCandidates.map((_, i) => ({ index: i, duplicate: false }))
+  const userPrompt = renderUserPrompt(input.newCandidates, input.existing)
+  // 多 scope 组共用 step='dedup' 的历史池：按「request 以本组 prompt 开头」过滤出
+  // 本组自己的对话（followup 轮 request = initialUser + 追问，天然以本组 prompt 开头）。
+  const rawHistory = input.loadHistory ? await input.loadHistory() : []
+  const history = input.loadHistory ? rawHistory.filter((r) => r.request.startsWith(userPrompt)) : rawHistory
+  const session = await runLlmSession({
+    callLLM: input.callLLM,
+    system: DEDUP_SYSTEM_PROMPT,
+    initialUser: userPrompt,
+    step: 'dedup',
+    jobId: input.jobId ?? '',
+    persistRound: input.persistRound,
+    ...(input.loadHistory
+      ? { loadHistory: async () => history, maxAttempts: history.length + 1 }
+      : { maxAttempts: STEP_MAX_ATTEMPTS }),
+    shouldRetry: dedupShouldRetry(existingIds),
+  })
+  if (!session.ok) return { failed: true, reasons: session.reasons }
+  const parsed = session.parsed as { verdicts?: unknown } | undefined
+  if (!parsed || !Array.isArray(parsed.verdicts)) {
+    return { failed: true, reasons: ['dedup: 响应缺少 verdicts 数组'] }
   }
+  const byIndex = new Map<number, DedupVerdict>()
+  for (const v of parsed.verdicts) {
+    if (!v || typeof v !== 'object') continue
+    const o = v as { index?: unknown; isDuplicate?: unknown; duplicateOfId?: unknown }
+    if (typeof o.index !== 'number' || o.index < 0 || o.index >= n) continue
+    if (o.isDuplicate === true && typeof o.duplicateOfId === 'string' && isValidDuplicateOf(o.duplicateOfId, o.index, existingIds)) {
+      byIndex.set(o.index, { index: o.index, duplicate: true, duplicateOfId: o.duplicateOfId })
+    } else {
+      // isDuplicate:false OR hallucinated duplicateOfId -> treat as new
+      byIndex.set(o.index, { index: o.index, duplicate: false })
+    }
+  }
+  // Any index the LLM omitted -> new (conservative)
+  return input.newCandidates.map((_, i) => byIndex.get(i) ?? { index: i, duplicate: false })
 }

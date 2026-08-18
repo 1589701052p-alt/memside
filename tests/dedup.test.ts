@@ -26,36 +26,43 @@ test('judgeDuplicates marks new when isDuplicate false', async () => {
   expect(v).toEqual([{ index: 0, duplicate: false }])
 })
 
-test('judgeDuplicates returns all new when LLM throws', async () => {
+// Task 7（2026-08-18 spec P1）：LLM 失败/重试耗尽不再保守全保留（旧 catch 兜底已废）。
+// judgeDuplicates 返回 {failed:true,reasons} 由调用方走 step 失败分支（3 次暂停）。
+// 下面四条原「全保留」用例改锁失败标识——失败绝不冒充成功。
+test('judgeDuplicates: LLM throws -> failed 标识（不再保守全保留）', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
     callLLM: async () => { throw new Error('api down') },
   })
-  expect(v).toEqual([{ index: 0, duplicate: false }])
+  expect(Array.isArray(v)).toBe(false)
+  if (!Array.isArray(v)) {
+    expect(v.failed).toBe(true)
+    expect(v.reasons.length).toBeGreaterThan(0)
+  }
 })
 
-test('judgeDuplicates returns all new on non-JSON response', async () => {
+test('judgeDuplicates: 非 JSON 响应重试耗尽 -> failed 标识', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
     callLLM: async () => 'not json',
   })
-  expect(v).toEqual([{ index: 0, duplicate: false }])
+  expect(Array.isArray(v)).toBe(false)
 })
 
-test('judgeDuplicates returns all new on missing verdicts field', async () => {
+test('judgeDuplicates: 缺 verdicts 字段重试耗尽 -> failed 标识', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
     callLLM: async () => JSON.stringify({ foo: 'bar' }),
   })
-  expect(v).toEqual([{ index: 0, duplicate: false }])
+  expect(Array.isArray(v)).toBe(false)
 })
 
-test('judgeDuplicates treats hallucinated duplicateOfId as new', async () => {
+test('judgeDuplicates: 持续幻觉 duplicateOfId 重试耗尽 -> failed 标识（单轮成功内的幻觉才保守判 new）', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
     callLLM: async () => JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: 'NONEXISTENT' }] }),
   })
-  expect(v).toEqual([{ index: 0, duplicate: false }])
+  expect(Array.isArray(v)).toBe(false)
 })
 
 test('judgeDuplicates skips LLM when existing empty AND <=1 candidate', async () => {
@@ -119,12 +126,12 @@ test('judgeDuplicates retries when duplicateOfId is hallucinated', async () => {
   expect(v).toEqual([{ index: 0, duplicate: true, duplicateOfId: 'A' }])
 })
 
-test('judgeDuplicates returns all new when retry exhausted', async () => {
+test('judgeDuplicates: 重试耗尽仍非 JSON -> failed 标识（Task 7 语义）', async () => {
   const v = await judgeDuplicates({
     newCandidates: [newCand], existing,
     callLLM: async () => 'not json',
   })
-  expect(v).toEqual([{ index: 0, duplicate: false }])
+  expect(Array.isArray(v)).toBe(false)
 })
 
 test('DEDUP_SYSTEM_PROMPT contains verdicts template', () => {

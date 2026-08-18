@@ -43,9 +43,10 @@ test('一趟 job：tracker 依次 distill->dedup->judge，结束归 null；run �
     callLLM: async (sys) => {
       const act = tracker.get()
       if (act) seen.push(act.phase)
-      // distill 返候选；dedup/judge 的 prompt 返「无重复/全保留」语义的安全值
-      if (act?.phase === 'distill') return ONE_CANDIDATE
-      return JSON.stringify({})
+      // distill 返候选；judge 返合法 verdicts（Task 7：judge 失败即 step 失败，
+      // 成功路径必须按 system 分派，不能再全调用返同一串）。
+      if (sys.includes('memside-distiller')) return ONE_CANDIDATE
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
     loadJudgeConfig: () => ECONOMY,
@@ -73,19 +74,24 @@ test('0 候选短路：judge 未调 LLM -> judge_ms NULL', async () => {
   expect(tracker.get()).toBeNull()
 })
 
-test('llm_error 路径：写一条 kind=llm_error 消息，refId=jobId', async () => {
+test('llm_error 路径：3 次失败暂停后写一条 kind=llm_error 消息，refId=jobId（Task 7）', async () => {
   const jobId = await seedDueJob()
-  await tick(db, {
-    loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
-    callLLM: async () => { throw new Error('502 Bad Gateway') },
-    createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
-    loadJudgeConfig: () => ECONOMY,
-    tracker: createActivityTracker(),
-  })
+  for (let i = 0; i < 3; i++) {
+    await tick(db, {
+      loadTranscript: async () => ({ turns: [{ role: 'user', content: 'x' }], fullLength: 1, prefixTurns: [] }),
+      callLLM: async () => { throw new Error('502 Bad Gateway') },
+      createCandidate: async () => ({ id: 'c', status: 'candidate', version: 1 } as any),
+      loadJudgeConfig: () => ECONOMY,
+      tracker: createActivityTracker(),
+    })
+    await db.update(memoryDistillJobs).set({ nextRunAt: 0 }).where(eq(memoryDistillJobs.id, jobId))
+  }
   const pg = await listNotificationsPage(db, { kind: 'llm_error' })
-  expect(pg.total).toBe(1)
+  expect(pg.total).toBe(1)                       // 3 次失败汇总一条（不刷屏）
   expect(pg.items[0]!.refId).toBe(jobId)
   expect(pg.items[0]!.body).toContain('502')
+  const job = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(job[0]!.status).toBe('paused')
 })
 
 test('降级经 logDegradation 也进消息（digest_llm_failed 之外的既有路径回归）', async () => {

@@ -151,17 +151,23 @@ test('distillTranscript downgrades stated-origin with empty evidence to agent-ob
   expect(result.candidates[0]!.evidence).toBeNull()
 })
 
-test('distillTranscript defaults missing/invalid origin to agent-observed after retry', async () => {
-  // 非法 origin 触发一次 retry（shouldRetry）；retry 耗尽后降级 agent-observed 不丢候选。
+test('distillTranscript defaults missing origin to agent-observed after format retry（Task 7 执行器语义）', async () => {
+  // 非法 origin 触发一次 format 重试（shouldRetry + 追问）；第 2 轮省略 origin ->
+  // 接受并规范化降级 agent-observed。持续非法（3 轮耗尽）现在归 session 失败
+  // （P1：失败绝不冒充成功），不再走「耗尽后仍收下」的旧兜底。
   let calls = 0
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'x' }],
     runtime: 'claude-code', cwd: '/x', existingSlugs: [],
-    callLLM: async () => { calls++; return JSON.stringify({ candidates: [{
-      title: '[category:convention] t', bodyMd: 'b', origin: 'bogus',
-    }] }) },
+    callLLM: async () => {
+      calls++
+      return calls === 1
+        ? JSON.stringify({ candidates: [{ title: '[category:convention] t', bodyMd: 'b', origin: 'bogus' }] })
+        : JSON.stringify({ candidates: [{ title: '[category:convention] t', bodyMd: 'b' }] })
+    },
   })
-  expect(calls).toBeGreaterThan(1)
+  expect(calls).toBe(2)  // 第 1 轮 format 追问，第 2 轮接受
+  expect(result.sessionFailed).toBe(false)
   expect(result.candidates[0]!.origin).toBe('agent-observed')
 })
 
@@ -352,19 +358,31 @@ test('distillTranscript returns empty_output shape when LLM returns 0 candidates
   expect((r.rawOutput as any)?.candidates).toEqual([])
 })
 
-test('distillTranscript preserves format-invalid candidates in rawOutput (rawCount > accepted)', async () => {
+test('distillTranscript: 坏候选触发 format 追问，修正后全量收下（Task 7 执行器语义）', async () => {
   const turns = [{ role: 'user', content: 'hi' }] as any
-  // 始终返回 1 好 + 1 坏（无 [category: 前缀）-> shouldRetry 重试耗尽 -> 返回 lastParsed
+  // 第 1 轮 1 好 + 1 坏（无 [category: 前缀）-> shouldRetry 拒绝并追问；
+  // 第 2 轮全部合规 -> 接受。持续坏候选（3 轮耗尽）现在归 session 失败（P1），
+  // 不再走「耗尽后收好的丢坏的」旧兜底。
+  let calls = 0
   const r = await distillTranscript({
     turns, runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
-    callLLM: async () => JSON.stringify({ candidates: [
-      { title: '[category:convention] good', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
-      { title: 'no-prefix bad', bodyMd: 'b' },
-    ] }),
+    callLLM: async () => {
+      calls++
+      return calls === 1
+        ? JSON.stringify({ candidates: [
+            { title: '[category:convention] good', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
+            { title: 'no-prefix bad', bodyMd: 'b' },
+          ] })
+        : JSON.stringify({ candidates: [
+            { title: '[category:convention] good', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
+            { title: '[category:convention] fixed', bodyMd: 'b2', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
+          ] })
+    },
   })
-  expect(r.candidates.length).toBe(1)            // 坏的被格式校验丢
-  expect(r.rawCount).toBe(2)                      // 原始两条都计
-  expect((r.rawOutput as any)?.candidates?.length).toBe(2)  // rawOutput 保留被丢的
+  expect(calls).toBe(2)
+  expect(r.sessionFailed).toBe(false)
+  expect(r.candidates.length).toBe(2)
+  expect(r.rawCount).toBe(2)
   expect(r.callThrew).toBe(false)
 })
 
@@ -547,7 +565,10 @@ test('renderUserPrompt: tool 无 toolCall -> 保持单行 [tool:Name] content（
   expect(captured).not.toContain('结果:')
 })
 
-test('parseError: 三次返回非 JSON -> parseError 非空 + lastRawText=末次文本 + callThrew=false', async () => {
+test('parseError: 三次返回非 JSON -> sessionFailed + parseError=reasons（原始文本在 llm_round 留底）', async () => {
+  // Task 7 执行器语义：解析失败带追问重试，3 轮耗尽 -> sessionFailed=true，
+  // 失败绝不当「0 候选」业务结果（P1）。lastRawText 不再在 DistillResult 里
+  // （原始输出落 llm_round 历史，scheduler 暂停路径读回落 raw_text）。
   const raws = ['garbage-1', 'garbage-2', 'garbage-3']
   let n = 0
   const res = await distillTranscript({
@@ -557,9 +578,10 @@ test('parseError: 三次返回非 JSON -> parseError 非空 + lastRawText=末次
     existingSlugs: [],
   })
   expect(res.candidates).toEqual([])
+  expect(res.sessionFailed).toBe(true)
   expect(res.callThrew).toBe(false)
-  expect(res.parseError).toContain('不是合法 JSON')
-  expect(res.lastRawText).toBe('garbage-3')
+  expect(res.parseError).toContain('format')
+  expect(res.reasons).toHaveLength(3)
 })
 
 test('parseError: 合法 JSON 但 candidates 非数组且重试耗尽 -> parseError=校验错误', async () => {
@@ -570,9 +592,10 @@ test('parseError: 合法 JSON 但 candidates 非数组且重试耗尽 -> parseEr
     existingSlugs: [],
   })
   expect(res.candidates).toEqual([])
+  expect(res.sessionFailed).toBe(true)
   expect(res.callThrew).toBe(false)
   expect(res.parseError).not.toBeNull()
-  expect(res.lastRawText).toBe('{"foo":1}')
+  expect(res.parseError).toContain('candidates')
 })
 
 test('parseError 回归锁: attempt0 垃圾 + attempt1 合法 -> parseError=null（错误被成功覆盖）', async () => {
@@ -609,7 +632,9 @@ test('parseError 回归锁: 合法 {"candidates":[]} 真空 -> parseError=null�
 
 // --- 空字符串归类（spec 2026-08-17 §3.1）：空/纯空白 = 无产出（empty_output），非 parse_error ---
 
-test('空字符串返回 -> parseError null（归 empty_output 非 parse_error，spec §3.1）', async () => {
+test('空字符串返回 -> sessionFailed（P1：无合规结果即失败；合法 {"candidates":[]} 才是 empty_output）', async () => {
+  // Task 7 执行器语义：空字符串不是合规 JSON 结果 -> aborted 分类 -> 带追问重试
+  // -> 耗尽 sessionFailed。真正的「无产出」由合法 {"candidates":[]} 表达（见下组）。
   const { distillTranscript } = await import('@/memory/distiller')
   const result = await distillTranscript({
     turns: [{ role: 'user', content: 'team rule: refunds within 14 days' }],
@@ -619,9 +644,8 @@ test('空字符串返回 -> parseError null（归 empty_output 非 parse_error�
     callLLM: async () => '',   // 模型返回空字符串
   })
   expect(result.candidates).toEqual([])
-  expect(result.callThrew).toBe(false)
-  expect(result.parseError).toBe(null)   // 空字符串 = 无产出，非解析失败
-  expect(result.lastRawText).toBe('')   // 空字符串落盘
+  expect(result.sessionFailed).toBe(true)
+  expect(result.parseError).toBe(null)  // 末轮 aborted -> callThrew 侧
 })
 
 test('纯空白返回 -> parseError null（归 empty_output）', async () => {

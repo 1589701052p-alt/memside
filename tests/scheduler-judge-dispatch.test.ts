@@ -102,9 +102,10 @@ test('mode=economy -> 走单发 judge(无 agent 协议段)', async () => {
   expect(judgeSystems[0]).not.toContain(AGENT_PROTOCOL_LINE)
 })
 
-test('质量模式 agent LLM 报错 -> failed 标识 -> 0 候选入库（WIP 过渡，Task 7 接暂停）, job done 非 failed', async () => {
-  // Task 6（2026-08-18 §缺陷2/§8.4）：agent 失败不再 keepAll 全保留冒充成功，返回
-  // failed 标识。scheduler 过渡态把 failed 当空 verdicts（0 候选入库）；Task 7 改正式暂停 + 通知。
+test('质量模式 agent LLM 报错 -> step 失败：job 回 pending 断点停 judge（Task 7 正式语义）', async () => {
+  // Task 7（2026-08-18 §5）：agent 失败不再 WIP「空 verdicts + done」——judge 步
+  // 失败回 pending + 退避，断点停 judge（distill/dedup 不重算）；3 次暂停 +
+  // pending_review 由 tests/scheduler-resume.test.ts 锁定，此处锁首跳。
   const jobId = await seedDueJob(dir)  // 真实存在的 cwd -> 走 agent 路径
   let createCalls = 0
   await tick(db, {
@@ -117,10 +118,11 @@ test('质量模式 agent LLM 报错 -> failed 标识 -> 0 候选入库（WIP 过
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
     loadJudgeConfig: () => ({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 }),
   })
-  // WIP 过渡：agent 失败 -> 空 verdicts -> 0 候选入库（旧 keepAll 全保留已废）。
-  expect(createCalls).toBe(0)
+  expect(createCalls).toBe(0)  // judge 未完成：无候选入库、不丢
   const jobs = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
-  expect(jobs[0]!.status).toBe('done')
+  expect(jobs[0]!.status).toBe('pending')      // 非 done：失败不消费 job
+  expect(jobs[0]!.currentStep).toBe('judge')   // 断点停 judge
+  expect(jobs[0]!.stepAttempts).toBe(1)
 })
 
 test('质量模式 + job.cwd 目录不存在 -> 降级经济模式单发判定(不跑 agent,蒸馏记录注明降级)', async () => {

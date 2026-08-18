@@ -7,7 +7,7 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join, parse as parsePath } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { memories, memoryDiscards } from '@/db/schema'
+import { memories, memoryDiscards, memoryDistillJobs, notifications } from '@/db/schema'
 import { createCandidate, getMemoryById } from '@/memory/store'
 import { rescanCandidates } from '@/memory/rescan'
 import { DEFAULT_JUDGE_CONFIG, type JudgeConfig } from '@/memory/judgeConfig'
@@ -151,10 +151,44 @@ test('回扫取消:shouldStop 恒假 -> stopped=false(与未取消语义一致)'
     tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
   })
   const report = await rescanCandidates(db, {
-    callLLM: economyLLM, loadJudgeConfig: economyCfg,
+    // 单候选批次：economyLLM 的固定 2-verdict 响应 index 1 越界会触发重试耗尽 ->
+    // failed（Task 7 暂停语义），改用单 verdict 让本例正常判留。
+    callLLM: async () => '{"verdicts": [{"index": 0, "category": "decision"}]}',
+    loadJudgeConfig: economyCfg,
   }, undefined, () => false)
   expect(report.stopped).toBe(false)
   expect(report.processed).toBe(1)
+})
+
+test('judge LLM 失败 -> 合成 job 暂停 + 汇总通知 + 该批判 pending_review，回扫停住可重跑（Task 7）', async () => {
+  // Task 7（spec 2026-08-18 §5.2/D4）：judge 失败不再当空 verdicts 过渡——正式暂停 +
+  // 通知 + pending_review（不进审批队列、不丢弃），report.stopped=true（剩余批次可
+  // 重跑续判）。
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: dir, title: '[category:a] 候选一', bodyMd: 'b',
+    tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: dir, title: '[category:a] 候选二', bodyMd: 'b2',
+    tags: [], sourceKind: 'conversation', sourceCwd: dir, runtime: 'claude-code', origin: 'agent-observed',
+  })
+  const report = await rescanCandidates(db, {
+    callLLM: async () => { throw new Error('the operation was aborted') },
+    loadJudgeConfig: economyCfg,
+  })
+  expect(report.stopped).toBe(true)
+  // 该批候选标 pending_review：非 candidate（不进审批队列）、非 rejected（不丢）
+  const rows = await db.select().from(memories)
+  expect(rows).toHaveLength(2)
+  expect(rows.every((r) => r.status === 'pending_review')).toBe(true)
+  // 合成 job 暂停 + 一条汇总通知
+  const jobs = await db.select().from(memoryDistillJobs)
+  expect(jobs).toHaveLength(1)
+  expect(jobs[0]!.status).toBe('paused')
+  const notifs = await db.select().from(notifications)
+  expect(notifs.filter((n) => n.kind === 'llm_error' && n.title === 'judge_failed')).toHaveLength(1)
+  // 未进审计表（不丢弃）
+  expect(await db.select().from(memoryDiscards)).toHaveLength(0)
 })
 
 test('回扫进度回调第 3 参 = 实时累计判丢数', async () => {

@@ -1,6 +1,6 @@
 import type { DistillCandidate } from '@/memory/distiller'
 import type { LLMCall } from '@/llm'
-import { runLlmSession } from './llmSession'
+import { runLlmSession, type RoundRecord } from './llmSession'
 
 export type ValueClass = 'user-rule' | 'decision' | 'preference' | 'convention' | 'trap' | 'topology'
 export type DiscardReason = 'public-knowledge' | 'derivable' | 'taming' | 'fleeting' | 'exact-duplicate' | 'duplicate'
@@ -201,7 +201,7 @@ function valueShouldRetry(n: number): (parsed: unknown) => string | null {
 
 /**
  * Origin-driven value classification (9 类：6 留 + 3 丢) + stated 免疫 derivable 兜底。
- * keepNull 失败兜底：用户陈述类（user-stated/user-confirmed）给 decision（免疫 Web UI
+ * 用户陈述类（user-stated/user-confirmed）缺合法类别时给 decision（免疫 Web UI
  * "批量拒绝未评估" 按钮，该按钮 target value_class IS NULL），agent-observed 给 null。
  * 主路径映射 LLM 9 类 verdict：retain 6 类 -> keep+valueClass；drop 3 类（public-knowledge
  * /derivable/fleeting）-> discard。代码硬兜底（spec §R2，7-30 误杀回归锁）：origin 非
@@ -209,26 +209,38 @@ function valueShouldRetry(n: number): (parsed: unknown) => string | null {
  * 时代码再兜一道）。
  *
  * Task 6（2026-08-18 spec §缺陷2/§8.4）：judge 失败绝不走 keepNull 全保留冒充成功。
- * judgeValueBase 改用 runLlmSession（3 轮带历史接续），失败返回 {failed:true, reasons}
- * 让 scheduler 据此暂停任务。WIP 过渡态：jobId 空串 + 不传 persistRound/loadHistory
- * （无记忆的 3 轮）；完整接线（persistRound/loadHistory + jobId + scheduler 暂停）放 Task 7。
+ * judgeValueBase 走 runLlmSession，失败返回 {failed:true, reasons} 让 scheduler 据此
+ * 暂停任务。Task 7 起可传 session 选项（jobId/persistRound/loadHistory）接断点续跑：
+ * 传 loadHistory 即带历史接续、单次只跑一轮新回合；缺省为无记忆 3 轮（独立调用）。
  */
 export type JudgeResult = ValueVerdict[] | { failed: true; reasons: string[] }
+
+/** Task 7：judge 步执行器接线选项（与 distiller/dedup 同款约定）。 */
+export interface JudgeSessionOpts {
+  jobId?: string
+  persistRound?: (r: RoundRecord) => Promise<void>
+  loadHistory?: () => Promise<RoundRecord[]>
+}
 
 async function judgeValueBase(
   candidates: DistillCandidate[],
   callLLM: LLMCall,
+  session?: JudgeSessionOpts,
 ): Promise<JudgeResult> {
   const n = candidates.length
   if (n === 0) return []
-  // WIP 过渡态：jobId 空串、不落盘不读史——Task 7 接 persistRound/loadHistory + 真 jobId。
-  const session = await runLlmSession({
+  const history = session?.loadHistory ? await session.loadHistory() : []
+  const result = await runLlmSession({
     callLLM, system: VALUE_JUDGE_SYSTEM_PROMPT,
-    initialUser: renderUserPrompt(candidates), step: 'judge', jobId: '',
+    initialUser: renderUserPrompt(candidates), step: 'judge', jobId: session?.jobId ?? '',
+    persistRound: session?.persistRound,
+    ...(session?.loadHistory
+      ? { loadHistory: async () => history, maxAttempts: history.length + 1 }
+      : {}),
     shouldRetry: valueShouldRetry(n),
   })
-  if (!session.ok) return { failed: true, reasons: session.reasons }
-  const parsed = session.parsed as { verdicts?: unknown } | undefined
+  if (!result.ok) return { failed: true, reasons: result.reasons }
+  const parsed = result.parsed as { verdicts?: unknown } | undefined
   if (!parsed || !Array.isArray(parsed.verdicts)) {
     return { failed: true, reasons: ['verdicts 字段缺失'] }
   }
@@ -254,10 +266,11 @@ async function judgeValueBase(
 export async function judgeValue(
   candidates: DistillCandidate[],
   callLLM: LLMCall,
+  session?: JudgeSessionOpts,
 ): Promise<JudgeResult> {
   const n = candidates.length
   if (n === 0) return []
-  const base = await judgeValueBase(candidates, callLLM)
+  const base = await judgeValueBase(candidates, callLLM, session)
   if (!Array.isArray(base)) return base  // 失败标识冒泡，不冒充成功
   // 第六轮第 4 项：taming override，最后跑，覆盖 stated 免疫（安全 > stated 免疫）。
   // 驯化指令即使 origin=user-stated，仍丢弃--合法用户规则不会含反馈压制词，无现实冲突。

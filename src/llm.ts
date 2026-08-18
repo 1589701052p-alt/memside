@@ -6,7 +6,7 @@ export interface LLMCallOpts {
 
 /**
  * vendor-neutral 的 LLM 调用 seam。核心记忆模块（distiller / dedup /
- * valueFilter / scheduler）与 callWithRetry 中介依赖此类型，而非任何具体
+ * valueFilter / scheduler）与 runLlmSession 执行器依赖此类型，而非任何具体
  * provider。实现（src/anthropic.ts）只在组合根（daemon.ts）装配；测试注入
  * mock。返回模型响应的拼接文本。
  *

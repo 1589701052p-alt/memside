@@ -43,6 +43,16 @@ export async function runLlmSession(opts: LlmSessionOpts): Promise<LlmSessionRes
     const last = history[history.length - 1]!
     if (!last.result.ok) {
       conversation = opts.initialUser + buildFollowupPrompt(last.result.reason, last.response, opts.step)
+    } else {
+      // Task 7（spec §3.3 不变量 3 / P3 断点续跑）：末轮已成功的会话不重发 LLM——
+      // 直接复用落盘的成功响应。覆盖「round 落库后、断点推进前」的崩溃窗口：
+      // 重试 tick 读回历史即拿回结果，绝不重算已成功步骤。
+      try {
+        return { ok: true, parsed: JSON.parse(extractJsonObject(last.response)) }
+      } catch {
+        // 落盘响应损坏（不应发生）——落到下方正常回合继续追问
+      }
+      conversation = opts.initialUser + buildFollowupPrompt('format', last.response, opts.step)
     }
   }
   const reasons: string[] = []

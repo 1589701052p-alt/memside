@@ -31,7 +31,7 @@ export interface AgentLoopOpts {
 const TRACE_CAP = 500
 
 /**
- * 通用 agent 循环(spec §4.4)。与 callWithRetry 的根本区别:对话全程累积——
+ * 通用 agent 循环(spec §4.4)。与无记忆单发重试的根本区别:对话全程累积——
  * 初始材料、模型每轮回复、每次工具结果、每条纠正消息全部留在 user 侧文本里,
  * 模型看得到自己的完整试错历史(不会重复查同一词);格式纠错是末尾追加,不重置。
  *

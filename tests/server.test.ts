@@ -957,14 +957,15 @@ test('POST /api/rescan 运行中重按 -> 409(并发防护)', async () => {
   const r2 = await req('/api/rescan', { method: 'POST' })
   expect(r2.status).toBe(409)
   expect(r2.body.error).toBe('rescan already running')
-  release('not json')  // 放行:agent 判定失败倒向保留,回扫收尾
+  release('not json')  // 放行:judge 失败 -> Task 7 暂停语义（pending_review + stopped），回扫收尾
   let st = (await req('/api/status')).body
   for (let i = 0; i < 100 && st.rescan.running; i++) {
     await new Promise((r3) => setTimeout(r3, 10))
     st = (await req('/api/status')).body
   }
   expect(st.rescan.running).toBe(false)
-  expect(st.rescan.report.processed).toBe(1)
+  expect(st.rescan.report.stopped).toBe(true)      // judge 失败停住（可重跑续判）
+  expect(st.rescan.report.processed).toBe(0)       // 该批未判完（标 pending_review）
 })
 
 // --- 回扫取消与崩溃透传(spec 2026-08-07 §3.2/§3.3) --------------------------

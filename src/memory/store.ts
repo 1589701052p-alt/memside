@@ -1422,6 +1422,42 @@ export async function listLlmRounds(
 }
 
 /**
+ * 落盘某步骤的干净结果（spec 2026-08-18 §3.2 P3/P4：步骤间只传干净结果，
+ * 落库 + 断点续跑读回，不传 LLM 对话历史）。存 memory_distill_events
+ * kind='step_output'，payload JSON 含 {step, output}；同 step 重复保存追加行，
+ * 读回取最新一条（成功推进后旧快照不再被读）。
+ */
+export async function saveStepOutput(
+  db: DbClient, jobId: string, step: DistillStep, output: unknown,
+): Promise<void> {
+  const payload = JSON.stringify({ step, output })
+  await db.insert(memoryDistillEvents).values({
+    distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
+    kind: 'step_output', payload,
+  }).run()
+}
+
+/**
+ * 读回某步骤最新干净结果（spec 2026-08-18 §3.2）。无该 step 的产出行返回 null
+ * （调用方据此判定断点损坏，保守回退重跑该步）。
+ */
+export async function getStepOutput<T>(
+  db: DbClient, jobId: string, step: DistillStep,
+): Promise<T | null> {
+  const rows = await db.select().from(memoryDistillEvents)
+    .where(and(eq(memoryDistillEvents.distillJobId, jobId), eq(memoryDistillEvents.kind, 'step_output')))
+    .orderBy(desc(memoryDistillEvents.ts), desc(memoryDistillEvents.id))
+    .all()
+  for (const r of rows) {
+    let p: any = null
+    try { p = JSON.parse(r.payload) } catch { continue }
+    if (p == null || p.step !== step) continue
+    return (p.output ?? null) as T | null
+  }
+  return null
+}
+
+/**
  * 标记 job 暂停（spec §4.1 §5.2）。jobs.status='paused'、stepError=step（暂停位置标记）；
  * runs.pausedStep=step（best-effort UPDATE，无 run 行 no-op）。
  */

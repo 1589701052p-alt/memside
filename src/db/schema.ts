@@ -79,7 +79,7 @@ export const memoryDistillEvents = sqliteTable(
       .references(() => memoryDistillJobs.id, { onDelete: 'cascade' }),
     attemptIndex: integer('attempt_index').notNull(),
     ts: integer('ts').notNull(),
-    kind: text('kind').notNull(), // 'conversation' | 'error' | 'blame' | 'capture-failed' | 'llm_round'（spec 2026-08-18 §4.1）
+    kind: text('kind').notNull(), // 'conversation' | 'error' | 'blame' | 'capture-failed' | 'llm_round' | 'step_output'（spec 2026-08-18 §4.1/§3.2）
     payload: text('payload').notNull(), // JSON: transcript excerpt / error detail
   },
   (t) => ({

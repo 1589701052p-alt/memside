@@ -13,6 +13,7 @@ import { judgeValueAgentic } from '@/memory/agentJudge'
 import { DEFAULT_JUDGE_CONFIG, type JudgeConfig } from '@/memory/judgeConfig'
 import {
   listAllCandidatesForRescan, listApprovedByScope, logDiscards, updateJudgedFields,
+  saveLlmRound, markJobPaused, logStepFailureNotification,
   type Memory,
 } from '@/memory/store'
 
@@ -43,7 +44,9 @@ const toCandidate = (m: Memory): DistillCandidate => ({
 /**
  * 存量回扫(spec §4.7):按当前判定模式重判全部候选。判丢 -> memory_discards(可恢复)
  * + memories.status='rejected'(离开候选池,天然不重复判);判留 -> 只补 NULL 的
- * value_class/origin;仓库目录已删除的跳过不动。任何单批故障倒向保留(该批只记 keptUpdated)。
+ * value_class/origin;仓库目录已删除的跳过不动。单批判定抛错(DB 层故障)倒向保留。
+ * judge LLM 失败(Task 7,spec 2026-08-18 §5.2):合成 job 暂停 + 汇总通知 + 该批
+ * 候选标 pending_review(不进审批队列、不丢弃),回扫停住可重跑续判。
  */
 export async function rescanCandidates(
   db: DbClient, deps: RescanDeps,
@@ -99,21 +102,27 @@ export async function rescanCandidates(
       if (shouldStop?.()) { report.stopped = true; return report }
       const batch = kindGroup.slice(i, i + RESCAN_BATCH)
       const cands = batch.map(toCandidate)
-      // 故障倒向保留:单批判定抛错不中断整个回扫,该批全部保留并计数。
-      // WIP 过渡（Task 6）：judgeValue/judgeValueAgentic 失败现在返回 {failed:true}
-      // 而非全保留 verdicts。本调用点暂把 failed 当空 verdicts 过渡（与原 catch 保留
-      // 语义对齐：空 verdicts -> for 循环全部走 keptUpdated 分支）。Task 7 接正式暂停。
+      // Task 7（spec 2026-08-18 §5.2/D4）：judge 失败不再当空 verdicts 过渡——正式
+      // 暂停 + 通知 + 该批判 pending_review（不进审批队列、不丢弃），回扫就此停住
+      // （报告 stopped=true，剩余批次可重跑续判）。单批判定抛错仍倒向保留（DB 层
+      // 故障与 LLM 失败分开处理）。
       let verdicts
+      let judgeFailed: { reasons: string[] } | null = null
       try {
         if (cfg.mode === 'economy') {
-          const r = await judgeValue(cands, deps.callLLM)
-          verdicts = Array.isArray(r) ? r : []
+          const r = await judgeValue(cands, deps.callLLM, {
+            jobId,
+            persistRound: (rr) => saveLlmRound(db, { jobId, step: 'judge', round: rr.round, request: rr.request, response: rr.response, result: rr.result }),
+          })
+          if (Array.isArray(r)) verdicts = r
+          else judgeFailed = { reasons: r.reasons }
         } else {
           const r = await judgeValueAgentic(cands, {
             callLLM: deps.callLLM, rootDir, approvedTitles,
             sourceKind, maxRounds: cfg.maxRounds, timeBudgetMs: cfg.timeBudgetS * 1000,
           })
-          verdicts = 'failed' in r ? [] : r.verdicts
+          if ('failed' in r) judgeFailed = { reasons: r.reasons }
+          else verdicts = r.verdicts
         }
       } catch (e) {
         console.warn('memside: rescan batch judge failed, keeping batch', e)
@@ -122,8 +131,20 @@ export async function rescanCandidates(
         onProgress?.(report.processed, all.length, report.discarded)
         continue
       }
+      if (judgeFailed) {
+        await markJobPaused(db, jobId, 'judge')
+        await logStepFailureNotification(db, { jobId, step: 'judge', reasons: judgeFailed.reasons })
+        for (const m of batch) {
+          try {
+            await db.update(memories).set({ status: 'pending_review' }).where(eq(memories.id, m.id)).run()
+          } catch (e) { console.warn('memside: rescan pending_review update failed', e) }
+        }
+        report.stopped = true
+        return report
+      }
+      const batchVerdicts = verdicts ?? []
       for (let j = 0; j < batch.length; j++) {
-        const v = verdicts[j]
+        const v = batchVerdicts[j]
         const m = batch[j]!
         if (v && !v.keep) {
           try {
