@@ -12,6 +12,7 @@ import {
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
   listTrashPage, emptyTrash, restoreFromTrash,
   bulkDelete, exportMemories, importMemories as importMemoriesApi,
+  retryJob, abandonJob, listPendingReview, promotePendingReview,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
   type RuntimeSettingsState,
@@ -79,6 +80,10 @@ export default function App() {
   const [runs, setRuns] = useState<TabPage<DistillRunListItem>>(emptyPage())
   const [msgs, setMsgs] = useState<TabPage<NotificationItem>>(emptyPage())
   const [trash, setTrash] = useState<TabPage<TrashItem>>(emptyPage())
+  // 待审查候选（spec §6.4）：judge 3 次失败暂停期间标的 pending_review 候选。
+  // 候选审批 tab 用区块隔开显示，可手动 approve/reject/edit（复用 MemoryCard）。
+  // 按当前 project 筛选拉取（sourceCwd，与 /api/memories?project= 同模式）。
+  const [pendingReview, setPendingReview] = useState<MemoryItem[]>([])
   // 多选 + 批量操作条 + 导出/导入入口（spec 2026-08-16 task-10）：per-tab 选中集合，
   // 切 tab 清空（switchTab）。导出/导入用独立 modal，importResult 显导入摘要。
   const [selectedIds, setSelectedIds] = useState<Record<MemoryTabKey, Set<string>>>({ candidate: new Set(), approved: new Set(), rejected: new Set() })
@@ -171,6 +176,11 @@ export default function App() {
         }))
         setStatus(st)
         if (fc) setFacetsByTab((m) => ({ ...m, [target as FacetTab]: fc }))
+        // 候选 tab 同时拉待审查候选（spec §6.4）：按 project 筛选的 sourceCwd。
+        // 失败不拖垮列表刷新（与 facets 同款 catch -> null 降级）。
+        if (target === 'candidate') {
+          listPendingReview(f.project).then(setPendingReview).catch(() => {})
+        }
       }
       setLoaded((l) => ({ ...l, [target]: true }))
       setError(null)
@@ -300,11 +310,13 @@ export default function App() {
   async function approve(id: string) {
     await promoteMemory(id, { action: 'approve' })
     removeFromTab(tab, id)
+    setPendingReview((ps) => ps.filter((x) => x.id !== id))
     void refresh(tab)
   }
   async function reject(id: string) {
     await promoteMemory(id, { action: 'reject' })
     removeFromTab(tab, id)
+    setPendingReview((ps) => ps.filter((x) => x.id !== id))
     void refresh(tab)
   }
   async function edit(id: string, title: string, bodyMd: string, scopeType: 'project' | 'global', subjectSlug: string | null) {
@@ -373,6 +385,20 @@ export default function App() {
       setRescanError(e instanceof Error ? e.message : String(e))
     }
     void refresh(tab)
+  }
+
+  // 暂停 job 处置（spec §6）：retry 调 resetJobForRetry 回 pending，abandon 调
+  // abandonJob 标 done 放弃。no-throw 契约（与 restoreMemory 同模式）：失败返回
+  // {ok:false,error}，UI 显错误行不静默；成功后 refresh 收敛真实状态。
+  async function retryDistillJob(jobId: string) {
+    const r = await retryJob(jobId)
+    if (r && !r.ok) setError(r.error ?? 'retry failed')
+    void refresh('runs')
+  }
+  async function abandonDistillJob(jobId: string) {
+    const r = await abandonJob(jobId)
+    if (r && !r.ok) setError(r.error ?? 'abandon failed')
+    void refresh('runs')
   }
 
   // 服务端按条件批量（spec 决策 4）：POST /api/memories/bulk-reject-unevaluated
@@ -616,6 +642,19 @@ export default function App() {
                 {' │ '}去重 {formatPhaseStat(status.llmStats24h.dedup.count, status.llmStats24h.dedup.ms)}
                 {' │ '}审查 {formatPhaseStat(status.llmStats24h.judge.count, status.llmStats24h.judge.ms)}
               </div>
+            ) : null}
+            {/* 暂停 job 提示（spec §6）：3 次失败暂停等人处置，琥珀色醒目，点击跳蒸馏记录 tab。 */}
+            {(status.pausedJobs ?? 0) > 0 ? (
+              <button
+                onClick={() => setTab('runs')}
+                style={{
+                  display: 'block', width: '100%', marginTop: 8, padding: '6px 10px',
+                  background: '#fff3e0', color: '#b26a00', border: '1px solid #ffb300',
+                  borderRadius: 6, cursor: 'pointer', textAlign: 'left', fontSize: 13,
+                }}
+              >
+                ⏸ {status.pausedJobs} 个蒸馏任务已暂停（3 次失败），需重试或放弃 → 点击查看
+              </button>
             ) : null}
             {/* 警示条（spec 2026-08-14 §3.4）：未读 LLM 报错/降级醒目提示，整条可点跳消息 tab。
                 字段 optional（老 daemon 无），?? 0 兜底；未读清零后条件渲染自动消失，无独立关闭按钮。
@@ -904,7 +943,27 @@ export default function App() {
               onViewSource={() => setSourceInputFor(m.id)}
             />
           ))}
-          {memItems.length === 0 && !showLoading && (
+          {/* 待审查候选区块（spec §6.4）：judge 3 次失败暂停期间标的 pending_review
+              候选。与正常候选同 tab 但用区块隔开（⏸ 待审查），可手动 approve/reject/edit
+              （复用 MemoryCard 回调；promoteCandidate 已接受 pending_review 状态）。 */}
+          {pendingReview.length > 0 ? (
+            <div style={{ marginTop: 16, padding: 12, border: '1px solid #ffb300', borderRadius: 8, background: '#fffdf0' }}>
+              <div style={{ fontWeight: 600, fontSize: 14, color: '#b26a00', marginBottom: 8 }}>
+                ⏸ 待审查（{pendingReview.length} 条）— judge 步暂停，可手动审批
+              </div>
+              {pendingReview.map((m) => (
+                <MemoryCard
+                  key={m.id}
+                  m={m}
+                  onApprove={() => approve(m.id)}
+                  onReject={() => reject(m.id)}
+                  onEdit={(t, b, s, slug) => edit(m.id, t, b, s, slug)}
+                  onViewSource={() => setSourceInputFor(m.id)}
+                />
+              ))}
+            </div>
+          ) : null}
+          {memItems.length === 0 && pendingReview.length === 0 && !showLoading && (
             hasActiveFilter(filter) ? (
               <p style={{ color: '#666' }}>
                 没有符合当前筛选的记录 <button onClick={() => changeFilter(EMPTY_MEMORY_FILTER)}>清除筛选</button>
@@ -1018,7 +1077,9 @@ export default function App() {
         <div>
           <p>共 {tabTotalCount(status, 'runs') ?? runs.items.length} 条蒸馏记录</p>
           {runs.items.map((r) => (
-            <DistillRunRow key={r.distillJobId} r={r} onOpen={() => setRunDetailFor(r.distillJobId)} />
+            <DistillRunRow key={r.distillJobId} r={r} onOpen={() => setRunDetailFor(r.distillJobId)}
+              onRetry={() => retryDistillJob(r.distillJobId)}
+              onAbandon={() => abandonDistillJob(r.distillJobId)} />
           ))}
           {runs.items.length === 0 && !showLoading && (
             <p style={{ color: '#666' }}>暂无蒸馏记录</p>
@@ -1650,19 +1711,30 @@ function TrashCard({ t, onRestore }: { t: TrashItem; onRestore: () => void }) {
  * 复用 formatOutcome / formatRunCounts / formatMemoryTime 纯函数。
  * spec §4.9：hasDegradations 时在 outcome 徽标旁加琥珀色「降级」mini-badge
  * （明细在 modal 的 degradations 区，#e65100 与状态横幅同色）。
+ * spec §6：pausedStep 非 null 时显「⏸ 已暂停-某步失败」徽标 + 重试轮次 + 重试/放弃
+ * 按钮。重试 = resetJobForRetry 回 pending，放弃 = abandonJob 标 done。
  */
-function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => void }) {
+function DistillRunRow({ r, onOpen, onRetry, onAbandon }: { r: DistillRunListItem; onOpen: () => void; onRetry: () => void; onAbandon: () => void }) {
   const oc = formatOutcome(r.outcome)
   const cwdLabel = r.cwd ? (r.cwd.split(/[\\/]/).filter(Boolean).pop() ?? r.cwd) : '未知'
   const time = formatMemoryTime(r.createdAt)
+  const paused = !!r.pausedStep
   return (
-    <div style={{ border: '1px solid #eee', borderRadius: 6, padding: 12, marginBottom: 8 }}>
+    <div style={{ border: '1px solid #eee', borderRadius: 6, padding: 12, marginBottom: 8, ...(paused ? { borderColor: '#ffb300', background: '#fffdf0' } : {}) }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span>
           <span style={{ background: oc.color, color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>{oc.label}</span>
           {r.hasDegradations && (
             <span style={{ color: '#e65100', border: '1px solid #e65100', borderRadius: 4, padding: '1px 6px', fontSize: 11, marginLeft: 6 }}>降级</span>
           )}
+          {paused ? (
+            <span style={{ color: '#b26a00', border: '1px solid #ffb300', borderRadius: 4, padding: '1px 6px', fontSize: 11, marginLeft: 6 }}>
+              ⏸ 已暂停-{r.pausedStep}失败
+            </span>
+          ) : null}
+          {paused && r.attempts ? (
+            <span style={{ color: '#888', fontSize: 11, marginLeft: 6 }}>第 {r.attempts} 轮重试</span>
+          ) : null}
         </span>
         <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{formatRunCounts({ distilled: r.rawCount, deduped: r.dedupedCount, filtered: r.filteredCount, stored: r.storedCount })}</span>
       </div>
@@ -1674,7 +1746,15 @@ function DistillRunRow({ r, onOpen }: { r: DistillRunListItem; onOpen: () => voi
       <div style={{ fontSize: 13, color: '#555', marginTop: 6 }}>
         {r.sourceAgentId ? 'subagent' : cwdLabel}{time ? ` · ${time}` : ''} · {r.durationMs}ms
       </div>
-      <button onClick={onOpen} style={{ marginTop: 8 }}>查看详情</button>
+      <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+        <button onClick={onOpen}>查看详情</button>
+        {paused ? (
+          <>
+            <button onClick={onRetry} style={{ color: '#1565c0' }}>重试</button>
+            <button onClick={onAbandon} style={{ color: '#c00' }}>放弃</button>
+          </>
+        ) : null}
+      </div>
     </div>
   )
 }

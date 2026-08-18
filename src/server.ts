@@ -9,9 +9,9 @@ import { memories, memoryDistillJobs, memoryDistillEvents, memoryDiscards, memor
 import type { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
-import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, MemoryConflictError, type PageCursor, type MemoryListFilter, type FacetScope, bulkDeleteMemories, restoreFromTrash, emptyTrash, importMemories, listMemoriesForExport, listTrashPage, listTrashFacets, getTrash, type TrashRow } from '@/memory/store'
+import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, MemoryConflictError, type PageCursor, type MemoryListFilter, type FacetScope, bulkDeleteMemories, restoreFromTrash, emptyTrash, importMemories, listMemoriesForExport, listTrashPage, listTrashFacets, getTrash, type TrashRow, resetJobForRetry, abandonJob, listPendingReviewCandidates, promotePendingReviewToCandidate } from '@/memory/store'
 import { serializeMemoriesJson, parseMemoriesJson, serializeMemoriesMd, parseMemoriesMd, detectExchangeFormat, MEMSIDE_JSON_FORMAT, MEMSIDE_JSON_VERSION } from '@/memory/exchange'
-import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NotificationNotFoundError } from '@/memory/store'
+import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, setSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NotificationNotFoundError } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, resolveSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
@@ -526,6 +526,9 @@ export function createApp(deps: AppDeps) {
     // waiting 单列（spec §4.9）：累加中的 job 不是积压，避免 UI「pending 堆积」假象。
     const waitingCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
       .where(eq(memoryDistillJobs.status, 'waiting')).all()
+    // paused 单列（spec §6）：3 次失败暂停等人处置的 job 数，UI 蒸馏记录 tab 标记。
+    const pausedCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
+      .where(eq(memoryDistillJobs.status, 'paused')).all()
     const jobStats: Record<string, number> = {}
     for (const j of jobs) jobStats[j.status] = (jobStats[j.status] ?? 0) + 1
     const memStats: Record<string, number> = {}
@@ -553,6 +556,7 @@ export function createApp(deps: AppDeps) {
       unreadDegradations: unreadByKind['degradation'] ?? 0,
       latestUnreadLlmError: latestErrRows[0] ?? null,
       waitingJobs: waitingCount[0]?.n ?? 0,
+      pausedJobs: pausedCount[0]?.n ?? 0,
       trashCount: (await deps.db.select({ n: count() }).from(memoryTrash).all())[0]?.n ?? 0,
       rescan: rescanState,
     })
@@ -658,7 +662,7 @@ export function createApp(deps: AppDeps) {
 
   app.get('/api/memories', async (c) => {
     const statusParam = c.req.query('status') ?? ''
-    const VALID: Set<string> = new Set(['candidate', 'approved', 'archived', 'superseded', 'rejected'])
+    const VALID: Set<string> = new Set(['candidate', 'approved', 'archived', 'superseded', 'rejected', 'pending_review'])
     const wanted = statusParam.split(',').map((s) => s.trim()).filter((s): s is MemoryStatus => s.length > 0 && VALID.has(s))
     // 带 limit -> 游标分页（spec 2026-08-07）；不带 -> 旧全量形状（兼容锚点）
     if (c.req.query('limit') !== undefined) {
@@ -679,6 +683,16 @@ export function createApp(deps: AppDeps) {
       ? await deps.db.select().from(memories).where(inArray(memories.status, wanted)).orderBy(desc(memories.createdAt)).all()
       : await deps.db.select().from(memories).orderBy(desc(memories.createdAt)).all()
     return c.json({ items: rows })
+  })
+
+  // 待审查候选（spec §6.4）——必须在 /api/memories/:id 之前注册，否则被 :id 吞掉。
+  // GET /api/memories/pending-review?project=<cwd> — judge 暂停期间标的 pending_review
+  // 候选，按 sourceCwd 过滤（同 job 的 cwd，含 project + global scope）。UI 候选审批
+  // tab 用区块隔开显示，可手动 approve/reject/edit（promoteCandidate 已接受 pending_review）。
+  app.get('/api/memories/pending-review', async (c) => {
+    const project = c.req.query('project') ?? ''
+    const items = await listPendingReviewCandidates(deps.db, { projectId: project })
+    return c.json({ items })
   })
 
   app.get('/api/memories/:id', async (c) => {
@@ -932,6 +946,62 @@ export function createApp(deps: AppDeps) {
     const snap = await getSourceInput(deps.db, c.req.param('jobId'))
     if (!snap) return c.json({ error: 'not found' }, 404)
     return c.json({ turnCount: snap.turnCount, charCount: snap.charCount, turns: snap.turns })
+  })
+
+  // --- 暂停 job 处置（spec §6）----------------------------------------------
+  // POST /api/distill-runs/:jobId/retry — resetJobForRetry：清断点 + 回 pending，
+  // scheduler 下个 tick 带历史接续重跑。非 paused job -> 409（不打扰正常流转）。
+  app.post('/api/distill-runs/:jobId/retry', async (c) => {
+    const jobId = c.req.param('jobId')
+    const jobRows = await deps.db.select({ status: memoryDistillJobs.status })
+      .from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).limit(1).all()
+    if (jobRows.length === 0) return c.json({ error: 'job not found' }, 404)
+    if (jobRows[0]!.status !== 'paused') return c.json({ error: `job is '${jobRows[0]!.status}', not 'paused'` }, 409)
+    await resetJobForRetry(deps.db, jobId)
+    deps.broadcast({ type: 'job.retry', jobId })
+    return c.json({ ok: true })
+  })
+
+  // POST /api/distill-runs/:jobId/abandon — abandonJob：status='done' + finishedAt，
+  // 放弃重试。best-effort 推进 session offset 到事件存档的 fullLength（spec P5：避免
+  // 下次同 session 重新蒸馏同一段）。offset 推进失败只 warn（优化非正确性依赖）。
+  app.post('/api/distill-runs/:jobId/abandon', async (c) => {
+    const jobId = c.req.param('jobId')
+    const jobRows = await deps.db.select({ status: memoryDistillJobs.status, sessionId: memoryDistillJobs.sessionId })
+      .from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).limit(1).all()
+    if (jobRows.length === 0) return c.json({ error: 'job not found' }, 404)
+    await abandonJob(deps.db, jobId)
+    const sid = jobRows[0]!.sessionId
+    if (sid) {
+      try {
+        // 事件存档的 conversation turns 即该 session 的 fullLength 快照（Stop hook
+        // 全量捕获）。解析失败/无行 -> offset 不动（TTL/sweep 兜底）。
+        const evRows = await deps.db.select({ payload: memoryDistillEvents.payload })
+          .from(memoryDistillEvents).where(and(
+            eq(memoryDistillEvents.distillJobId, jobId),
+            eq(memoryDistillEvents.kind, 'conversation'),
+          )).limit(1).all()
+        const payload = evRows[0]?.payload
+        if (payload) {
+          const turns = JSON.parse(payload)
+          if (Array.isArray(turns)) await setSessionOffset(deps.db, sid, turns.length)
+        }
+      } catch (e) { console.warn('memside: abandon setSessionOffset failed', e) }
+    }
+    deps.broadcast({ type: 'job.abandoned', jobId })
+    return c.json({ ok: true })
+  })
+
+  // POST /api/memories/:id/promote-pending-review — pending_review → candidate 进审批队列。
+  // UI 可选：手动放回正常审批队列而非直接 approve/reject（spec §6.4）。
+  app.post('/api/memories/:id/promote-pending-review', async (c) => {
+    try {
+      await promotePendingReviewToCandidate(deps.db, c.req.param('id'))
+      deps.broadcast({ type: 'memory.promoted', memoryId: c.req.param('id'), newStatus: 'candidate' })
+      return c.json({ ok: true })
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 409)
+    }
   })
 
   // --- LLM settings (Web UI 凭证配置) --------------------------------------

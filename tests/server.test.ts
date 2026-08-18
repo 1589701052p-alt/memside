@@ -7,7 +7,7 @@ import { createCandidate, promoteCandidate, saveSourceInput, saveDistillRun, log
 import { ClaudeCodeAdapter } from '@/adapter/claudeCode'
 import { OpencodeAdapter } from '@/adapter/opencode'
 import { createApp } from '@/server'
-import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns, memoryDegradations, notifications } from '@/db/schema'
+import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memoryDistillRuns, memoryDegradations, notifications, memorySessionOffsets } from '@/db/schema'
 import { markAllNotificationsRead } from '@/memory/store'
 import type { MemoryStatus } from '@/memory/pure'
 import type { ValueClass } from '@/memory/valueFilter'
@@ -1269,4 +1269,145 @@ test('GET /api/facets?tab=approved 覆盖 approved/archived/superseded 三态（
 test('GET /api/facets 缺失/非法 tab -> 400', async () => {
   expect((await req('/api/facets')).status).toBe(400)
   expect((await req('/api/facets?tab=runs')).status).toBe(400)
+})
+
+// --- Task 9: 暂停 job 处置 + 待审查候选 + /api/status pausedJobs -----------------
+// 锁 spec 2026-08-18 §6：retry/abandon 路由 + pending_review 列表/whitelist +
+// status.pausedJobs 计数。复用 server.test.ts seedJob 模式（直插 memory_distill_jobs）。
+
+function seedPausedJob(id: string, opts: { cwd?: string; sessionId?: string } = {}): void {
+  const now = Date.now()
+  db.insert(memoryDistillJobs).values({
+    id, debounceKey: `k-${id}`, sourceEventId: `s-${id}`, runtime: 'claude-code',
+    cwd: opts.cwd ?? '/p', sessionId: opts.sessionId ?? null,
+    status: 'paused', attempts: 2, nextRunAt: now, createdAt: now, stepError: 'judge',
+  }).run()
+}
+
+test('GET /api/status 报 pausedJobs 计数（spec §6）', async () => {
+  seedPausedJob('pj1')
+  seedPausedJob('pj2')
+  const r = await req('/api/status')
+  expect(r.status).toBe(200)
+  expect(r.body.pausedJobs).toBe(2)
+})
+
+test('POST /api/distill-runs/:jobId/retry 重置 paused job 回 pending（spec §6）', async () => {
+  seedPausedJob('pj1')
+  const r = await req('/api/distill-runs/pj1/retry', { method: 'POST' })
+  expect(r.status).toBe(200)
+  expect(r.body.ok).toBe(true)
+  const job = db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'pj1')).all()[0]!
+  expect(job.status).toBe('pending')
+  expect(job.stepAttempts).toBe(0)
+  expect(job.stepError).toBeNull()
+  expect(broadcastCalls.some((m: any) => m.type === 'job.retry')).toBe(true)
+})
+
+test('POST /api/distill-runs/:jobId/retry 非 paused job -> 409', async () => {
+  const now = Date.now()
+  db.insert(memoryDistillJobs).values({
+    id: 'dj1', debounceKey: 'k', sourceEventId: 's', runtime: 'claude-code',
+    status: 'done', attempts: 0, nextRunAt: now, createdAt: now,
+  }).run()
+  const r = await req('/api/distill-runs/dj1/retry', { method: 'POST' })
+  expect(r.status).toBe(409)
+})
+
+test('POST /api/distill-runs/:jobId/retry 不存在的 job -> 404', async () => {
+  const r = await req('/api/distill-runs/nope/retry', { method: 'POST' })
+  expect(r.status).toBe(404)
+})
+
+test('POST /api/distill-runs/:jobId/abandon 标 done + 推进 session offset（spec §6）', async () => {
+  // seed paused job 带 session + conversation event（3 turns）
+  seedPausedJob('pj2', { sessionId: 'sess1' })
+  db.insert(memoryDistillEvents).values({
+    distillJobId: 'pj2', attemptIndex: 0, ts: Date.now(), kind: 'conversation',
+    payload: JSON.stringify([{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }, { role: 'user', content: 'c' }]),
+  }).run()
+  const r = await req('/api/distill-runs/pj2/abandon', { method: 'POST' })
+  expect(r.status).toBe(200)
+  expect(r.body.ok).toBe(true)
+  const job = db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'pj2')).all()[0]!
+  expect(job.status).toBe('done')
+  expect(job.finishedAt).not.toBeNull()
+  expect(broadcastCalls.some((m: any) => m.type === 'job.abandoned')).toBe(true)
+  // offset 推进到事件存档的 fullLength（3 turns）
+  const off = db.select().from(memorySessionOffsets).where(eq(memorySessionOffsets.sessionId, 'sess1')).all()
+  expect(off[0]?.lastTurnOffset).toBe(3)
+})
+
+test('POST /api/distill-runs/:jobId/abandon 无 session 的 job 只标 done（offset 不动）', async () => {
+  seedPausedJob('pj3') // sessionId=null
+  const r = await req('/api/distill-runs/pj3/abandon', { method: 'POST' })
+  expect(r.status).toBe(200)
+  const job = db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'pj3')).all()[0]!
+  expect(job.status).toBe('done')
+})
+
+test('GET /api/memories/pending-review 列出 pending_review 候选（spec §6.4）', async () => {
+  const c = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/p1', title: 'pr1', bodyMd: 'b', tags: [],
+    sourceKind: 'conversation', runtime: 'claude-code', sourceCwd: '/p1', distillJobId: 'j1',
+  })
+  await db.update(memories).set({ status: 'pending_review' }).where(eq(memories.id, c.id)).run()
+  // 另一条普通 candidate 不应返回
+  await createCandidate(db, {
+    scopeType: 'project', scopeId: '/p1', title: 'c2', bodyMd: 'b', tags: [],
+    sourceKind: 'conversation', runtime: 'claude-code', sourceCwd: '/p1', distillJobId: 'j1',
+  })
+  const r = await req('/api/memories/pending-review?project=/p1')
+  expect(r.status).toBe(200)
+  expect(r.body.items).toHaveLength(1)
+  expect(r.body.items[0].title).toBe('pr1')
+})
+
+test('GET /api/memories/pending-review 无 project 参数 -> 返回全部', async () => {
+  const c1 = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/p1', title: 'pr1', bodyMd: 'b', tags: [],
+    sourceKind: 'conversation', runtime: 'claude-code', sourceCwd: '/p1', distillJobId: 'j1',
+  })
+  const c2 = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/p2', title: 'pr2', bodyMd: 'b', tags: [],
+    sourceKind: 'conversation', runtime: 'claude-code', sourceCwd: '/p2', distillJobId: 'j2',
+  })
+  await db.update(memories).set({ status: 'pending_review' }).where(eq(memories.id, c1.id)).run()
+  await db.update(memories).set({ status: 'pending_review' }).where(eq(memories.id, c2.id)).run()
+  const r = await req('/api/memories/pending-review')
+  expect(r.status).toBe(200)
+  expect(r.body.items).toHaveLength(2)
+})
+
+test('POST /api/memories/:id/promote 从 pending_review approve 成功（whitelist 扩展，spec §6.4）', async () => {
+  const c = await createCandidate(db, {
+    scopeType: 'project', scopeId: '/p1', title: 'pr1', bodyMd: 'b', tags: [],
+    sourceKind: 'conversation', runtime: 'claude-code', sourceCwd: '/p1', distillJobId: 'j1',
+  })
+  await db.update(memories).set({ status: 'pending_review' }).where(eq(memories.id, c.id)).run()
+  const r = await req(`/api/memories/${c.id}/promote`, {
+    method: 'POST',
+    body: JSON.stringify({ action: 'approve' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(200)
+  expect(r.body.memory.status).toBe('approved')
+})
+
+test('GET /api/distill-runs 列表含 pausedStep + attempts（spec §6 UI 可见）', async () => {
+  seedPausedJob('pj1')
+  await saveDistillRun(db, 'pj1', {
+    outcome: 'parse_error', rawOutput: null, rawCount: 0, acceptedCount: 0,
+    dedupedCount: 0, filteredCount: 0, storedCount: 0, discardedCount: 0,
+    durationMs: 100, errorMessage: 'bad json', rawText: '...',
+  })
+  // markJobPaused 写 pausedStep 到 run 行
+  const { markJobPaused } = await import('@/memory/store')
+  await markJobPaused(db, 'pj1', 'judge')
+  const r = await req('/api/distill-runs?limit=10')
+  expect(r.status).toBe(200)
+  const item = r.body.items.find((x: any) => x.distillJobId === 'pj1')
+  expect(item).toBeTruthy()
+  expect(item.pausedStep).toBe('judge')
+  expect(item.attempts).toBe(2)
 })

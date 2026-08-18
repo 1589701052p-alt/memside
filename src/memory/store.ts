@@ -237,10 +237,11 @@ export async function promoteCandidate(db: DbClient, id: string, body: PromoteAc
     if (rows.length === 0) throw new MemoryNotFoundError(`memory ${id} not found`)
     const cand = rows[0]!
     // Specific-source guard (I3): promoteCandidate must only accept
-    // status === 'candidate'. The general canTransition('archived','approved')
-    // is also true, so a general check would silently promote an ARCHIVED memory
-    // (resetting version to 1, overwriting approvedAt) instead of throwing.
-    if (cand.status !== 'candidate') {
+    // status === 'candidate' (or 'pending_review' — spec §6.4 用户手动接管审批)。
+    // The general canTransition('archived','approved') is also true, so a general
+    // check would silently promote an ARCHIVED memory (resetting version to 1,
+    // overwriting approvedAt) instead of throwing.
+    if (cand.status !== 'candidate' && cand.status !== 'pending_review') {
       throw new MemoryConflictError(`memory ${id} is '${cand.status}', not 'candidate'`)
     }
     if (body.action === 'reject') {
@@ -622,6 +623,8 @@ export interface DistillRunRow {
   digestMs: number | null
   dedupMs: number | null
   judgeMs: number | null
+  /** 暂停在哪步（spec §4.1）；非暂停 NULL。run 行由 markJobPaused best-effort 写入。 */
+  pausedStep: string | null
 }
 
 export async function saveDistillRun(
@@ -661,6 +664,7 @@ function rowToRun(r: any): DistillRunRow {
     durationMs: r.durationMs, errorMessage: r.errorMessage ?? null, ts: r.ts,
     rawText: r.rawText ?? null,
     digestMs: r.digestMs ?? null, dedupMs: r.dedupMs ?? null, judgeMs: r.judgeMs ?? null,
+    pausedStep: r.pausedStep ?? null,
   }
 }
 
@@ -690,6 +694,10 @@ export interface DistillRunListRow {
   sourceAgentId: string | null
   /** spec §4.9 runs 行降级徽标：该 job 在 memory_degradations 有行（明细走 modal 懒加载）。 */
   hasDegradations: boolean
+  /** spec §4.1 暂停在哪步；非暂停 NULL（runs 表 paused_step 列）。 */
+  pausedStep: string | null
+  /** job 整体尝试轮次（attempts 列，spec §6 重试轮次显示）。孤儿 run=0。 */
+  attempts: number
 }
 
 const RUN_LIST_COLS = {
@@ -699,6 +707,7 @@ const RUN_LIST_COLS = {
   storedCount: memoryDistillRuns.storedCount, discardedCount: memoryDistillRuns.discardedCount,
   durationMs: memoryDistillRuns.durationMs, errorMessage: memoryDistillRuns.errorMessage,
   ts: memoryDistillRuns.ts,
+  pausedStep: memoryDistillRuns.pausedStep,
 }
 
 interface RunListBaseRow {
@@ -713,6 +722,7 @@ interface RunListBaseRow {
   durationMs: number
   errorMessage: string | null
   ts: number
+  pausedStep: string | null
 }
 
 /** run 行（已按 ts/id 排好序、已截页）拼 job 元数据；孤儿 run（job 已删）-> cwd=null / createdAt=0。 */
@@ -741,6 +751,8 @@ async function attachRunJobMeta(
       cwd: j?.cwd ?? null, runtime: j?.runtime ?? '', createdAt: j?.createdAt ?? 0,
       sourceAgentId: j?.sourceAgentId ?? null,
       hasDegradations: degJobIds.has(r.distillJobId),
+      pausedStep: r.pausedStep ?? null,
+      attempts: j?.attempts ?? 0,
     }
   })
 }
@@ -1508,12 +1520,16 @@ export async function logStepFailureNotification(
  * 列出某项目的待审查候选（spec §6.4）。status='pending_review' 且 sourceCwd=projectId。
  * 用 sourceCwd 过滤（非 scopeId）：judge 暂停期间候选来自该项目的 distill job，
  * 含 project-scoped 与 global-scoped（同一 job 的 cwd 即 sourceCwd），一条查全。
+ * projectId 空串 = 不按项目过滤（返回全部 pending_review）。
  */
 export async function listPendingReviewCandidates(
   db: DbClient, opts: { projectId: string },
 ): Promise<Memory[]> {
+  const cond = opts.projectId
+    ? and(eq(memories.status, 'pending_review'), eq(memories.sourceCwd, opts.projectId))
+    : eq(memories.status, 'pending_review')
   const rows = await db.select().from(memories)
-    .where(and(eq(memories.status, 'pending_review'), eq(memories.sourceCwd, opts.projectId)))
+    .where(cond)
     .orderBy(desc(memories.createdAt), desc(memories.id))
     .all()
   return rows.map(rowToMemory)
