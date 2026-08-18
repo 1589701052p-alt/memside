@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lt, notInArray, or, sql } from 'drizzle-orm'
 import { ulid } from 'ulid'
 import type { DbClient } from '@/db/client'
-import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications, memoryTrash } from '@/db/schema'
+import { memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, memoryDistillJobs, memoryDistillEvents, memorySessionFlushes, memorySessionDigests, memoryDegradations, notifications, memoryTrash } from '@/db/schema'
 import { snapshotMemory, restoreFromSnapshot } from './trash'
 import {
   canTransition,
@@ -17,6 +17,7 @@ import {
 import type { ExistingMemoryForDedup } from './dedup'
 import type { DistillOrigin } from './distiller'
 import type { DiscardReason, ValueClass } from './valueFilter'
+import type { DistillStep, StepAttemptResult } from './stepState'
 
 export interface MemoryInput {
   scopeType: MemoryScope
@@ -1325,6 +1326,167 @@ export async function markAllNotificationsRead(db: DbClient): Promise<number> {
 export async function updateDistillRunDigestMs(db: DbClient, jobId: string, ms: number): Promise<void> {
   await db.update(memoryDistillRuns).set({ digestMs: ms })
     .where(eq(memoryDistillRuns.distillJobId, jobId)).run()
+}
+
+// ---------------------------------------------------------------------------
+// 断点续跑（spec 2026-08-18 §4.1）：jobs 断点读写、对话历史 llm_round 落盘/读回、
+// 暂停/重试/放弃 job、3 次失败汇总通知、pending_review 候选。
+// ---------------------------------------------------------------------------
+
+/** 断点快照（spec §4.1）。currentStep 为 NULL → 'distill'（新任务语义）。 */
+export interface JobCheckpoint {
+  currentStep: DistillStep
+  stepAttempts: number
+  stepError: string | null
+}
+
+/** 一轮 LLM 对话历史（落 memory_distill_events kind='llm_round'）。 */
+export interface LlmRoundRow {
+  step: DistillStep
+  round: number
+  request: string
+  response: string
+  result: StepAttemptResult
+}
+
+/** 读 job 断点（spec §4.1）。job 不存在或 currentStep NULL → 'distill'/0/null。 */
+export function getJobCheckpoint(db: DbClient, jobId: string): JobCheckpoint {
+  const rows = db.select({
+    currentStep: memoryDistillJobs.currentStep,
+    stepAttempts: memoryDistillJobs.stepAttempts,
+    stepError: memoryDistillJobs.stepError,
+  }).from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId)).limit(1).all()
+  const r = rows[0]
+  const currentStep = (r?.currentStep ?? null) as DistillStep | null
+  return {
+    currentStep: currentStep ?? 'distill',
+    stepAttempts: r?.stepAttempts ?? 0,
+    stepError: r?.stepError ?? null,
+  }
+}
+
+/** 写 job 断点（spec §4.1）。无 job 行 no-op（调用方应已建 job）。 */
+export async function setJobCheckpoint(
+  db: DbClient, jobId: string, cp: JobCheckpoint,
+): Promise<void> {
+  await db.update(memoryDistillJobs).set({
+    currentStep: cp.currentStep,
+    stepAttempts: cp.stepAttempts,
+    stepError: cp.stepError,
+  }).where(eq(memoryDistillJobs.id, jobId)).run()
+}
+
+/**
+ * 落盘一轮 LLM 对话历史（spec §4.1）。存 memory_distill_events kind='llm_round'，
+ * payload JSON 含 {step, round, request, response, result}；attemptIndex 复用为 round。
+ */
+export async function saveLlmRound(
+  db: DbClient,
+  input: { jobId: string; step: DistillStep; round: number; request: string; response: string; result: StepAttemptResult },
+): Promise<void> {
+  const payload = JSON.stringify({
+    step: input.step, round: input.round, request: input.request,
+    response: input.response, result: input.result,
+  })
+  await db.insert(memoryDistillEvents).values({
+    distillJobId: input.jobId, attemptIndex: input.round, ts: Date.now(),
+    kind: 'llm_round', payload,
+  }).run()
+}
+
+/**
+ * 读回某 step 的对话历史（spec §4.1）。按 kind='llm_round' 过滤后 payload.step===入参 step
+ * 再过滤（防 payload 与查询 step 漂移），round 升序。
+ */
+export async function listLlmRounds(
+  db: DbClient, jobId: string, step: DistillStep,
+): Promise<LlmRoundRow[]> {
+  const rows = await db.select().from(memoryDistillEvents)
+    .where(and(eq(memoryDistillEvents.distillJobId, jobId), eq(memoryDistillEvents.kind, 'llm_round')))
+    .orderBy(asc(memoryDistillEvents.attemptIndex), asc(memoryDistillEvents.id))
+    .all()
+  const out: LlmRoundRow[] = []
+  for (const r of rows) {
+    let p: any = null
+    try { p = JSON.parse(r.payload) } catch { continue }
+    if (p == null || p.step !== step) continue
+    out.push({
+      step: p.step as DistillStep,
+      round: typeof p.round === 'number' ? p.round : r.attemptIndex,
+      request: typeof p.request === 'string' ? p.request : '',
+      response: typeof p.response === 'string' ? p.response : '',
+      result: p.result as StepAttemptResult,
+    })
+  }
+  return out
+}
+
+/**
+ * 标记 job 暂停（spec §4.1 §5.2）。jobs.status='paused'、stepError=step（暂停位置标记）；
+ * runs.pausedStep=step（best-effort UPDATE，无 run 行 no-op）。
+ */
+export async function markJobPaused(db: DbClient, jobId: string, step: DistillStep): Promise<void> {
+  await db.update(memoryDistillJobs).set({ status: 'paused', stepError: step })
+    .where(eq(memoryDistillJobs.id, jobId)).run()
+  try {
+    await db.update(memoryDistillRuns).set({ pausedStep: step })
+      .where(eq(memoryDistillRuns.distillJobId, jobId)).run()
+  } catch (e) { console.warn('memside: markJobPaused run pausedStep update failed', e) }
+}
+
+/** 重置 job 供重试（spec §4.1）：stepAttempts=0、stepError=null、status='pending'、nextRunAt=now。 */
+export async function resetJobForRetry(db: DbClient, jobId: string): Promise<void> {
+  await db.update(memoryDistillJobs).set({
+    stepAttempts: 0, stepError: null, status: 'pending', nextRunAt: Date.now(),
+  }).where(eq(memoryDistillJobs.id, jobId)).run()
+}
+
+/** 放弃 job（spec §4.1）：status='done' + finishedAt=now。offset 推进由 scheduler 调 setSessionOffset，不在此处。 */
+export async function abandonJob(db: DbClient, jobId: string): Promise<void> {
+  await db.update(memoryDistillJobs).set({
+    status: 'done', finishedAt: Date.now(),
+  }).where(eq(memoryDistillJobs.id, jobId)).run()
+}
+
+/**
+ * 3 次失败汇总一条任务级通知（spec §5.2）。复用 insertNotification 同内容折叠：
+ * 同 job+step+reasons 重复调用不刷屏。title=`${step}_failed`，body=reasons.join(' | ')，
+ * refType='distill_job'，refId=jobId。自身吞错只 warn，不炸蒸馏。
+ */
+export async function logStepFailureNotification(
+  db: DbClient,
+  input: { jobId: string; step: DistillStep; reasons: string[] },
+): Promise<void> {
+  try {
+    await insertNotification(db, {
+      kind: 'llm_error',
+      title: `${input.step}_failed`,
+      body: input.reasons.join(' | '),
+      refType: 'distill_job',
+      refId: input.jobId,
+    })
+  } catch (e) { console.warn('memside: step failure notification insert failed', e) }
+}
+
+/**
+ * 列出某项目的待审查候选（spec §6.4）。status='pending_review' 且 sourceCwd=projectId。
+ * 用 sourceCwd 过滤（非 scopeId）：judge 暂停期间候选来自该项目的 distill job，
+ * 含 project-scoped 与 global-scoped（同一 job 的 cwd 即 sourceCwd），一条查全。
+ */
+export async function listPendingReviewCandidates(
+  db: DbClient, opts: { projectId: string },
+): Promise<Memory[]> {
+  const rows = await db.select().from(memories)
+    .where(and(eq(memories.status, 'pending_review'), eq(memories.sourceCwd, opts.projectId)))
+    .orderBy(desc(memories.createdAt), desc(memories.id))
+    .all()
+  return rows.map(rowToMemory)
+}
+
+/** pending_review → candidate 进审批队列（spec §6.4）。无行/状态不符 no-op。 */
+export async function promotePendingReviewToCandidate(db: DbClient, candidateId: string): Promise<void> {
+  await db.update(memories).set({ status: 'candidate' })
+    .where(and(eq(memories.id, candidateId), eq(memories.status, 'pending_review'))).run()
 }
 
 // ---------------------------------------------------------------------------
