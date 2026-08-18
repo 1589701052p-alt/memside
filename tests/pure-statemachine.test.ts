@@ -31,3 +31,14 @@ test('superseded stays terminal', () => {
 test('candidate cannot jump to archived', () => {
   expect(canTransition('candidate', 'archived')).toBe(false)
 })
+
+test('pending_review can go candidate / approved / rejected (spec §6.4 手动接管)', () => {
+  expect(canTransition('pending_review', 'candidate')).toBe(true)
+  expect(canTransition('pending_review', 'approved')).toBe(true)
+  expect(canTransition('pending_review', 'rejected')).toBe(true)
+})
+
+test('pending_review cannot jump to archived / superseded', () => {
+  expect(canTransition('pending_review', 'archived')).toBe(false)
+  expect(canTransition('pending_review', 'superseded')).toBe(false)
+})

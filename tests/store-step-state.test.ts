@@ -207,8 +207,7 @@ describe('pending_review 候选', () => {
       .where(eq(memories.id, c2.id)).run()
     const list = await listPendingReviewCandidates(db, { projectId: '/p1' })
     expect(list.map((m) => m.title)).toEqual(['t2'])
-    // status 运行时为 'pending_review'（MemoryStatus 类型不含该值，属 Task 9 UI/API 白名单范畴）
-    expect(list[0]!.status as string).toBe('pending_review')
+    expect(list[0]!.status).toBe('pending_review')
   })
 
   test('promotePendingReviewToCandidate 把 pending_review→candidate', async () => {
