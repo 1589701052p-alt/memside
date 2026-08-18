@@ -11,7 +11,7 @@ export const memories = sqliteTable(
     bodyMd: text('body_md').notNull(),
     tags: text('tags').notNull().default('[]'), // JSON string[]
     status: text('status', {
-      enum: ['candidate', 'approved', 'archived', 'superseded', 'rejected'],
+      enum: ['candidate', 'approved', 'archived', 'superseded', 'rejected', 'pending_review'],
     }).notNull(),
     sourceKind: text('source_kind', {
       enum: ['conversation', 'error', 'manual', 'subagent'],
@@ -51,11 +51,14 @@ export const memoryDistillJobs = sqliteTable(
     sourceAgentId: text('source_agent_id'), // subagent 蒸馏任务的 agent_id；主会话任务为 null
     scopeResolvedJson: text('scope_resolved_json'), // {projectId, includeGlobal}
     status: text('status', {
-      enum: ['pending', 'running', 'done', 'failed', 'canceled', 'waiting'],
+      enum: ['pending', 'running', 'done', 'failed', 'canceled', 'waiting', 'paused'],
     }).notNull(),
     attempts: integer('attempts').notNull().default(0),
     nextRunAt: integer('next_run_at').notNull(),
     lastError: text('last_error'),
+    currentStep: text('current_step'), // 'distill'|'dedup'|'judge'|'digest'; NULL=distill(新任务)（spec 2026-08-18 §4.1）
+    stepAttempts: integer('step_attempts').notNull().default(0), // 当前步骤失败计数（3 次暂停）
+    stepError: text('step_error'), // 当前步骤最后失败原因（汇总通知用）
     createdAt: integer('created_at').notNull(),
     finishedAt: integer('finished_at'),
     lastCaptureAt: integer('last_capture_at'), // 攒量批处理：该 session 最后一次 capture 的 ts（TTL 判定；NULL=legacy 不走 sweep）
@@ -76,7 +79,7 @@ export const memoryDistillEvents = sqliteTable(
       .references(() => memoryDistillJobs.id, { onDelete: 'cascade' }),
     attemptIndex: integer('attempt_index').notNull(),
     ts: integer('ts').notNull(),
-    kind: text('kind').notNull(), // 'conversation' | 'error' | 'blame' | 'capture-failed'
+    kind: text('kind').notNull(), // 'conversation' | 'error' | 'blame' | 'capture-failed' | 'llm_round'（spec 2026-08-18 §4.1）
     payload: text('payload').notNull(), // JSON: transcript excerpt / error detail
   },
   (t) => ({
@@ -141,6 +144,7 @@ export const memoryDistillRuns = sqliteTable(
     storedCount: integer('stored_count').notNull(),
     discardedCount: integer('discarded_count').notNull(),
     durationMs: integer('duration_ms').notNull(),
+    pausedStep: text('paused_step'),   // 暂停在哪步；非暂停 NULL（spec 2026-08-18 §4.1）
     errorMessage: text('error_message'),   // 新增：nullable；llm_error 时存错误描述，其余 null
     rawText: text('raw_text'),   // 新增：nullable；parse_error 时存模型原始输出（capRawText 截断），其余 null
     digestMs: integer('digest_ms'),   // 摘要（滚动账本）压缩耗时；未计量 NULL（spec 2026-08-12 §5.4）
