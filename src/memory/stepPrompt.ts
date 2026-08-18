@@ -2,7 +2,23 @@
 import { extractJsonObject } from './pure'
 import type { DistillStep, StepFailReason } from './stepState'
 
-const ABORT_PATTERNS = ['aborted', 'connection error', 'timeout', 'timed out', 'econnreset', 'socket hang up']
+export const ABORT_PATTERNS = ['aborted', 'connection error', 'timeout', 'timed out', 'econnreset', 'socket hang up']
+
+/**
+ * 判断错误是否「像 abort / 连接中断」（spec §缺陷3 / Task 10 收紧 catch 用）。
+ *
+ * `callLLM` 的 `finalMessage()` catch 只有当原始错误确实是 abort / 连接错误 /
+ * 超时 / socket 复位等「网关掐断」类异常时，才 re-throw 带诊断前缀的 Error；
+ * 否则（401 / 400 / 校验错误等）原样 re-throw，保留 SDK 原生消息，避免误诊。
+ *
+ * 与 `classifyFailure` 共用同一组 `ABORT_PATTERNS`，单一真相源；另外识别
+ * `error.name === 'AbortError'`（fetch/SDK 标准 abort 名）。
+ */
+export function isAbortLike(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'AbortError') return true
+  const msg = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase()
+  return ABORT_PATTERNS.some((p) => msg.includes(p))
+}
 
 /** 从异常/响应分类失败原因（spec §5.3）。 */
 export function classifyFailure(error: unknown, rawResponse: string | null): StepFailReason {
