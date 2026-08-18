@@ -54,6 +54,12 @@ describe('classifyFailure 失败分类', () => {
     expect(classifyFailure(null, '{"verdicts":[{"index":0}')).toBe('incomplete')
   })
 
+  test('有响应且合法 JSON 但内容不合规 → format', () => {
+    // 成功 parse 但调用方会判 shape 不对（shouldRetry 返回错误）-> classifyFailure 仍应判 format
+    expect(classifyFailure(null, '{"a":1}')).toBe('format')
+    expect(classifyFailure(null, '{"verdicts":[]}')).toBe('format')
+  })
+
   test('无响应无异常兜底 → aborted', () => {
     expect(classifyFailure(null, '')).toBe('aborted')
     expect(classifyFailure(null, null)).toBe('aborted')

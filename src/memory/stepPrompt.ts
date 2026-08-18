@@ -13,8 +13,7 @@ export function classifyFailure(error: unknown, rawResponse: string | null): Ste
     try {
       JSON.parse(extractJsonObject(rawResponse!))
       return 'format' // 解析成功但内容不合规，重试要纠格式（调用方分类细化）
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
+    } catch {
       // 截断特征：parse 报错但原始里有未闭合的 JSON 结构
       if (rawResponse!.includes('{') && !isClosedJson(rawResponse!)) return 'incomplete'
       return 'format'
