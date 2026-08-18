@@ -87,4 +87,46 @@ describe('runLlmSession', () => {
     expect(r.ok).toBe(false)
     expect(calls).toBe(3)
   })
+
+  // 锁 parse-fail 分支（llmSession.ts §58-64）：callLLM 返回非 JSON → 内层
+  // JSON.parse 抛错 → classifyFailure(null, raw) → persist → continue → 下一轮成功。
+  // 非 JSON 字符串 classifyFailure 落 'format'（无 '{' → format，stepPrompt.ts §19）。
+  test('第1轮返回非JSON → format分类+落盘+追问，第2轮成功', async () => {
+    const saved: RoundRecord[] = []
+    const r = await runLlmSession({
+      callLLM: makeCallLLM(['not json at all', '{"ok":true}']),
+      system: 's', initialUser: 'u', step: 'distill', jobId: 'j6',
+      persistRound: async (rr) => { saved.push(rr) },
+      loadHistory: async () => [],
+      shouldRetry: () => null,
+    })
+    expect(r.ok).toBe(true)
+    expect(saved).toHaveLength(2)
+    expect(saved[0].result.ok).toBe(false)
+    if (!saved[0].result.ok) expect(saved[0].result.reason).toBe('format')
+    // 第2轮 request 带追问（buildFollowupPrompt format 分支含"格式"/"JSON"）
+    expect(saved[1].request).toMatch(/格式|JSON|接着/)
+  })
+
+  // 锁 format-retry 分支（llmSession.ts §65-74）：parse 成功但 shouldRetry
+  // 返回非 null → reason='format' → persist → continue → 下一轮 shouldRetry 接受。
+  test('第1轮JSON合法但shouldRetry拒绝 → format+落盘+追问，第2轮接受', async () => {
+    const saved: RoundRecord[] = []
+    const r = await runLlmSession({
+      callLLM: makeCallLLM(['{"a":1}', '{"a":2}']),
+      system: 's', initialUser: 'u', step: 'judge', jobId: 'j7',
+      persistRound: async (rr) => { saved.push(rr) },
+      loadHistory: async () => [],
+      shouldRetry: (parsed) => {
+        const p = parsed as { a?: number }
+        return p.a === 1 ? 'shape wrong' : null
+      },
+    })
+    expect(r.ok).toBe(true)
+    expect(saved).toHaveLength(2)
+    expect(saved[0].result.ok).toBe(false)
+    if (!saved[0].result.ok) expect(saved[0].result.reason).toBe('format')
+    // 第2轮 request 带追问（format 分支含"格式"/"JSON"）
+    expect(saved[1].request).toMatch(/格式|JSON/)
+  })
 })
