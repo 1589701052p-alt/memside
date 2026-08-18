@@ -30,7 +30,9 @@ function printBanner(alreadyRunning: boolean): void {
   const url = `http://127.0.0.1:${PORT}`
   const willOpen = shouldAutoOpen()
   const statusLine = alreadyRunning
-    ? 'memside 已在运行，已打开浏览器到现有实例'
+    ? willOpen
+      ? 'memside 已在运行，已打开浏览器到现有实例'
+      : 'memside 已在运行（未自动开浏览器，MEMSIDE_NO_OPEN=1）'
     : willOpen
       ? '正在打开浏览器…'
       : `Web UI:  ${url} （未自动开浏览器，MEMSIDE_NO_OPEN=1）`

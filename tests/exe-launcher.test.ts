@@ -44,4 +44,11 @@ describe('launcher.ts 源码层断言', () => {
     // 横幅不是单行日志（升级后应有多行 / 边框 token）
     expect(src).not.toMatch(/^console\.log\(`memside on http:\/\/127\.0\.0\.1:\$\{PORT\}`\)\s*$/m)
   })
+
+  test('横幅 alreadyRunning 分支亦读 shouldAutoOpen（spec §3.4 逃生口状态准确）', () => {
+    // 已在运行 + MEMSIDE_NO_OPEN=1 时不得谎称「已打开浏览器」
+    expect(src).toContain('memside 已在运行（未自动开浏览器，MEMSIDE_NO_OPEN=1）')
+    // 已在运行 + 自动开时保留原状态
+    expect(src).toContain('memside 已在运行，已打开浏览器到现有实例')
+  })
 })
