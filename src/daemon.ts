@@ -155,9 +155,10 @@ export function sweepStuckRunning(db: DbClient): number {
 }
 
 /**
- * 四槽全空提醒周期（spec 2026-08-19 §3.5）：启动立即一次 + 每 5min 复探。
+ * 四槽全空提醒周期（spec 2026-08-19 §3.1）：启动立即一次 + 每 30s 复探。
+ * 探针毫秒级，30s 无负担；卸载后 ≤30s 内提醒（显眼化，原 5min 太久）。
  */
-const HOOK_CHECK_INTERVAL_MS = 5 * 60 * 1000
+const HOOK_CHECK_INTERVAL_MS = 30 * 1000
 
 /**
  * 探测四槽 hook 安装状态并据此写/清 hook_missing 提醒（spec 2026-08-19 §3.5）。
@@ -267,7 +268,7 @@ export async function startDaemon(opts: DaemonOpts = {}) {
     installHooks({ port, baseDir: rp.claude.dir, settingsFilename: rp.claude.settingsFilename })
   }
 
-  // 四槽全空提醒（spec 2026-08-19 §3.5）：启动立即一次 + 每 5min 周期复探。
+  // 四槽全空提醒（spec 2026-08-19 §3.5 + 显眼化 §3.1）：启动立即一次 + 每 30s 周期复探。
   // I1 修复（final review 2026-08-19）：探测必须排在 installClaudeHooks 块之后——
   // 否则 exe 首启 opts.installClaudeHooks:true 时探针先于装 hook 跑，四槽必然全空
   // → 写一条假阳性「未安装 hook」提醒（实际 memside 马上装好）。装完再探，语义不变。

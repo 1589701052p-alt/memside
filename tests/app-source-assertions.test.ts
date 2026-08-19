@@ -135,3 +135,15 @@ describe('App.tsx hook_missing 消息渲染', () => {
     expect(src).toContain('#e65100')
   })
 })
+
+// spec 2026-08-19-hook-missing-notification §3.1（显眼化：卸载后 ≤30s 提醒）
+// 回归防护：hook 检测间隔锁 30s。探针毫秒级无负担；曾为 5min，卸载后最坏
+// 等 5min 才提醒，不显眼。此断言防回退到 5min（若未来调整需同步更新 spec）。
+describe('hook 检测间隔 30s（spec 2026-08-19 显眼化 §3.1）', () => {
+  it('daemon.ts HOOK_CHECK_INTERVAL_MS === 30 * 1000', () => {
+    const daemonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.ts')
+    const src = readFileSync(daemonPath, 'utf-8')
+    // 锁常量值 30s（防回退到 5min）
+    expect(src).toMatch(/HOOK_CHECK_INTERVAL_MS\s*=\s*30\s*\*\s*1000/)
+  })
+})
