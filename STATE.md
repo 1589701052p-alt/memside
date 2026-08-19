@@ -249,6 +249,42 @@ SubagentStop 删除主会话兜底，缺失改写 subagent_transcript_missing �
 3. empty_output 是否回归纯真空（抽样应全部 raw_output_json 非 NULL）。
 4. parse_error 通知折叠效果：同签名是否收成一条。
 
+### 观测结论（2026-08-19 回填，项 #2 已闭环）
+
+2026-08-17 落地的「subagent 直连路径取证补丁」（spec
+`docs/superpowers/specs/2026-08-17-subagent-transcript-path-diag-design.md`，方案 A）
+在 `SubagentResolveDiag` 加了 `agentTranscriptPath`（claude code payload 的
+`agent_transcript_path` 直连值）+ `agentTranscriptPathExists`（直连路径存在且为文件）
+两字段，**仅取证不参与是否蒸馏的决策**，目的是排除「memside 找错地方误报幽灵」
+这个口子。该补丁指定「部署后跑 1–2 天，对照新 phantom 降级的 diag 出结论」。
+结论（live DB `~/.memside/memside.db` 查证，2026-08-19）：
+
+- **规模**：`subagent_transcript_missing` 降级 736 条，时间 2026-08-17 09:42 →
+  2026-08-19 00:56（约 1.5 天）。补丁前 239 条（无取证字段，08-17 09:42–21:34），
+  补丁后 497 条（有取证字段，08-17 21:38–08-19 00:56）。
+- **决定性证据**：补丁后 497 条 `agentTranscriptPathExists` **全 false，0 条 true**。
+  claude code 在 payload 里**确实给了直连路径**（497 条 `agentTranscriptPath` 有值），
+  且该直连路径与 memside 推导的 `derivedPath` **指向同一个文件**（`…\subagents\
+  agent-<id>.jsonl`）——该文件不存在。这排除了「memside 找错地方」。
+- **排除写入延迟**：取最近 8 个 phantom agentId，数小时后磁盘核对 **8/8 仍缺失**
+  ——不是「SubagentStop 触发时文件还没落盘」，是 claude code 从未给这些子 agent
+  落盘对话文件。
+- **真幽灵来源**：phantom 几乎全是 claude code 的后台任务 / session cron / 被中断的
+  子 agent（payloadKeys 含 `background_tasks`、`session_crons`、`last_assistant_message`）。
+  这些子 agent 跑了、停了、发了 SubagentStop，但 claude code 没为它们写对话文件。
+  真有文件的子 agent 照常蒸馏，不受影响。
+
+**判定**：确认真幽灵 subagent，memside 无 bug。取证 spec §「上线后观测」命中
+「`agentTranscriptPathExists` 恒 false → 确认真幽灵，转方案 B（静默纯幽灵）」分支。
+方案 B 独立 brainstorming 落 spec+plan（见下节「方案 B：静默幽灵 subagent」）。
+
+> 旁注：取证字段 `agentTranscriptPath`/`agentTranscriptPathExists` 的取证使命已完成。
+> 其去留（长期诊断价值 vs diag 膨胀）在方案 B 实现时一并决定——本回填不预先决定。
+>
+> 附带发现（独立债）：live DB 从 102MB（2026-07-23 审计基线）涨到 **1.1GB**，主因
+> 不是 736 条幽灵降级（每条 ~1KB），而是 `memory_distill_events.payload` 存全量
+> transcript 的已知债务 #1；幽灵降级审计行只是雪上加霜。清理仍为独立后续 issue。
+
 ### 本轮遗留（minor，不阻塞合并）
 
 - retry.ts / distiller 缺「先 parse 败后末次抛错」混合序列优先级测试（T1/T2 deferred）。

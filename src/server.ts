@@ -334,6 +334,14 @@ export function createApp(deps: AppDeps) {
               distillJobId: jobId, attemptIndex: 0, ts: Date.now(),
               kind: 'conversation', payload: JSON.stringify(turns),
             })
+          } else if (!diag.derivedExists && !diag.agentTranscriptPathExists) {
+            // 方案 B（2026-08-19）：真幽灵静默。derivedPath 与 payload 的 agent_transcript_path
+            // 直连路径的文件都不存在 = claude code 发了 SubagentStop 却从未给该子 agent 落盘
+            // 对话文件（live DB 497/497 实测全属此类，payloadKeys 含 background_tasks/
+            // session_crons/last_assistant_message——后台/被中断子 agent）。不写降级、不发通知，
+            // 直接跳过，消除误报噪声。真有文件的子 agent 照常蒸馏。
+            // 「直连路径存在但推导路径不在」（找错地方，真 bug 信号）与「文件在但解析出 0 turns」
+            // 这两类异常走下方 logDegradation 仍留信号——不静默真 bug。
           } else {
             const detail = JSON.stringify({ ...diag, payloadKeys: Object.keys(body) })
             await logDegradation(deps.db, {

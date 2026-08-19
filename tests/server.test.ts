@@ -197,12 +197,21 @@ test('collector SubagentStop: subagent 文件命中 -> 入队 + 存 event + broa
   expect(broadcastCalls.length).toBeGreaterThanOrEqual(1)
 })
 
-test('collector SubagentStop: 文件缺失 -> 不入队 + subagent_transcript_missing degradation（含取证）+ 通知双写', async () => {
-  // 夹具只有 main.jsonl（无 subagents 目录或无该 agent 文件）
+// 方案 B（2026-08-19）：幽灵 subagent 静默。当 derivedPath 与 agent_transcript_path
+// 直连路径的文件都不存在（agentTranscriptPathExists=false），判定为 claude code 发了
+// SubagentStop 却从未落盘子 agent 对话文件的「真幽灵」（live DB 497/497 实测全属此类），
+// 不写降级、不发通知、不 console.warn，直接 202 跳过——消除误报噪声。真有文件的子 agent
+// 照常蒸馏不受影响；「直连路径存在但推导路径不在」（找错地方）与「文件在但解析出 0 turns」
+// 两类真异常仍写降级留信号（见下方另两条测试）。
+test('collector SubagentStop: 真幽灵（两路径文件都不存在）-> 静默跳过，不写降级/不发通知（方案 B 核心行为锁）', async () => {
+  // 夹具只有 main.jsonl（无 subagents 目录或无该 agent 文件），且不给 agent_transcript_path
+  // 直连路径 -> 两路径都不存在 = 真幽灵。
   const mainPath = join(dir, 'main.jsonl')
   writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN SESSION' } }) + '\n')
   const beforeEvents = await db.select().from(memoryDistillEvents)
   const beforeJobs = await db.select().from(memoryDistillJobs)
+  const beforeDeg = await db.select().from(memoryDegradations)
+  const beforeNotifs = await db.select().from(notifications)
   const r = await req('/hooks/claude/SubagentStop', {
     method: 'POST',
     body: JSON.stringify({ sourceEventId: 'e-miss', cwd: '/r', transcript_path: mainPath, session_id: 's1', agent_id: 'NOPE' }),
@@ -217,31 +226,20 @@ test('collector SubagentStop: 文件缺失 -> 不入队 + subagent_transcript_mi
   // 不存 event
   const afterEvents = await db.select().from(memoryDistillEvents)
   expect(afterEvents.length).toBe(beforeEvents.length)
-  // memory_degradations 有 kind='subagent_transcript_missing' 且 sessionId='s1'
-  const degs = await db.select().from(memoryDegradations)
-  const miss = degs.find((d) => d.kind === 'subagent_transcript_missing')
-  expect(miss).toBeDefined()
-  expect(miss!.sessionId).toBe('s1')
-  // detail JSON 含 diag 全字段 + payloadKeys；agentId='NOPE'、derivedExists=false
-  const detail = JSON.parse(miss!.detail!)
-  expect(detail.agentId).toBe('NOPE')
-  expect(detail.derivedExists).toBe(false)
-  expect(detail.derivedTurns).toBe(0)
-  expect(detail.transcriptPath).toBe(mainPath)
-  expect(detail.mainTranscriptExists).toBe(true)
-  expect(Array.isArray(detail.subagentsDirEntries)).toBe(true)
-  expect(Array.isArray(detail.payloadKeys)).toBe(true)
-  expect(detail.payloadKeys).toContain('agent_id')
-  // notifications 表新增 kind='degradation'、title='subagent_transcript_missing' 的行
-  const notifs = await db.select().from(notifications)
-  const nd = notifs.find((n) => n.kind === 'degradation' && n.title === 'subagent_transcript_missing')
-  expect(nd).toBeDefined()
+  // 【方案 B 核心】真幽灵静默：不写 subagent_transcript_missing 降级，无新增 degradation 行
+  const afterDeg = await db.select().from(memoryDegradations)
+  expect(afterDeg.length).toBe(beforeDeg.length)
+  expect(afterDeg.find((d) => d.kind === 'subagent_transcript_missing' && d.sessionId === 's1')).toBeUndefined()
+  // 不发通知（logDegradation 双写不触发）
+  const afterNotifs = await db.select().from(notifications)
+  expect(afterNotifs.length).toBe(beforeNotifs.length)
 })
 
-test('collector SubagentStop: payload 缺 agent_id -> 同样走 degradation（不再只 console.warn）', async () => {
-  // POST 不带 agent_id
+test('collector SubagentStop: payload 缺 agent_id -> 两路径都不存在 = 真幽灵，静默跳过（方案 B）', async () => {
+  // POST 不带 agent_id：derivedPath 推不出（null）、agentTranscriptPath 也缺（null）-> 真幽灵。
   const mainPath = join(dir, 'main2.jsonl')
   writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN2' } }) + '\n')
+  const beforeDeg = await db.select().from(memoryDegradations)
   const r = await req('/hooks/claude/SubagentStop', {
     method: 'POST',
     body: JSON.stringify({ sourceEventId: 'e-noid', cwd: '/r', transcript_path: mainPath, session_id: 's2' }),
@@ -250,12 +248,10 @@ test('collector SubagentStop: payload 缺 agent_id -> 同样走 degradation（�
   expect(r.status).toBe(202)
   await new Promise((res) => setTimeout(res, 50))
   expect(enqueueCalls.length).toBe(0)
-  const degs = await db.select().from(memoryDegradations)
-  const miss = degs.find((d) => d.kind === 'subagent_transcript_missing' && d.sessionId === 's2')
-  expect(miss).toBeDefined()
-  const detail = JSON.parse(miss!.detail!)
-  expect(detail.agentId).toBe('')
-  expect(detail.derivedPath).toBeNull()
+  // 真幽灵静默：不写降级
+  const afterDeg = await db.select().from(memoryDegradations)
+  expect(afterDeg.length).toBe(beforeDeg.length)
+  expect(afterDeg.find((d) => d.kind === 'subagent_transcript_missing' && d.sessionId === 's2')).toBeUndefined()
 })
 
 // spec 2026-08-17 §测试策略 #7（源码层文本守卫）+ #7 端到端透传：SubagentStop 分支必须
@@ -302,6 +298,35 @@ test('collector SubagentStop: 源码层文本守卫——server.ts SubagentStop 
   expect(src).toContain("body.agent_transcript_path ?? ''")
   // body 的 inline 类型含 agent_transcript_path（透传契约对齐 Task 1 新签名）
   expect(src).toContain('agent_transcript_path?: string')
+})
+
+test('collector SubagentStop: 文件存在但解析出 0 turns -> 仍写降级（方案 B 第三分支，异常信号不静默）', async () => {
+  // 方案 B 三分支之 3：derivedExists=true 但 turns.length===0（文件在，内容空/解析失败）。
+  // 这不是真幽灵（文件确实在），属异常，仍写 subagent_transcript_missing 降级留信号。
+  // 夹具：subagents 目录下放一个 agent-EMPTY.jsonl，但内容是空字符串（parseTranscriptFile
+  // 解析出 0 个有效 turn）。main.jsonl 也存在。
+  const subDir = join(dir, 'main-empty', 'subagents')
+  mkdirSync(subDir, { recursive: true })
+  const mainPath = join(dir, 'main-empty.jsonl')
+  writeFileSync(mainPath, JSON.stringify({ type: 'user', message: { role: 'user', content: 'MAIN' } }) + '\n')
+  const subPath = join(subDir, 'agent-EMPTY.jsonl')
+  writeFileSync(subPath, '')  // 空文件 -> parseTranscriptFile 返回 []
+  const beforeDeg = await db.select().from(memoryDegradations)
+  const r = await req('/hooks/claude/SubagentStop', {
+    method: 'POST',
+    body: JSON.stringify({ sourceEventId: 'e-empty', cwd: '/r', transcript_path: mainPath, session_id: 's-empty', agent_id: 'EMPTY' }),
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(r.status).toBe(202)
+  await new Promise((res) => setTimeout(res, 50))
+  expect(enqueueCalls.length).toBe(0)
+  // 文件在但 0 turns：仍写降级（不静默）
+  const afterDeg = await db.select().from(memoryDegradations)
+  const miss = afterDeg.find((d) => d.kind === 'subagent_transcript_missing' && d.sessionId === 's-empty')
+  expect(miss).toBeDefined()
+  const detail = JSON.parse(miss!.detail!)
+  expect(detail.derivedExists).toBe(true)
+  expect(detail.derivedTurns).toBe(0)
 })
 
 test('collector Stop reads session_id and keys the session waiting job by it', async () => {
