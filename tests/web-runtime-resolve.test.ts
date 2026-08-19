@@ -46,16 +46,27 @@ test('resolveOpencodePath: 反斜杠归一为正斜杠', () => {
   expect(resolveOpencodePath('C:\\x\\oc', d)).toBe('C:/x/oc/memside-opencode')
 })
 
-test('RuntimeSettings 含双分组标题 + 每组两个按钮', () => {
-  expect(appSrc).toContain('Claude Code / codeagent')
-  expect(appSrc).toContain('opencode / nga')
+test('RuntimeSettings 含四卡独立标题 + 每卡两个按钮', () => {
+  // 四卡独立标题（spec 2026-08-19：旧双分组合并标题已拆）
+  expect(appSrc).toContain('Claude Code')
+  expect(appSrc).toContain('codeagent')
+  expect(appSrc).toContain('opencode')
+  expect(appSrc).toContain('nga')
   expect(appSrc).toContain('保存并安装')
   expect(appSrc).toContain('卸载')
   expect(appSrc).toContain('将写入')
+  // 反向锁：旧合并标题不应存在
+  expect(appSrc).not.toContain('Claude Code / codeagent')
+  expect(appSrc).not.toContain('opencode / nga')
 })
 
-test('RuntimeSettings 用 installRuntimeHooks(target) / uninstallRuntimeHooks(target)', () => {
-  // 确认 UI 调用带 target，而非旧的无参调用
-  expect(appSrc).toMatch(/installRuntimeHooks\(\s*['"](?:claude|opencode)['"]/)
-  expect(appSrc).toMatch(/uninstallRuntimeHooks\(\s*['"](?:claude|opencode)['"]/)
+test('RuntimeSettings 用 installRuntimeHooks/uninstallRuntimeHooks 接四值 target', () => {
+  // 确认 UI 调用 install/uninstall（统一 onInstall(key) 传 slot key 变量），
+  // 且 slots 数组把四值 target 全部接成字面量 key（锁 4 槽接线，防回退到双值）。
+  expect(appSrc).toMatch(/installRuntimeHooks\(/)
+  expect(appSrc).toMatch(/uninstallRuntimeHooks\(/)
+  expect(appSrc).toMatch(/key:\s*['"]claude['"]/)
+  expect(appSrc).toMatch(/key:\s*['"]codeagent['"]/)
+  expect(appSrc).toMatch(/key:\s*['"]opencode['"]/)
+  expect(appSrc).toMatch(/key:\s*['"]nga['"]/)
 })

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import {
   listMemoriesPage, listDiscardsPage, listDistillRunsPage, WEB_PAGE_SIZE,
   promoteMemory, patchMemory, getStatus, getSourceInput,
@@ -6,7 +6,7 @@ import {
   getDistillRun, getDistillRunSourceInput, getRunDegradations,
   getLlmSettings, saveLlmSettings, testLlmConnection, testEffectiveLlmConnection,
   fetchJudgeConfig, saveJudgeConfig, startRescan, cancelRescan,
-  getRuntimeSettings, saveRuntimeSettings, installRuntimeHooks, uninstallRuntimeHooks,
+  getRuntimeSettings, saveRuntimeSettings, installRuntimeHooks, uninstallRuntimeHooks, getRuntimeStatus,
   getFacets, UNEVALUATED,
   listNotificationsPage, markNotificationRead, markAllNotificationsRead,
   bulkRejectUnevaluated as bulkRejectUnevaluatedApi,
@@ -15,7 +15,7 @@ import {
   retryJob, abandonJob, listPendingReview, promotePendingReview,
   type MemoryItem, type MemsideStatus, type SourceInput, type SourceTurn, type DiscardItem,
   type DistillRunListItem, type LlmSettingsState, type JudgeConfigDto, type Facets, type FacetTab,
-  type RuntimeSettingsState,
+  type RuntimeSettingsState, type RuntimeStatus, type RuntimeTarget, type RuntimeSlotPatch,
   type NotificationItem,
   type TrashItem,
 } from './api'
@@ -2171,120 +2171,162 @@ function ImportTrigger({ conflict, onConflictChange, onResult }: {
 }
 
 /**
- * 运行环境设置（spec runtime-settings-redesign §3.6）。
- * 双分组：claude/codeagent（claude-code fork）+ opencode/nga（opencode fork）。
- * 每组：可见标签字段 + 实时「→ 将写入」预览 + 「保存并安装」（先存再装，消除改了没存的脚枪）+「卸载」。
- * fetch/操作失败显错误不静默（CLAUDE.md 状态可见性）。不做持久「已装」徽标（无法可靠自检）。
+ * 运行环境设置（spec 2026-08-19-runtime-settings-four-slots §3.6）。
+ * 四张独立卡：Claude Code 与 codeagent（hooks 型，dir + settingsFilename）
+ *   + opencode 与 nga（plugin 型，仅 dir）。每卡实时安装状态徽标（读磁盘探针，
+ *   getRuntimeStatus），安装/卸载后 re-probe 刷新。共享解析路径时提示共享关系。
+ * fetch/操作失败显错误不静默（CLAUDE.md 状态可见性）。status 探针失败不阻塞设置加载。
  */
 function RuntimeSettings() {
   const [state, setState] = useState<RuntimeSettingsState | null>(null)
-  const [claudeDir, setClaudeDir] = useState('')
-  const [settingsFilename, setSettingsFilename] = useState('')
-  const [opencodeDir, setOpencodeDir] = useState('')
-  const [claudeMsg, setClaudeMsg] = useState<string | null>(null)
-  const [opencodeMsg, setOpencodeMsg] = useState<string | null>(null)
+  const [status, setStatus] = useState<RuntimeStatus | null>(null)
+  const [claude, setClaude] = useState({ dir: '', settingsFilename: '' })
+  const [codeagent, setCodeagent] = useState({ dir: '', settingsFilename: '' })
+  const [opencode, setOpencode] = useState({ dir: '' })
+  const [nga, setNga] = useState({ dir: '' })
+  const [msg, setMsg] = useState<Partial<Record<RuntimeTarget, string | null>>>({})
+  const [busy, setBusy] = useState<Partial<Record<RuntimeTarget, boolean>>>({})
   const [error, setError] = useState<string | null>(null)
-  const [claudeBusy, setClaudeBusy] = useState(false)
-  const [opencodeBusy, setOpencodeBusy] = useState(false)
 
+  const probe = async () => {
+    try { setStatus(await getRuntimeStatus()) } catch { /* 探针失败不阻塞 UI，徽标保持未刷新 */ }
+  }
   const refresh = async () => {
     try {
       const s = await getRuntimeSettings()
       setState(s)
-      setClaudeDir(s.claudeDir); setSettingsFilename(s.settingsFilename); setOpencodeDir(s.opencodeDir)
+      setClaude(s.claude); setCodeagent(s.codeagent); setOpencode(s.opencode); setNga(s.nga)
       setError(null)
+      try { setStatus(await getRuntimeStatus()) } catch { /* status 失败不阻塞设置加载 */ }
     } catch (e) { setError(String(e)) }
   }
   useEffect(() => { void refresh() }, [])
 
-  const defaults = state?.defaults ?? { claudeDir: '~/.claude', settingsFilename: 'settings.json', opencodeDir: '~/.config/opencode' }
-  const claudePreview = resolveClaudePath(claudeDir, settingsFilename, defaults)
-  const opencodePreview = resolveOpencodePath(opencodeDir, defaults)
+  const d = state?.defaults
+  const claudePreview = d ? resolveClaudePath(claude.dir, claude.settingsFilename, d.claude) : ''
+  const codeagentPreview = d ? resolveClaudePath(codeagent.dir, codeagent.settingsFilename, d.codeagent) : ''
+  const opencodePreview = d ? resolveOpencodePath(opencode.dir, d.opencode) : ''
+  const ngaPreview = d ? resolveOpencodePath(nga.dir, d.nga) : ''
 
-  const onClaudeInstall = async () => {
-    setClaudeBusy(true); setClaudeMsg(null)
+  const onInstall = async (key: RuntimeTarget) => {
+    setBusy({ ...busy, [key]: true }); setMsg({ ...msg, [key]: null })
     try {
-      const s = await saveRuntimeSettings({ claudeDir, settingsFilename })
-      setState(s); setClaudeDir(s.claudeDir); setSettingsFilename(s.settingsFilename)
-      const r = await installRuntimeHooks('claude')
-      setClaudeMsg(r.ok ? `✓ 已安装到 ${r.settingsPath ?? claudePreview}` : `安装失败: ${r.error ?? '未知错误'}`)
-    } catch (e) { setClaudeMsg(`操作失败: ${e}`) }
-    finally { setClaudeBusy(false) }
+      const patch: RuntimeSlotPatch = {}
+      if (key === 'claude') patch.claude = claude
+      if (key === 'codeagent') patch.codeagent = codeagent
+      if (key === 'opencode') patch.opencode = opencode
+      if (key === 'nga') patch.nga = nga
+      const s = await saveRuntimeSettings(patch)
+      setState(s); setClaude(s.claude); setCodeagent(s.codeagent); setOpencode(s.opencode); setNga(s.nga)
+      const r = await installRuntimeHooks(key)
+      const dest = r.settingsPath ?? r.pluginPath ?? (
+        key === 'claude' ? claudePreview : key === 'codeagent' ? codeagentPreview : key === 'opencode' ? opencodePreview : ngaPreview
+      )
+      setMsg({ ...msg, [key]: r.ok ? `✓ 已安装到 ${dest}` : `安装失败: ${r.error ?? '未知错误'}` })
+      await probe() // re-probe 状态徽标
+    } catch (e) { setMsg({ ...msg, [key]: `操作失败: ${e}` }) }
+    finally { setBusy({ ...busy, [key]: false }) }
   }
-  const onClaudeUninstall = async () => {
-    setClaudeBusy(true); setClaudeMsg(null)
+  const onUninstall = async (key: RuntimeTarget) => {
+    setBusy({ ...busy, [key]: true }); setMsg({ ...msg, [key]: null })
     try {
-      const r = await uninstallRuntimeHooks('claude')
-      setClaudeMsg(r.ok ? `✓ 已移除 ${r.removed ?? 0} 个 hook 组` : `卸载失败: ${r.error ?? '未知错误'}`)
-    } catch (e) { setClaudeMsg(`卸载失败: ${e}`) }
-    finally { setClaudeBusy(false) }
-  }
-  const onOpencodeInstall = async () => {
-    setOpencodeBusy(true); setOpencodeMsg(null)
-    try {
-      const s = await saveRuntimeSettings({ opencodeDir })
-      setState(s); setOpencodeDir(s.opencodeDir)
-      const r = await installRuntimeHooks('opencode')
-      setOpencodeMsg(r.ok ? `✓ 已安装到 ${r.pluginPath ?? opencodePreview}` : `安装失败: ${r.error ?? '未知错误'}`)
-    } catch (e) { setOpencodeMsg(`操作失败: ${e}`) }
-    finally { setOpencodeBusy(false) }
-  }
-  const onOpencodeUninstall = async () => {
-    setOpencodeBusy(true); setOpencodeMsg(null)
-    try {
-      const r = await uninstallRuntimeHooks('opencode')
-      setOpencodeMsg(r.ok
-        ? `✓ 已移除 ${r.removed ?? 0} 个 plugin 条目${r.dirRemoved ? ' + 插件目录' : ''}`
-        : `卸载失败: ${r.error ?? '未知错误'}`)
-    } catch (e) { setOpencodeMsg(`卸载失败: ${e}`) }
-    finally { setOpencodeBusy(false) }
+      const r = await uninstallRuntimeHooks(key)
+      setMsg({
+        ...msg,
+        [key]: r.ok
+          ? `✓ 已卸载${r.dirRemoved ? '（含插件目录）' : r.removed != null ? ` ${r.removed} 项` : ''}`
+          : `卸载失败: ${r.error ?? '未知错误'}`,
+      })
+      await probe()
+    } catch (e) { setMsg({ ...msg, [key]: `卸载失败: ${e}` }) }
+    finally { setBusy({ ...busy, [key]: false }) }
   }
 
-  const msgStyle = (m: string | null) => m === null ? undefined : (m.includes('失败') ? { color: '#b00' } : { color: '#080' })
+  const msgStyle = (m: string | null | undefined) =>
+    m == null ? undefined : (m.includes('失败') ? { color: '#b00' } : { color: '#080' })
+  const badge = (on: boolean | undefined) =>
+    on ? <span style={{ color: '#080', fontWeight: 600 }}>✓ 已安装</span>
+       : <span style={{ color: '#888' }}>○ 未安装</span>
+
+  // 共享路径提示：解析后路径相同则提示共享（安装/卸载会同时影响两者）
+  const sharedHooks = !!d && resolveClaudePath(claude.dir, claude.settingsFilename, d.claude)
+    === resolveClaudePath(codeagent.dir, codeagent.settingsFilename, d.codeagent)
+  const sharedPlugin = !!d && resolveOpencodePath(opencode.dir, d.opencode)
+    === resolveOpencodePath(nga.dir, d.nga)
+
+  type Slot = {
+    key: RuntimeTarget; title: string; subtitle: string; kind: 'hooks' | 'plugin'
+    preview: string; installed: boolean | undefined; fields: ReactNode
+    sharedHint: string | null
+  }
+  const slots: Slot[] = [
+    {
+      key: 'claude', title: 'Claude Code', subtitle: '官方', kind: 'hooks',
+      preview: claudePreview, installed: status?.claude.installed,
+      sharedHint: sharedHooks ? '与 codeagent 共享同一配置文件，安装/卸载会同时影响两者' : null,
+      fields: <>
+        <label style={{ flex: '2 1 260px', fontSize: 12, color: '#555' }}>配置目录
+          <input style={{ width: '100%', marginTop: 2 }} placeholder={d?.claude.dir} value={claude.dir} onChange={(e) => setClaude({ ...claude, dir: e.target.value })} />
+        </label>
+        <label style={{ flex: '1 1 180px', fontSize: 12, color: '#555' }}>文件名
+          <input style={{ width: '100%', marginTop: 2 }} placeholder={d?.claude.settingsFilename} value={claude.settingsFilename} onChange={(e) => setClaude({ ...claude, settingsFilename: e.target.value })} />
+        </label>
+      </>,
+    },
+    {
+      key: 'codeagent', title: 'codeagent', subtitle: 'claude-code fork', kind: 'hooks',
+      preview: codeagentPreview, installed: status?.codeagent.installed,
+      sharedHint: sharedHooks ? '与 Claude Code 共享同一配置文件，安装/卸载会同时影响两者' : null,
+      fields: <>
+        <label style={{ flex: '2 1 260px', fontSize: 12, color: '#555' }}>配置目录
+          <input style={{ width: '100%', marginTop: 2 }} placeholder={d?.codeagent.dir} value={codeagent.dir} onChange={(e) => setCodeagent({ ...codeagent, dir: e.target.value })} />
+        </label>
+        <label style={{ flex: '1 1 180px', fontSize: 12, color: '#555' }}>文件名
+          <input style={{ width: '100%', marginTop: 2 }} placeholder={d?.codeagent.settingsFilename} value={codeagent.settingsFilename} onChange={(e) => setCodeagent({ ...codeagent, settingsFilename: e.target.value })} />
+        </label>
+      </>,
+    },
+    {
+      key: 'opencode', title: 'opencode', subtitle: '官方', kind: 'plugin',
+      preview: opencodePreview, installed: status?.opencode.installed,
+      sharedHint: sharedPlugin ? '与 nga 共享同一配置文件，安装/卸载会同时影响两者' : null,
+      fields: <label style={{ display: 'block', fontSize: 12, color: '#555', marginBottom: 6 }}>配置目录
+        <input style={{ width: '100%', marginTop: 2 }} placeholder={d?.opencode.dir} value={opencode.dir} onChange={(e) => setOpencode({ dir: e.target.value })} />
+      </label>,
+    },
+    {
+      key: 'nga', title: 'nga', subtitle: 'opencode fork', kind: 'plugin',
+      preview: ngaPreview, installed: status?.nga.installed,
+      sharedHint: sharedPlugin ? '与 opencode 共享同一配置文件，安装/卸载会同时影响两者' : null,
+      fields: <label style={{ display: 'block', fontSize: 12, color: '#555', marginBottom: 6 }}>配置目录
+        <input style={{ width: '100%', marginTop: 2 }} placeholder={d?.nga.dir} value={nga.dir} onChange={(e) => setNga({ dir: e.target.value })} />
+      </label>,
+    },
+  ]
 
   return (
     <section style={{ margin: '12px 0', padding: 12, border: '1px solid #ddd', borderRadius: 8 }}>
       <h3 style={{ margin: '0 0 8px' }}>运行环境</h3>
       <p style={{ margin: '0 0 10px', fontSize: 13, color: '#666' }}>
-        memside 往你所用 agent 的配置里写 hooks/plugin，才能抓取会话 + 注入记忆。官方 Claude Code / opencode 用默认路径、无需改动；公司内部 agent（如 codeagent 读 <code>~/.cac/setting.json</code>）才需改路径。
+        memside 往你所用 agent 的配置里写 hooks/plugin，才能抓取会话 + 注入记忆。四个 agent 各自独立配置，互不覆盖。官方 Claude Code / opencode 用默认路径；公司内部 fork 才需改路径。
       </p>
       {error ? <div style={{ color: '#b00', marginBottom: 8 }}>设置加载失败: {error}</div> : null}
-
-      <div style={{ margin: '12px 0', padding: 10, border: '1px solid #eee', borderRadius: 6 }}>
-        <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>Claude Code / codeagent <span style={{ fontSize: 12, color: '#888' }}>claude-code fork</span></h4>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
-          <label style={{ flex: '2 1 260px', fontSize: 12, color: '#555' }}>配置目录
-            <input style={{ width: '100%', marginTop: 2 }} placeholder={defaults.claudeDir} value={claudeDir} onChange={(e) => setClaudeDir(e.target.value)} />
-          </label>
-          <label style={{ flex: '1 1 180px', fontSize: 12, color: '#555' }}>文件名
-            <input style={{ width: '100%', marginTop: 2 }} placeholder={defaults.settingsFilename} value={settingsFilename} onChange={(e) => setSettingsFilename(e.target.value)} />
-          </label>
+      {slots.map((s) => (
+        <div key={s.key} style={{ margin: '12px 0', padding: 10, border: '1px solid #eee', borderRadius: 6 }}>
+          <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>{s.title} <span style={{ fontSize: 12, color: '#888' }}>{s.subtitle}</span> <span style={{ marginLeft: 8, fontSize: 12 }}>{badge(s.installed)}</span></h4>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>{s.fields}</div>
+          <div style={{ margin: '4px 0 8px', fontSize: 12, color: '#888' }}>→ 将写入：<code>{s.preview}</code></div>
+          {s.sharedHint ? <div style={{ fontSize: 11, color: '#a70', marginBottom: 4 }}>{s.sharedHint}</div> : null}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button disabled={busy[s.key]} onClick={() => void onInstall(s.key)}>保存并安装</button>
+            <button disabled={busy[s.key]} onClick={() => void onUninstall(s.key)}>卸载</button>
+            {busy[s.key] ? <span style={{ color: '#888' }}>处理中…</span> : null}
+            {msg[s.key] ? <span style={msgStyle(msg[s.key])}>{msg[s.key]}</span> : null}
+          </div>
         </div>
-        <div style={{ margin: '4px 0 8px', fontSize: 12, color: '#888' }}>→ 将写入：<code>{claudePreview}</code></div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button disabled={claudeBusy} onClick={() => void onClaudeInstall()}>保存并安装</button>
-          <button disabled={claudeBusy} onClick={() => void onClaudeUninstall()}>卸载</button>
-          {claudeBusy ? <span style={{ color: '#888' }}>处理中…</span> : null}
-          {claudeMsg ? <span style={msgStyle(claudeMsg)}>{claudeMsg}</span> : null}
-        </div>
-      </div>
-
-      <div style={{ margin: '12px 0', padding: 10, border: '1px solid #eee', borderRadius: 6 }}>
-        <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>opencode / nga <span style={{ fontSize: 12, color: '#888' }}>opencode fork</span></h4>
-        <label style={{ display: 'block', fontSize: 12, color: '#555', marginBottom: 6 }}>配置目录
-          <input style={{ width: '100%', marginTop: 2 }} placeholder={defaults.opencodeDir} value={opencodeDir} onChange={(e) => setOpencodeDir(e.target.value)} />
-        </label>
-        <div style={{ margin: '4px 0 8px', fontSize: 12, color: '#888' }}>→ 将写入：<code>{opencodePreview}</code></div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button disabled={opencodeBusy} onClick={() => void onOpencodeInstall()}>保存并安装</button>
-          <button disabled={opencodeBusy} onClick={() => void onOpencodeUninstall()}>卸载</button>
-          {opencodeBusy ? <span style={{ color: '#888' }}>处理中…</span> : null}
-          {opencodeMsg ? <span style={msgStyle(opencodeMsg)}>{opencodeMsg}</span> : null}
-        </div>
-      </div>
-
+      ))}
       <div style={{ marginTop: 6, fontSize: 12, color: '#888' }}>
-        提示：codeagent 用户通常填 claude 目录 <code>~/.cac</code> + 文件名 <code>setting.json</code>。安装仅写入上述路径，请确认是 agent 实际读取的配置文件。卸载只移除 memside 管理的项，不影响你自己写的 hooks/plugins。
+        提示：codeagent 用户通常填目录 <code>~/.cac</code> + 文件名 <code>setting.json</code>。安装仅写入上述路径，请确认是 agent 实际读取的配置文件。卸载只移除 memside 管理的项，不影响你自己写的 hooks/plugins。
       </div>
     </section>
   )
