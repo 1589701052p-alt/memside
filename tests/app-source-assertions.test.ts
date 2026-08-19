@@ -135,3 +135,43 @@ describe('App.tsx hook_missing 消息渲染', () => {
     expect(src).toContain('#e65100')
   })
 })
+
+// spec 2026-08-19-hook-missing-visibility §3.3-3.5
+// 前端显眼化兜底面（CLAUDE.md 最低要求）：🔔 角标 hook_missing 琥珀分支 + 顶部琥珀
+// 警示条（跳设置 tab）。App.tsx 无法在 bun test 渲染，靠源码层文本断言锁接线存在。
+describe('hook_missing 状态栏显眼化（spec 2026-08-19 显眼化 §3.4-3.5）', () => {
+  const appSrc = readFileSync(appPath, 'utf-8')
+  const apiPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'web', 'api.ts')
+  const apiSrc = readFileSync(apiPath, 'utf-8')
+
+  it('api.ts MemsideStatus 含 unreadHookMissing + latestUnreadHookMissing', () => {
+    expect(apiSrc).toContain('unreadHookMissing')
+    expect(apiSrc).toContain('latestUnreadHookMissing')
+  })
+
+  it('App.tsx 🔔 角标含 hook_missing 琥珀分支', () => {
+    expect(appSrc).toMatch(/unreadHookMissing/)
+    expect(appSrc).toContain('#b26a00')  // 琥珀
+  })
+
+  it('App.tsx 顶部 hook_missing 警示条跳 settings tab', () => {
+    expect(appSrc).toMatch(/unreadHookMissing/)
+    // 警示条文案 + 跳 settings
+    expect(appSrc).toContain('运行环境未安装 hook')
+    expect(appSrc).toMatch(/setTab\(['"]settings['"]\)/)
+    // 警示条琥珀样式
+    expect(appSrc).toContain('#fff3e0')
+  })
+})
+
+// spec 2026-08-19-hook-missing-notification §3.1（显眼化：卸载后 ≤30s 提醒）
+// 回归防护：hook 检测间隔锁 30s。探针毫秒级无负担；曾为 5min，卸载后最坏
+// 等 5min 才提醒，不显眼。此断言防回退到 5min（若未来调整需同步更新 spec）。
+describe('hook 检测间隔 30s（spec 2026-08-19 显眼化 §3.1）', () => {
+  it('daemon.ts HOOK_CHECK_INTERVAL_MS === 30 * 1000', () => {
+    const daemonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.ts')
+    const src = readFileSync(daemonPath, 'utf-8')
+    // 锁常量值 30s（防回退到 5min）
+    expect(src).toMatch(/HOOK_CHECK_INTERVAL_MS\s*=\s*30\s*\*\s*1000/)
+  })
+})

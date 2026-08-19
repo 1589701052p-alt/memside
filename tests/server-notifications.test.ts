@@ -92,6 +92,31 @@ describe('已读端点', () => {
   })
 })
 
+describe('status hook_missing 字段（spec 2026-08-19 显眼化 §3.2）', () => {
+  test('有未读 hook_missing → unreadHookMissing>0 + latestUnreadHookMissing 含 body/ts', async () => {
+    await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook', body: 'b1' })
+    const status = await (await app.request('/api/status')).json() as any
+    expect(status.unreadHookMissing).toBe(1)
+    expect(status.latestUnreadHookMissing).toBeTruthy()
+    expect(status.latestUnreadHookMissing.body).toBe('b1')
+    expect(typeof status.latestUnreadHookMissing.ts).toBe('number')
+  })
+
+  test('无未读 hook_missing → unreadHookMissing=0 + latestUnreadHookMissing=null', async () => {
+    const status = await (await app.request('/api/status')).json() as any
+    expect(status.unreadHookMissing).toBe(0)
+    expect(status.latestUnreadHookMissing).toBeNull()
+  })
+
+  test('既有字段不变（回归锁）：unreadLlmErrors/unreadDegradations 仍正确', async () => {
+    await insertNotification(db, { kind: 'degradation', title: '降级了' })
+    const status = await (await app.request('/api/status')).json() as any
+    expect(status.unreadDegradations).toBe(1)
+    expect(status.unreadLlmErrors).toBe(0)
+    expect(status.unreadNotifications).toBe(1)
+  })
+})
+
 describe('/api/status 扩展', () => {
   test('unreadNotifications 计数；ack 路由退役 404；无 recentDegradations 键', async () => {
     await insertNotification(db, { kind: 'degradation', title: 'a' })
