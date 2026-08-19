@@ -196,7 +196,22 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   // 的 GET /api/settings/runtime/status 探测真实安装状态而非降级 installed:false。
   const isHooksInstalledFn = (o: { baseDir?: string; settingsFilename?: string }) => isHooksInstalled(o)
   const isOpencodePluginInstalledFn = (o: { baseDir?: string }) => isOpencodePluginInstalled(o)
-  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, staticAssets: opts.serveStaticAssets, tracker, callLLM: resolveCallLLM({}, db), port, installOpencodePluginFn, uninstallOpencodePluginFn, isHooksInstalledFn, isOpencodePluginInstalledFn })
+  const app = createApp({
+    db,
+    adapter,
+    opencodeAdapter,
+    enqueueDistillJob,
+    broadcast,
+    staticDir: opts.serveStaticDir,
+    staticAssets: opts.serveStaticAssets,
+    tracker,
+    callLLM: resolveCallLLM({}, db),
+    port,
+    installOpencodePluginFn,
+    uninstallOpencodePluginFn,
+    isHooksInstalledFn,
+    isOpencodePluginInstalledFn,
+  })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {
@@ -211,14 +226,13 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   const stopLoop = startMemoryDistillLoop(db, tickDeps)
 
   if (opts.installClaudeHooks) {
-    // 读 UI 配置的运行环境路径（四槽）。存储异常降级到默认四槽。
-    // 两个 hooks 型槽都装：claude code 读 ~/.claude/settings.json，codeagent fork 读
-    // ~/.cac/setting.json——用户两个 agent 都用时 hooks 都要落到位。用户没配 codeagent
-    // 时默认 ~/.cac/setting.json 也会被建出来（codeagent 未装时文件闲置，harmless）。
+    // 读 UI 配置的运行环境路径（四槽）。存储异常降级到默认四槽。本 spec 不碰启动时
+    // 自动装的语义（spec §5「零回归」）——只装 claude 槽（与改动前同款单槽行为，仅
+    // 适配 Task 1 的 4-slot 形状）。codeagent 槽装 hooks 走 §3.6 ?target=codeagent 端点
+    // / UI 按钮，不在 daemon 启动时自动装。
     let rp: RuntimePaths
     try { rp = loadRuntimePaths(db) } catch { rp = defaultRuntimePaths() }
     installHooks({ port, baseDir: rp.claude.dir, settingsFilename: rp.claude.settingsFilename })
-    installHooks({ port, baseDir: rp.codeagent.dir, settingsFilename: rp.codeagent.settingsFilename })
   }
 
   return {
