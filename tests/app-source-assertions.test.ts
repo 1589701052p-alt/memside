@@ -1,7 +1,7 @@
 // spec: docs/superpowers/specs/2026-08-17-runtime-path-config-design.md §7.5
 // 运行时组件兜底面（CLAUDE.md 最低要求）：RuntimeSettings section 挂载点 + 安装/卸载按钮。
 // App.tsx 无法在 bun test 直接渲染（需 vite/浏览器），靠源码层文本断言锁接线存在。
-import { test, expect } from 'bun:test'
+import { test, expect, describe, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -87,4 +87,51 @@ test('LlmSettings 「清除」不删后端，「删除已保存」承担 clear:t
   // 按钮接线：「清除输入」+「删除已保存」
   expect(fnSlice).toContain('清除输入')
   expect(fnSlice).toContain('删除已保存')
+})
+
+// spec 2026-08-19-hook-missing-notification §7.3
+// daemon 层「四槽全空提醒」兜底面（CLAUDE.md 最低要求）：startDaemon 挂载周期检查
+// （启动立即一次 + 每 5min 复探）。daemon.ts 难在 bun test 直接覆盖 startDaemon
+// 全路径，靠源码层文本断言锁 checkHooksAndNotify 导出 + setInterval + unref 接线存在。
+test('daemon.ts 挂载 HOOK_CHECK_INTERVAL_MS + setInterval + checkHooksAndNotify + unref?.()', () => {
+  const daemonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.ts')
+  const src = readFileSync(daemonPath, 'utf-8')
+  expect(src).toContain('HOOK_CHECK_INTERVAL_MS')
+  expect(src).toContain('setInterval')
+  expect(src).toContain('checkHooksAndNotify')
+  expect(src).toMatch(/unref\?\.\(\)/)
+})
+
+// I1 回归锁（final review 2026-08-19）：startDaemon 中「启动探测」必须在
+// installClaudeHooks（installHooks）块之后执行——否则 exe 首启 opts.installClaudeHooks:true
+// 时探针先于装 hook 跑，四槽必然全空 → 写一条假阳性「未安装 hook」提醒（实际马上装好）。
+// 锁定源码顺序：installHooks 调用的行号 < void checkHooksAndNotify 调用的行号。
+test('daemon.ts: checkHooksAndNotify 调用在 installHooks 之后（I1：探测顺序）', () => {
+  const daemonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.ts')
+  const src = readFileSync(daemonPath, 'utf-8')
+  const installHooksIdx = src.indexOf('installHooks({')
+  const checkIdx = src.indexOf('void checkHooksAndNotify(db)')
+  expect(installHooksIdx).toBeGreaterThan(-1)
+  expect(checkIdx).toBeGreaterThan(-1)
+  // installHooks 在前，checkHooksAndNotify 在后（顺序锁）
+  expect(checkIdx).toBeGreaterThan(installHooksIdx)
+})
+
+// spec 2026-08-19-hook-missing-notification §7.4 / §3.7
+// 前端兜底面（CLAUDE.md 最低要求）：消息 tab 的 kind 下拉 + chip 需支持 hook_missing
+// 类型（琥珀 #e65100，warning 级非 error 红）。App.tsx 无法在 bun test 渲染，
+// 靠源码层文本断言锁「下拉选项 + 琥珀 chip」接线存在。
+describe('App.tsx hook_missing 消息渲染', () => {
+  const src = readFileSync(appPath, 'utf-8')
+
+  it('kind 下拉含 hook_missing 选项', () => {
+    expect(src).toMatch(/value="hook_missing"/)
+    expect(src).toContain('未安装hook')
+  })
+
+  it('chipColor 处理 hook_missing 用琥珀 #e65100', () => {
+    // chipColor 表达式应含 hook_missing 分支或与 degradation 同琥珀色
+    expect(src).toMatch(/hook_missing/)
+    expect(src).toContain('#e65100')
+  })
 })

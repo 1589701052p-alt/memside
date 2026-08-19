@@ -434,7 +434,7 @@ export async function listDiscardsPage(
 export interface NotificationItem {
   id: string
   ts: number
-  kind: 'degradation' | 'llm_error' | 'parse_error'
+  kind: 'degradation' | 'llm_error' | 'parse_error' | 'hook_missing'
   title: string
   body: string | null
   refType: string | null

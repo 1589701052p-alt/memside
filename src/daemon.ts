@@ -5,7 +5,7 @@ import type { DbClient } from '@/db/client'
 import { openDb } from '@/db/client'
 import { memoryDistillEvents, memoryDistillJobs } from '@/db/schema'
 import { tick, startMemoryDistillLoop, enqueueDistillJob, type TickDeps } from '@/scheduler'
-import { createCandidate, getSessionOffset } from '@/memory/store'
+import { createCandidate, getSessionOffset, insertNotification, markNotificationsReadByKind } from '@/memory/store'
 import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
 import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
@@ -15,7 +15,7 @@ import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
 import { OpencodeAdapter } from './adapter/opencode'
-import { installHooks, installOpencodePlugin, uninstallOpencodePlugin, isHooksInstalled, isOpencodePluginInstalled } from './install'
+import { installHooks, installOpencodePlugin, uninstallOpencodePlugin, isHooksInstalled, isOpencodePluginInstalled, checkAllHooksInstalled, type HookInstallSummary } from './install'
 import { createActivityTracker } from './activity'
 
 export interface DaemonOpts {
@@ -155,6 +155,38 @@ export function sweepStuckRunning(db: DbClient): number {
 }
 
 /**
+ * 四槽全空提醒周期（spec 2026-08-19 §3.5）：启动立即一次 + 每 5min 复探。
+ */
+const HOOK_CHECK_INTERVAL_MS = 5 * 60 * 1000
+
+/**
+ * 探测四槽 hook 安装状态并据此写/清 hook_missing 提醒（spec 2026-08-19 §3.5）。
+ * allMissing → 写一条（insertNotification 同内容折叠防刷屏）；任一已装 → 清未读
+ * hook_missing（用户装好后旧提醒自动消失）。永不抛：探针/存储异常降级只 warn。
+ * opts 可注入 checkAllHooksInstalledFn 便于测试避开真实磁盘。
+ */
+export async function checkHooksAndNotify(
+  db: DbClient,
+  opts?: { checkAllHooksInstalledFn?: (db: DbClient) => HookInstallSummary },
+): Promise<void> {
+  const check = opts?.checkAllHooksInstalledFn ?? ((d) => checkAllHooksInstalled(d))
+  try {
+    const summary = check(db)
+    if (summary.allMissing) {
+      await insertNotification(db, {
+        kind: 'hook_missing',
+        title: '运行环境未安装 hook',
+        body: '检测到 claude code / codeagent / opencode / nga 四个槽均未安装，记忆捕获将不会生效。请打开「设置」页安装至少一个 agent 的 hook。',
+      })
+    } else {
+      await markNotificationsReadByKind(db, 'hook_missing')
+    }
+  } catch (e) {
+    console.warn('memside: hook install check failed', e)
+  }
+}
+
+/**
  * Start the memside daemon: open the DB, sweep stuck-running jobs, build the
  * claude-code adapter + Hono app, `Bun.serve` on `port` (default 7777), and
  * start the 1Hz distill loop with the real `callLLM` (via
@@ -235,9 +267,18 @@ export async function startDaemon(opts: DaemonOpts = {}) {
     installHooks({ port, baseDir: rp.claude.dir, settingsFilename: rp.claude.settingsFilename })
   }
 
+  // 四槽全空提醒（spec 2026-08-19 §3.5）：启动立即一次 + 每 5min 周期复探。
+  // I1 修复（final review 2026-08-19）：探测必须排在 installClaudeHooks 块之后——
+  // 否则 exe 首启 opts.installClaudeHooks:true 时探针先于装 hook 跑，四槽必然全空
+  // → 写一条假阳性「未安装 hook」提醒（实际 memside 马上装好）。装完再探，语义不变。
+  void checkHooksAndNotify(db)
+  const hookCheckTimer = setInterval(() => { void checkHooksAndNotify(db) }, HOOK_CHECK_INTERVAL_MS)
+  hookCheckTimer.unref?.()
+
   return {
     server,
     stop: () => {
+      clearInterval(hookCheckTimer)
       stopLoop()
       server.stop()
     },

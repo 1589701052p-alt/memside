@@ -45,6 +45,20 @@ describe('GET /api/notifications', () => {
     const hit = await (await app.request(`/api/notifications?limit=20&q=${encodeURIComponent('超时')}`)).json() as any
     expect(hit.total).toBe(1)
   })
+  // C1 回归锁（final review 2026-08-19）：server 端 kind 校验必须读 store 的
+  // NOTIFICATION_KINDS（单一真源），不得维护独立硬编码白名单——否则 store 加新 kind
+  // 后 server 不同步，前端筛选新 kind 返 400 + 静默空列表。此处锁 hook_missing 合法。
+  test('GET /api/notifications?kind=hook_missing 返回 200（C1：白名单读 NOTIFICATION_KINDS）', async () => {
+    await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook', body: 'b' })
+    const ok = await app.request('/api/notifications?kind=hook_missing')
+    expect(ok.status).toBe(200)
+    const data = await ok.json() as any
+    expect(data.items.every((n: any) => n.kind === 'hook_missing')).toBe(true)
+    expect(data.items.length).toBeGreaterThanOrEqual(1)
+    // 非法 kind 仍 400（回归：读单一真源不等于放行任意值）
+    expect((await app.request('/api/notifications?kind=bogus')).status).toBe(400)
+  })
+
   test('非法 kind -> 400', async () => {
     expect((await app.request('/api/notifications?kind=bogus')).status).toBe(400)
   })

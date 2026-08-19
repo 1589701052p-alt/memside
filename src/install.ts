@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import type { DbClient } from './db/client'
+import { loadRuntimePaths } from './settings'
 
 /**
  * Grep-able marker stamped onto every memside-managed hook command.
@@ -386,4 +388,40 @@ export function isOpencodePluginInstalled(opts: { baseDir?: string }): { install
     } catch { /* malformed -> no entry */ }
   }
   return { installed: dirExists && hasEntry, pluginPath: settingsPath, dirExists }
+}
+
+/**
+ * 四槽安装状态归一结果（spec 2026-08-19 §3.4）。allMissing 仅在四槽全未装时为 true，
+ * 供 daemon 周期检查决定是否提醒用户重新装 hooks/plugin。
+ */
+export interface HookInstallSummary {
+  /** 四槽全部未安装 → true（应提醒）；任一已装 → false。 */
+  allMissing: boolean
+  details: { claude: boolean; codeagent: boolean; opencode: boolean; nga: boolean }
+}
+
+/**
+ * 探测四槽安装状态归一为 allMissing（spec 2026-08-19 §3.4）。永不抛：探针本身永不抛，
+ * 外层 try/catch 降级 allMissing:false（宁可漏提醒也不误报打扰）。路径来自
+ * loadRuntimePaths(db) 四槽（`~` 已展开）；opts 可注入 fake 探针便于测试。
+ */
+export function checkAllHooksInstalled(
+  db: DbClient,
+  opts?: {
+    hooksProbe?: (o: { baseDir?: string; settingsFilename?: string }) => { installed: boolean }
+    opencodeProbe?: (o: { baseDir?: string }) => { installed: boolean }
+  },
+): HookInstallSummary {
+  const hooksProbe = opts?.hooksProbe ?? isHooksInstalled
+  const ocProbe = opts?.opencodeProbe ?? isOpencodePluginInstalled
+  try {
+    const rp = loadRuntimePaths(db)
+    const claude = hooksProbe({ baseDir: rp.claude.dir, settingsFilename: rp.claude.settingsFilename }).installed
+    const codeagent = hooksProbe({ baseDir: rp.codeagent.dir, settingsFilename: rp.codeagent.settingsFilename }).installed
+    const opencode = ocProbe({ baseDir: rp.opencode.dir }).installed
+    const nga = ocProbe({ baseDir: rp.nga.dir }).installed
+    return { allMissing: !claude && !codeagent && !opencode && !nga, details: { claude, codeagent, opencode, nga } }
+  } catch {
+    return { allMissing: false, details: { claude: false, codeagent: false, opencode: false, nga: false } }
+  }
 }

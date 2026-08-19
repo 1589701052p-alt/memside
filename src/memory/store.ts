@@ -1216,7 +1216,7 @@ export async function listDegradationsForJob(db: DbClient, jobId: string): Promi
 
 export const NOTIFICATION_RETENTION_CAP = 500
 export const NOTIFICATION_BODY_CAP_CHARS = 2000
-export const NOTIFICATION_KINDS = ['degradation', 'llm_error', 'parse_error'] as const
+export const NOTIFICATION_KINDS = ['degradation', 'llm_error', 'parse_error', 'hook_missing'] as const
 export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 
 export interface NotificationRow {
@@ -1251,7 +1251,7 @@ export async function insertNotification(
         body === null ? isNull(notifications.body) : eq(notifications.body, body),
       )
     : and(
-        eq(notifications.kind, 'degradation'),
+        eq(notifications.kind, input.kind),
         isNull(notifications.readAt),
         eq(notifications.title, input.title),
       )
@@ -1350,6 +1350,14 @@ export async function markNotificationRead(db: DbClient, id: string): Promise<vo
 export async function markAllNotificationsRead(db: DbClient): Promise<number> {
   const rows = await db.update(notifications).set({ readAt: Date.now() })
     .where(isNull(notifications.readAt)).returning({ id: notifications.id })
+  return rows.length
+}
+
+/** 把指定 kind 的所有未读消息标记已读（spec 2026-08-19 §3.3）。返回本次标记条数。 */
+export async function markNotificationsReadByKind(db: DbClient, kind: NotificationKind): Promise<number> {
+  const rows = await db.update(notifications).set({ readAt: Date.now() })
+    .where(and(eq(notifications.kind, kind), isNull(notifications.readAt)))
+    .returning({ id: notifications.id })
   return rows.length
 }
 
