@@ -537,6 +537,11 @@ export function createApp(deps: AppDeps) {
       .from(notifications)
       .where(and(inArray(notifications.kind, ['llm_error', 'parse_error']), isNull(notifications.readAt)))
       .orderBy(desc(notifications.ts), desc(notifications.id)).limit(1).all()
+    // spec 2026-08-19 显眼化 §3.2：hook_missing 单列最新未读，UI 状态栏显眼提示「未装 hook」。
+    const latestHookMissingRows = await deps.db.select({ body: notifications.body, ts: notifications.ts })
+      .from(notifications)
+      .where(and(eq(notifications.kind, 'hook_missing'), isNull(notifications.readAt)))
+      .orderBy(desc(notifications.ts), desc(notifications.id)).limit(1).all()
     // waiting 单列（spec §4.9）：累加中的 job 不是积压，避免 UI「pending 堆积」假象。
     const waitingCount = await deps.db.select({ n: count() }).from(memoryDistillJobs)
       .where(eq(memoryDistillJobs.status, 'waiting')).all()
@@ -569,6 +574,9 @@ export function createApp(deps: AppDeps) {
       unreadLlmErrors: (unreadByKind['llm_error'] ?? 0) + (unreadByKind['parse_error'] ?? 0),
       unreadDegradations: unreadByKind['degradation'] ?? 0,
       latestUnreadLlmError: latestErrRows[0] ?? null,
+      // spec 2026-08-19 显眼化 §3.2：hook_missing 单列，与 llm_error/degradation 分轨。
+      unreadHookMissing: unreadByKind['hook_missing'] ?? 0,
+      latestUnreadHookMissing: latestHookMissingRows[0] ?? null,
       waitingJobs: waitingCount[0]?.n ?? 0,
       pausedJobs: pausedCount[0]?.n ?? 0,
       trashCount: (await deps.db.select({ n: count() }).from(memoryTrash).all())[0]?.n ?? 0,
