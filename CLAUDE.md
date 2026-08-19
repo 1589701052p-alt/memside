@@ -84,7 +84,7 @@ bun run typecheck            # tsc --noEmit 类型检查
 
 ### 「e2e 测试」= 6 个 e2e/live 测试文件全集
 
-用户说「跑 e2e 测试」指跑**这 6 个**（不是只跑 `npm run test:live` 的 3 个，也不是只跑 mock 的 2 个）。2 个 mock + 4 个真打 LLM，一次跑全：
+用户说「跑 e2e 测试」指跑**这 6 个**（不是只跑 `npm run test:live` 的 4 个 live，也不是只跑 mock 的 2 个）。2 个 mock + 4 个真打 LLM，一次跑全：
 
 ```bash
 MEMSIDE_RUN_LIVE=1 bun test tests/e2e.test.ts tests/e2e-distill-batching.test.ts tests/live-distill.test.ts tests/live-dedup.test.ts tests/live-judge.test.ts tests/live-llm-failure-resume.test.ts
@@ -99,6 +99,6 @@ MEMSIDE_RUN_LIVE=1 bun test tests/e2e.test.ts tests/e2e-distill-batching.test.ts
 | `tests/live-judge.test.ts` | 真打 LLM | 需 `MEMSIDE_RUN_LIVE=1` + 凭证 |
 | `tests/live-llm-failure-resume.test.ts` | 真打 LLM | 需 `MEMSIDE_RUN_LIVE=1` + 凭证 |
 
-4 个 live 文件受双守卫（`loadClaudeCreds` 返回非空 apiKey **且** `MEMSIDE_RUN_LIVE=1`）保护，默认 `bun test` 与 CI 全 skip 不真打模型。`npm run test:live`（= `cross-env MEMSIDE_RUN_LIVE=1 bun test tests/live-distill.test.ts tests/live-dedup.test.ts tests/live-judge.test.ts`）只跑 3 个 live 文件，**不含** `live-llm-failure-resume`——要跑全 4 个 live 用上面的全集命令。真打模型的 live 测试 distill 流式约 170-210s，整套约 2 分钟，给足 timeout。
+4 个 live 文件受双守卫（`loadClaudeCreds` 返回非空 apiKey **且** `MEMSIDE_RUN_LIVE=1`）保护，默认 `bun test` 与 CI 全 skip 不真打模型。`npm run test:live`（= `cross-env MEMSIDE_RUN_LIVE=1 bun test tests/live-*.test.ts`）跑全部 4 个 live 文件，但**不含** 2 个 mock e2e——要跑全 6 个用上面的全集命令。真打模型的 live 测试 distill 流式约 170-210s，整套约 2 分钟，给足 timeout。
 
 daemon 端口可用 `MEMSIDE_PORT` env 覆盖。distiller 走 `~/.claude/settings.json` 里的 `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`（Volcengine Ark 代理），loopback 请求要排除代理（`NO_PROXY=127.0.0.1,localhost`，hook curl 用 `--noproxy`）。
