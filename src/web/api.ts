@@ -570,25 +570,40 @@ export async function saveJudgeConfig(patch: Partial<JudgeConfigDto>, fetchFn: F
   return data
 }
 
-// --- 运行环境路径配置 client（spec 2026-08-17-runtime-path-config §3.7）---------
+// --- 运行环境路径配置 client（spec 2026-08-19-runtime-settings-four-slots §3.7）---
 
-export interface RuntimeSettingsState {
-  claudeDir: string
-  settingsFilename: string
-  opencodeDir: string
-  defaults: { claudeDir: string; settingsFilename: string; opencodeDir: string }
+export type RuntimeTarget = 'claude' | 'codeagent' | 'opencode' | 'nga'
+
+export interface RuntimeSlotDefaults {
+  claude: { dir: string; settingsFilename: string }
+  codeagent: { dir: string; settingsFilename: string }
+  opencode: { dir: string }
+  nga: { dir: string }
 }
 
-/** GET /api/settings/runtime — 当前生效路径 + 默认值对照。 */
+export interface RuntimeSettingsState extends RuntimeSlotDefaults {
+  defaults: RuntimeSlotDefaults
+}
+
+/** per-slot 字段级 patch（对齐 server PUT schema 与 src/settings.ts RuntimePathsPatch：
+ * 每槽各字段可选，只传要改的槽/字段）。 */
+export type RuntimeSlotPatch = {
+  claude?: { dir?: string; settingsFilename?: string }
+  codeagent?: { dir?: string; settingsFilename?: string }
+  opencode?: { dir?: string }
+  nga?: { dir?: string }
+}
+
+/** GET /api/settings/runtime — 当前生效路径（4 槽）+ 默认值对照。 */
 export async function getRuntimeSettings(fetchFn: FetchLike = fetch): Promise<RuntimeSettingsState> {
   const res = await fetchFn('/api/settings/runtime')
   return (await res.json()) as RuntimeSettingsState
 }
 
-/** PUT /api/settings/runtime — 字段级保存（空串=回默认）。返回更新后状态。
+/** PUT /api/settings/runtime — per-slot 保存（空串=回默认）。返回更新后状态。
  * 非 2xx 抛错（对齐 saveJudgeConfig），让 App.tsx onSave 的 try/catch 显 msg。 */
 export async function saveRuntimeSettings(
-  patch: Partial<{ claudeDir: string; settingsFilename: string; opencodeDir: string }>,
+  patch: RuntimeSlotPatch,
   fetchFn: FetchLike = fetch,
 ): Promise<RuntimeSettingsState> {
   const res = await fetchFn('/api/settings/runtime', {
@@ -601,18 +616,31 @@ export async function saveRuntimeSettings(
   return data
 }
 
-/** POST /api/settings/runtime/install?target=claude|opencode — 读已存路径装 hooks/plugin。
- * 默认 claude 保后兼容。失败返回 {ok:false,error}。claude 成功带 settingsPath，opencode 带 pluginPath。 */
+export interface RuntimeStatus {
+  claude: { installed: boolean; path: string }
+  codeagent: { installed: boolean; path: string }
+  opencode: { installed: boolean; path: string }
+  nga: { installed: boolean; path: string }
+}
+
+/** GET /api/settings/runtime/status — 4 槽实时安装状态（读磁盘探针）。 */
+export async function getRuntimeStatus(fetchFn: FetchLike = fetch): Promise<RuntimeStatus> {
+  const res = await fetchFn('/api/settings/runtime/status')
+  return (await res.json()) as RuntimeStatus
+}
+
+/** POST /api/settings/runtime/install?target=claude|codeagent|opencode|nga — 读已存路径装 hooks/plugin。
+ * 默认 claude 保后兼容。失败返回 {ok:false,error}。hooks 型带 settingsPath，plugin 型带 pluginPath。 */
 export async function installRuntimeHooks(
-  target: 'claude' | 'opencode' = 'claude', fetchFn: FetchLike = fetch,
+  target: RuntimeTarget = 'claude', fetchFn: FetchLike = fetch,
 ): Promise<{ ok: boolean; settingsPath?: string; pluginPath?: string; error?: string }> {
   const res = await fetchFn(`/api/settings/runtime/install?target=${target}`, { method: 'POST' })
   return (await res.json()) as { ok: boolean; settingsPath?: string; pluginPath?: string; error?: string }
 }
 
-/** POST /api/settings/runtime/uninstall?target=claude|opencode — 移除 memside-managed 项（保留用户自写）。 */
+/** POST /api/settings/runtime/uninstall?target=claude|codeagent|opencode|nga — 移除 memside-managed 项（保留用户自写）。 */
 export async function uninstallRuntimeHooks(
-  target: 'claude' | 'opencode' = 'claude', fetchFn: FetchLike = fetch,
+  target: RuntimeTarget = 'claude', fetchFn: FetchLike = fetch,
 ): Promise<{ ok: boolean; removed?: number; settingsPath?: string; pluginPath?: string; dirRemoved?: boolean; error?: string }> {
   const res = await fetchFn(`/api/settings/runtime/uninstall?target=${target}`, { method: 'POST' })
   return (await res.json()) as { ok: boolean; removed?: number; settingsPath?: string; pluginPath?: string; dirRemoved?: boolean; error?: string }
