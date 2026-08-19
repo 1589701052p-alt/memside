@@ -158,10 +158,12 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   // of shipment') must appear in the userPrompt that reached the distiller.
   expect(capturedUserPrompt).toContain('refunds within 14 days')
 
-  // thinking 捕获锁（spec 2026-08-09 §6 #7）：thinking 块内容必须经真实链路
-  // （JSONL -> parseTranscriptFile -> events -> makeLoadTranscript -> 渲染）
-  // 抵达 distiller 输入，并以 [thinking] 标签呈现。
-  expect(capturedUserPrompt).toContain('[thinking] refund policy rationale THINKING_SENTINEL')
+  // thinking 剔除锁（2026-08-19 数据驱动决策）：thinking 块经真实链路
+  // （JSONL -> parseTranscriptFile -> events -> makeLoadTranscript）捕获后，在
+  // filterTranscriptForDistill 层被剔除（DROP_THINKING_TURNS）——不抵达 distiller
+  // 输入。断言 thinking 内容不出现（旧 [thinking] 标签 + sentinel 均不应在 prompt 里）。
+  expect(capturedUserPrompt).not.toContain('[thinking]')
+  expect(capturedUserPrompt).not.toContain('THINKING_SENTINEL')
 
   // 工具调用信息闭环锁（spec 2026-08-09 §6 #6）：tool_use input 经真实链路
   // 抵达 distiller 输入，以 调用: 标签呈现。

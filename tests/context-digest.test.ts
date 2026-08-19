@@ -51,10 +51,11 @@ describe('buildDeterministicDigest', () => {
     const turns = [t('user', 'a'.repeat(400)), t('tool', 'z', 'Bash'), t('assistant', 'b')]
     expect(buildDeterministicDigest(turns)).toBe(buildDeterministicDigest(turns))
   })
-  test('thinking -> THINKING 行，换行压平 + 同 300 字截断（spec §4.2 同等对待）', () => {
+  test('thinking 被剔除（DROP_THINKING_TURNS，2026-08-19 数据驱动决策）', () => {
+    // thinking 零 evidence 产出（529 条记忆 0 条溯源），与 filterTranscriptForDistill
+    // 同步剔除——digest 不再把 thinking 渲染成 THINKING 行喂 LLM。空输入 -> 空输出。
     const d = buildDeterministicDigest([t('thinking', 'why\n' + 'z'.repeat(500))])
-    expect(d.startsWith('THINKING: why ')).toBe(true)
-    expect(d.length).toBeLessThanOrEqual('THINKING: '.length + DIGEST_LINE_MAX_CHARS)
+    expect(d).toBe('')
   })
   test('tool 带 toolCall -> [tool: 名字] <截 100 字>（spec §4.2）', () => {
     const d = buildDeterministicDigest([
@@ -80,10 +81,10 @@ describe('buildDeterministicDigest', () => {
 })
 
 describe('renderDigestLines（行格式唯一权威，spec §5.1）', () => {
-  test('四种 role 格式 + system 跳过', () => {
+  test('role 格式 + system 跳过 + thinking 剔除', () => {
     expect(renderDigestLines([
       t('user', 'a'), t('assistant', 'b'), t('thinking', 'c'), t('tool', 'out', 'Read'), t('system', 's'),
-    ])).toEqual(['USER: a', 'ASSISTANT: b', 'THINKING: c', '[tool: Read]'])
+    ])).toEqual(['USER: a', 'ASSISTANT: b', '[tool: Read]'])
   })
   test('300 字 cap + 换行压平', () => {
     const [line] = renderDigestLines([t('user', 'a\nb ' + 'x'.repeat(500))])
