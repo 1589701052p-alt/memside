@@ -335,3 +335,55 @@ export function uninstallOpencodePlugin(opts: { baseDir?: string }): { removed: 
   }
   return { removed, pluginPath: settingsPath, dirRemoved: dirExisted }
 }
+
+/**
+ * 只读探针：settings.json 是否含 memside hook 标记（MEMSIDE_TAG）。永不抛。
+ * 复刻 uninstallHooks 的解析路径：缺文件/malformed -> installed:false。
+ */
+export function isHooksInstalled(opts: { baseDir?: string; settingsFilename?: string }): { installed: boolean; settingsPath: string } {
+  const claudeDir = opts.baseDir ?? join(resolveHome(), '.claude')
+  const settingsPath = join(claudeDir, opts.settingsFilename ?? 'settings.json')
+  if (!existsSync(settingsPath)) return { installed: false, settingsPath }
+  let settings: Record<string, unknown>
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { installed: false, settingsPath }
+    settings = parsed as Record<string, unknown>
+  } catch {
+    return { installed: false, settingsPath }
+  }
+  const hooks = settings.hooks as Record<string, unknown[]> | undefined
+  if (!hooks || typeof hooks !== 'object') return { installed: false, settingsPath }
+  for (const ev of EVENTS) {
+    const groups = hooks[ev]
+    if (!Array.isArray(groups)) continue
+    for (const group of groups) {
+      if (!group || typeof group !== 'object') continue
+      const g = group as { hooks?: Array<{ command?: string }> }
+      const cmds = (g.hooks ?? []).map((h) => h.command ?? '').join('|')
+      if (cmds.includes(MEMSIDE_TAG)) return { installed: true, settingsPath }
+    }
+  }
+  return { installed: false, settingsPath }
+}
+
+/**
+ * 只读探针：opencode.json 是否注册了 memside-opencode 插件且 destDir 存在。永不抛。
+ */
+export function isOpencodePluginInstalled(opts: { baseDir?: string }): { installed: boolean; pluginPath: string; dirExists: boolean } {
+  const ocdDir = opts.baseDir ?? join(resolveHome(), '.config', 'opencode')
+  const destDir = join(ocdDir, 'memside-opencode')
+  const dirExists = existsSync(destDir)
+  const settingsPath = join(ocdDir, 'opencode.json')
+  let hasEntry = false
+  if (existsSync(settingsPath)) {
+    try {
+      const p = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        const plugin = Array.isArray((p as Record<string, unknown>).plugin) ? (p as Record<string, unknown[]>).plugin : []
+        hasEntry = plugin.some((e) => typeof e === 'string' && e.includes('memside-opencode'))
+      }
+    } catch { /* malformed -> no entry */ }
+  }
+  return { installed: dirExists && hasEntry, pluginPath: settingsPath, dirExists }
+}

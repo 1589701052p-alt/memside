@@ -1422,3 +1422,35 @@ follow-up 清单：scheduler digest 接线测试（spec §8 #12 缺口，quality
 - **tool 114KB**：已压缩（TOOL_RESULT_CAP_CHARS=3000）但长会话累积大量 tool turn。
 
 直击真因需针对 assistant/tool 总量做 budget 级减容（非单条 cap），新开 brainstorming。
+
+## 运行环境设置四槽独立配置（2026-08-19）
+
+把运行环境从 3 共享字段拆成 4 独立配置槽 + 每槽实时安装状态徽标。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-19-runtime-settings-four-slots*`。前作（2026-08-17 双分组 UI）让 claude+codeagent 共享一套 dir/filename、opencode+nga 共享一套 dir——同时用 claude code + codeagent 的用户只能配其中一个；安装状态也不可见（只在刚点完 install 后显一条短暂消息）。
+
+1. **RuntimePaths 四槽**（`src/settings.ts`）：claude/codeagent（hooks 型 dir+settingsFilename）/ opencode/nga（plugin 型 dir）四独立槽；codeagent 默认改 `~/.cac`/`setting.json`（拆独立后用其真实默认）。旧 3 共享 key 启发式归位（`settingsFilename==='setting.json'` 或 dir 以 `.cac` 结尾 → codeagent 槽，否则 claude；旧 `opencode_dir` → opencode 槽，nga 取默认），新 key 优先于旧 key，零数据丢失。
+2. **安装状态探针**（`src/install.ts`）：`isHooksInstalled`/`isOpencodePluginInstalled` 只读、永不抛——复刻 uninstall 读逻辑判 `MEMSIDE_TAG` / `memside-opencode` 注册 + destDir 存在。
+3. **server**（`src/server.ts`）：GET/PUT 改四槽 per-slot；新增 `GET /api/settings/runtime/status`（4 槽实时探针，注入点 + 缺省 fallback `installed:false` 不碰真实磁盘）；install/uninstall `target` 扩 `claude|codeagent|opencode|nga`（invalid→400）。
+4. **daemon**（`src/daemon.ts`）：注入两探针到 createApp（无条件，不依赖插件源，与 uninstallOpencodePluginFn 模式一致）。启动时自动装保持单槽 claude（§5 零回归；codeagent 槽启动安装未加，属独立产品决策）。
+5. **Web**（`src/web/{api,runtime-paths,App}.tsx`）：4 卡（Claude Code / codeagent / opencode / nga）+ 状态徽标（✓已安装/○未安装，读磁盘探针）+ 每次 install/uninstall 后 re-probe 更新徽标 + 共享路径提示（opencode.dir===nga.dir 等共享文件时显琥珀色小字）。runtime-paths 纯函数改 per-slot 签名。
+6. **cli.ts**：install 命令适配到新 claude 槽形状（`rp.claude.dir`/`.settingsFilename` + `defaultRuntimePaths()` fallback），单槽零行为变更。
+
+执行：subagent-driven（7 实现 task 各带 task review + 1 final whole-branch review）。Task 4 启动安装一度扩到双槽经审查裁定回退单槽（§5 零回归）。`bun run typecheck && bun test` 1281 pass / 6 skip / 0 fail。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. UI 四卡在 dev（`bun run dev:web`）+ exe 两种模式渲染正确，徽标反映磁盘真实状态。
+2. 同时用 claude code + codeagent 的用户：两槽分别「保存并安装」后，`~/.claude/settings.json` 与 `~/.cac/setting.json` 各自含 hooks，两 agent 都触发 capture（daemon SessionStart/Stop 日志）。
+3. opencode + nga 路径相同时：装一个两卡都显 ✓；路径不同时各自独立。
+4. daemon 重启 / 手动改文件后，进入设置页徽标如实反映真实状态（不谎称已装）。
+5. 老库迁移：旧 codeagent 配置（`~/.cac`/`setting.json`）正确归位 codeagent 槽，非丢失。
+6. codeagent-only 用户启动时自动装：迁移后配置在 codeagent 槽，daemon 启动只装 claude 槽——这类用户需手动在设置页点 codeagent 卡「保存并安装」，或等独立 spec 决定是否启动时装所有已配置 hook 槽。
+
+### deferred minor（非阻塞）
+
+1. `pickExpanded` 对 settingsFilename 也跑 expandTilde（no-op，无副作用）。
+2. codeagent 检测两 OR 分支（`.cac` 后缀 vs `setting.json`）未独立隔离测试（spec §7.1 只要求组合 case）。
+3. opencode malformed-json never-throw 路径未独立测（brief 合并 case，follow-up 可补）。
+4. status 端点 ~ 展开断言是 no-op（defaultRuntimePaths 已绝对路径），~ 展开由 install/uninstall 回归块独立覆盖。
+5. getRuntimeStatus 不抛非 2xx（与既有 GET 客户端约定一致）。
+6. App.tsx 测试未直接断言 onInstall 变量流入 installRuntimeHooks 调用（用 slot key 字面量 + 调用存在替代锁）。
+7. codeagent-only 用户启动自动装张力——独立 spec 决策。

@@ -10,12 +10,12 @@ import type { TranscriptTurn } from '@/memory/pure'
 import { makeLLMCall as makeAnthropicCall } from '@/anthropic'
 import { makeLLMCall as makeOpenAiCall, type OpenAiCreds } from '@/openai'
 import { resolveCallLLMProtocol, type LLMCall, type LLMCallOpts } from '@/llm'
-import { loadUiLlmConfig, loadJudgeConfig, loadRuntimePaths, type UiLlmConfig, type RuntimePaths } from './settings'
+import { loadUiLlmConfig, loadJudgeConfig, loadRuntimePaths, defaultRuntimePaths, type UiLlmConfig, type RuntimePaths } from './settings'
 import { type ClaudeCreds } from './creds'
 import { createApp } from './server'
 import { ClaudeCodeAdapter } from './adapter/claudeCode'
 import { OpencodeAdapter } from './adapter/opencode'
-import { installHooks, installOpencodePlugin, uninstallOpencodePlugin } from './install'
+import { installHooks, installOpencodePlugin, uninstallOpencodePlugin, isHooksInstalled, isOpencodePluginInstalled } from './install'
 import { createActivityTracker } from './activity'
 
 export interface DaemonOpts {
@@ -191,7 +191,27 @@ export async function startDaemon(opts: DaemonOpts = {}) {
       }
     : undefined
   const uninstallOpencodePluginFn = (o: { baseDir?: string }) => uninstallOpencodePlugin(o)
-  const app = createApp({ db, adapter, opencodeAdapter, enqueueDistillJob, broadcast, staticDir: opts.serveStaticDir, staticAssets: opts.serveStaticAssets, tracker, callLLM: resolveCallLLM({}, db), port, installOpencodePluginFn, uninstallOpencodePluginFn })
+  // 只读安装探针（spec 2026-08-19-runtime-settings-four-slots §status）：无条件下注入
+  // （探针只读磁盘、不依赖插件源，与 uninstallOpencodePluginFn 同款），让生产 daemon
+  // 的 GET /api/settings/runtime/status 探测真实安装状态而非降级 installed:false。
+  const isHooksInstalledFn = (o: { baseDir?: string; settingsFilename?: string }) => isHooksInstalled(o)
+  const isOpencodePluginInstalledFn = (o: { baseDir?: string }) => isOpencodePluginInstalled(o)
+  const app = createApp({
+    db,
+    adapter,
+    opencodeAdapter,
+    enqueueDistillJob,
+    broadcast,
+    staticDir: opts.serveStaticDir,
+    staticAssets: opts.serveStaticAssets,
+    tracker,
+    callLLM: resolveCallLLM({}, db),
+    port,
+    installOpencodePluginFn,
+    uninstallOpencodePluginFn,
+    isHooksInstalledFn,
+    isOpencodePluginInstalledFn,
+  })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
   const tickDeps: TickDeps = {
@@ -206,12 +226,13 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   const stopLoop = startMemoryDistillLoop(db, tickDeps)
 
   if (opts.installClaudeHooks) {
-    // 读 UI 配置的运行环境路径（codeagent 用 ~/.cac/setting.json 等）。存储异常降级默认。
+    // 读 UI 配置的运行环境路径（四槽）。存储异常降级到默认四槽。本 spec 不碰启动时
+    // 自动装的语义（spec §5「零回归」）——只装 claude 槽（与改动前同款单槽行为，仅
+    // 适配 Task 1 的 4-slot 形状）。codeagent 槽装 hooks 走 §3.6 ?target=codeagent 端点
+    // / UI 按钮，不在 daemon 启动时自动装。
     let rp: RuntimePaths
-    try { rp = loadRuntimePaths(db) } catch {
-      rp = { claudeDir: join(homedir(), '.claude'), settingsFilename: 'settings.json', opencodeDir: join(homedir(), '.config', 'opencode') }
-    }
-    installHooks({ port, baseDir: rp.claudeDir, settingsFilename: rp.settingsFilename })
+    try { rp = loadRuntimePaths(db) } catch { rp = defaultRuntimePaths() }
+    installHooks({ port, baseDir: rp.claude.dir, settingsFilename: rp.claude.settingsFilename })
   }
 
   return {

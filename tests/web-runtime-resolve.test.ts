@@ -16,42 +16,57 @@ const appSrc = readFileSync(
   'utf-8',
 )
 
-test('resolveClaudePath: 空串回落 default，组合目录+文件名', () => {
-  const d = { claudeDir: '/home/u/.claude', settingsFilename: 'settings.json', opencodeDir: '/home/u/.config/opencode' }
+// === 四槽 resolve（spec 2026-08-19-runtime-settings-four-slots §3.8）===
+// 旧三字段扁平 defaults 已改为 per-slot 形状：resolveClaudePath 第三参传
+// { dir, settingsFilename }，resolveOpencodePath 第二参传 { dir }。
+
+test('resolveClaudePath: 空串回落 slot 默认，组合目录+文件名', () => {
+  const d = { dir: '/home/u/.claude', settingsFilename: 'settings.json' }
   expect(resolveClaudePath('', '', d)).toBe('/home/u/.claude/settings.json')
   expect(resolveClaudePath('/home/u/.cac', 'setting.json', d)).toBe('/home/u/.cac/setting.json')
-  // 单边：只给目录，文件名回落 default
+  // 单边：只给目录，文件名回落 slot 默认
   expect(resolveClaudePath('/x/.cac', '', d)).toBe('/x/.cac/settings.json')
 })
 
 test('resolveClaudePath: 反斜杠归一为正斜杠（Windows 路径展示）', () => {
-  const d = { claudeDir: '/d', settingsFilename: 'settings.json', opencodeDir: '/d' }
+  const d = { dir: '/d', settingsFilename: 'settings.json' }
   expect(resolveClaudePath('C:\\Users\\u\\.cac', 'setting.json', d)).toBe('C:/Users/u/.cac/setting.json')
   // 仅目录含反斜杠
   expect(resolveClaudePath('C:\\x', '', d)).toBe('C:/x/settings.json')
 })
 
-test('resolveOpencodePath: 空串回落 default，拼 memside-opencode', () => {
-  const d = { claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode' }
+test('resolveOpencodePath: 空串回落 slot 默认，拼 memside-opencode', () => {
+  const d = { dir: '/h/.config/opencode' }
   expect(resolveOpencodePath('', d)).toBe('/h/.config/opencode/memside-opencode')
   expect(resolveOpencodePath('/x/opencode', d)).toBe('/x/opencode/memside-opencode')
 })
 
 test('resolveOpencodePath: 反斜杠归一为正斜杠', () => {
-  const d = { claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode' }
+  const d = { dir: '/h/.config/opencode' }
   expect(resolveOpencodePath('C:\\x\\oc', d)).toBe('C:/x/oc/memside-opencode')
 })
 
-test('RuntimeSettings 含双分组标题 + 每组两个按钮', () => {
-  expect(appSrc).toContain('Claude Code / codeagent')
-  expect(appSrc).toContain('opencode / nga')
+test('RuntimeSettings 含四卡独立标题 + 每卡两个按钮', () => {
+  // 四卡独立标题（spec 2026-08-19：旧双分组合并标题已拆）
+  expect(appSrc).toContain('Claude Code')
+  expect(appSrc).toContain('codeagent')
+  expect(appSrc).toContain('opencode')
+  expect(appSrc).toContain('nga')
   expect(appSrc).toContain('保存并安装')
   expect(appSrc).toContain('卸载')
   expect(appSrc).toContain('将写入')
+  // 反向锁：旧合并标题不应存在
+  expect(appSrc).not.toContain('Claude Code / codeagent')
+  expect(appSrc).not.toContain('opencode / nga')
 })
 
-test('RuntimeSettings 用 installRuntimeHooks(target) / uninstallRuntimeHooks(target)', () => {
-  // 确认 UI 调用带 target，而非旧的无参调用
-  expect(appSrc).toMatch(/installRuntimeHooks\(\s*['"](?:claude|opencode)['"]/)
-  expect(appSrc).toMatch(/uninstallRuntimeHooks\(\s*['"](?:claude|opencode)['"]/)
+test('RuntimeSettings 用 installRuntimeHooks/uninstallRuntimeHooks 接四值 target', () => {
+  // 确认 UI 调用 install/uninstall（统一 onInstall(key) 传 slot key 变量），
+  // 且 slots 数组把四值 target 全部接成字面量 key（锁 4 槽接线，防回退到双值）。
+  expect(appSrc).toMatch(/installRuntimeHooks\(/)
+  expect(appSrc).toMatch(/uninstallRuntimeHooks\(/)
+  expect(appSrc).toMatch(/key:\s*['"]claude['"]/)
+  expect(appSrc).toMatch(/key:\s*['"]codeagent['"]/)
+  expect(appSrc).toMatch(/key:\s*['"]opencode['"]/)
+  expect(appSrc).toMatch(/key:\s*['"]nga['"]/)
 })

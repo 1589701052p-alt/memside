@@ -413,15 +413,24 @@ test('MemsideStatus 新字段类型存在（编译期锁定）', () => {
 // Locks the web API contract for the runtime path settings endpoints (Task 3
 // server): GET/PUT /api/settings/runtime + POST install/uninstall. Uses the same
 // fake-fetch pattern as the other wrapper tests.
+// 2026-08-19 spec 四槽：GET/PUT 形状换代为 4 槽 per-slot，下述断言同步更新。
 
 test('getRuntimeSettings returns defaults shape', async () => {
   const fake: FetchLike = async () => new Response(JSON.stringify({
-    claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode',
-    defaults: { claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode' },
+    claude: { dir: '/h/.claude', settingsFilename: 'settings.json' },
+    codeagent: { dir: '/h/.cac', settingsFilename: 'setting.json' },
+    opencode: { dir: '/h/.config/opencode' },
+    nga: { dir: '/h/.config/opencode' },
+    defaults: {
+      claude: { dir: '/h/.claude', settingsFilename: 'settings.json' },
+      codeagent: { dir: '/h/.cac', settingsFilename: 'setting.json' },
+      opencode: { dir: '/h/.config/opencode' },
+      nga: { dir: '/h/.config/opencode' },
+    },
   }), { status: 200 })
   const r = await getRuntimeSettings(fake)
-  expect(r.claudeDir).toBe('/h/.claude')
-  expect(r.defaults.settingsFilename).toBe('settings.json')
+  expect(r.claude.dir).toBe('/h/.claude')
+  expect(r.defaults.codeagent.settingsFilename).toBe('setting.json')
 })
 
 test('saveRuntimeSettings PUTs patch + returns updated state', async () => {
@@ -429,13 +438,22 @@ test('saveRuntimeSettings PUTs patch + returns updated state', async () => {
   const fake: FetchLike = async (url, init) => {
     captured = { url, init }
     return new Response(JSON.stringify({
-      claudeDir: '/h/.cac', settingsFilename: 'setting.json', opencodeDir: '/h/.config/opencode',
-      defaults: { claudeDir: '/h/.claude', settingsFilename: 'settings.json', opencodeDir: '/h/.config/opencode' },
+      claude: { dir: '/h/.cac', settingsFilename: 'setting.json' },
+      codeagent: { dir: '/h/.cac', settingsFilename: 'setting.json' },
+      opencode: { dir: '/h/.config/opencode' },
+      nga: { dir: '/h/.config/opencode' },
+      defaults: {
+        claude: { dir: '/h/.claude', settingsFilename: 'settings.json' },
+        codeagent: { dir: '/h/.cac', settingsFilename: 'setting.json' },
+        opencode: { dir: '/h/.config/opencode' },
+        nga: { dir: '/h/.config/opencode' },
+      },
     }), { status: 200 })
   }
-  const r = await saveRuntimeSettings({ claudeDir: '/h/.cac', settingsFilename: 'setting.json' }, fake)
+  const r = await saveRuntimeSettings({ claude: { dir: '/h/.cac', settingsFilename: 'setting.json' } }, fake)
   expect(captured.init?.method).toBe('PUT')
-  expect(r.claudeDir).toBe('/h/.cac')
+  expect(r.claude.dir).toBe('/h/.cac')
+  expect(r.claude.settingsFilename).toBe('setting.json')
 })
 
 test('installRuntimeHooks POSTs install + returns ok shape', async () => {

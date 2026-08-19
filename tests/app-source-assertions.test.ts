@@ -17,10 +17,37 @@ test('App.tsx mounts RuntimeSettings section in settings tab', () => {
   // 安装 + 卸载按钮接线
   expect(src).toContain('installRuntimeHooks')
   expect(src).toContain('uninstallRuntimeHooks')
-  // 三个路径输入字段接线（claudeDir / settingsFilename / opencodeDir）
-  expect(src).toContain('claudeDir')
-  expect(src).toContain('settingsFilename')
-  expect(src).toContain('opencodeDir')
+})
+
+// === 四槽设置卡 + 状态徽标（spec 2026-08-19-runtime-settings-four-slots）===
+// 旧双分组（claude/codeagent + opencode/nga 合并卡）拆为四独立卡；每卡实时
+// 安装状态徽标（读磁盘探针 getRuntimeStatus）；安装/卸载后 re-probe。
+test('RuntimeSettings 四卡标题 + 状态徽标 + getRuntimeStatus', () => {
+  const src = readFileSync(appPath, 'utf-8')
+  const fnStart = src.indexOf('function RuntimeSettings()')
+  expect(fnStart).toBeGreaterThan(-1)
+  // RuntimeSettings 是文件末尾的最后一个函数，无后续 function 边界 -> 切到文末。
+  const nextFn = src.indexOf('function ', fnStart + 20)
+  const fnSlice = nextFn > -1 ? src.slice(fnStart, nextFn) : src.slice(fnStart)
+  // 四卡标题独立存在
+  expect(fnSlice).toContain('Claude Code')
+  expect(fnSlice).toContain('codeagent')
+  expect(fnSlice).toContain('opencode')
+  expect(fnSlice).toContain('nga')
+  // 状态徽标 token（已安装 / 未安装）
+  expect(fnSlice).toContain('已安装')
+  expect(fnSlice).toContain('未安装')
+  // 实时安装状态探针
+  expect(fnSlice).toContain('getRuntimeStatus')
+  // 路径解析纯函数引用
+  expect(fnSlice).toContain('resolveClaudePath')
+  expect(fnSlice).toContain('resolveOpencodePath')
+  // 反向锁：旧双分组合并标题已拆，不应再独占
+  expect(fnSlice).not.toContain('Claude Code / codeagent')
+  expect(fnSlice).not.toContain('opencode / nga')
+  // 反向锁：旧扁平字段名已移除（per-slot 形状取代）
+  expect(fnSlice).not.toContain('claudeDir')
+  expect(fnSlice).not.toContain('opencodeDir')
 })
 
 test('RuntimeSettings section uses standard section convention', () => {
@@ -28,8 +55,8 @@ test('RuntimeSettings section uses standard section convention', () => {
   // 与 LlmSettings/JudgeSettings 同款 section + h3 结构
   const fnStart = src.indexOf('function RuntimeSettings()')
   expect(fnStart).toBeGreaterThan(-1)
-  // 双分组重构后函数体变大（两组 handler + 预览），窗口需覆盖到 return 的 <section>。
-  const fnSlice = src.slice(fnStart, fnStart + 5000)
+  // 四卡 + 状态徽标后函数体变大，窗口需覆盖到 return 的 <section>。
+  const fnSlice = src.slice(fnStart, fnStart + 8000)
   expect(fnSlice).toContain('<section')
   expect(fnSlice).toContain('<h3')
 })

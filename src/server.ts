@@ -74,6 +74,12 @@ export interface AppDeps {
    *  uninstall 不依赖源，daemon 无条件注入真实实现。测试注入 fake 不碰真实目录。 */
   installOpencodePluginFn?: (opts: { baseDir?: string }) => void
   uninstallOpencodePluginFn?: (opts: { baseDir?: string }) => { removed: number; pluginPath: string; dirRemoved: boolean }
+  /** 只读安装探针注入点（spec 2026-08-19-runtime-settings-four-slots §status）：
+   *  GET /api/settings/runtime/status 用它们实时探测磁盘安装状态。缺省走真实
+   *  install.ts 探针；测试注入 fake。缺省且探针返回 undefined 时 status 端点降级
+   *  installed:false 不抛。 */
+  isHooksInstalledFn?: (opts: { baseDir?: string; settingsFilename?: string }) => { installed: boolean; settingsPath: string }
+  isOpencodePluginInstalledFn?: (opts: { baseDir?: string }) => { installed: boolean; pluginPath: string; dirExists: boolean }
 }
 
 /** Portably resolve the user home directory. Mirrors resolveHome in
@@ -1091,19 +1097,29 @@ export function createApp(deps: AppDeps) {
     return c.json(loadJudgeConfig(deps.db))
   })
 
-  // --- 运行环境路径配置（spec 2026-08-17-runtime-path-config §3.6）-----------
-  // GET 回当前生效路径 + 默认对照；PUT 字段级保存（空串=回默认）；install/uninstall
-  // 读已存路径调 installHooks/uninstallHooks。install/uninstall 失败不静默，
-  // 返回 {ok:false,error} 让 UI 显横幅（CLAUDE.md 错误可见性）。
+  // --- 运行环境路径配置（spec 2026-08-19-runtime-settings-four-slots §3.3）---
+  // 四槽独立：claude / codeagent（hooks 型，dir+settingsFilename）/ opencode / nga
+  // （plugin 型，仅 dir）。GET 回 4 槽 + defaults；PUT per-slot 字段级 patch；
+  // GET /status 实时探测磁盘安装状态；install/uninstall target 扩到四值。
+  // 失败不静默，返回 {ok:false,error} 让 UI 显横幅（CLAUDE.md 错误可见性）。
+  // `~` 展开：UI 存 `~` 原样，端点调用前展开为 resolveHome（IF-1）。
+  const expandTildePath = (p: string) => p.startsWith('~') ? join(resolveHome(), p.slice(1)) : p
+  const HOOK_TARGETS = ['claude', 'codeagent'] as const
+  const PLUGIN_TARGETS = ['opencode', 'nga'] as const
+  type RuntimeTarget = typeof HOOK_TARGETS[number] | typeof PLUGIN_TARGETS[number]
+  const isKnownTarget = (t: string): t is RuntimeTarget =>
+    (HOOK_TARGETS as readonly string[]).includes(t) || (PLUGIN_TARGETS as readonly string[]).includes(t)
+
   app.get('/api/settings/runtime', (c) => {
     const rp = loadRuntimePaths(deps.db)
     return c.json({ ...rp, defaults: defaultRuntimePaths() })
   })
 
   const runtimePutSchema = z.object({
-    claudeDir: z.string().optional(),
-    settingsFilename: z.string().optional(),
-    opencodeDir: z.string().optional(),
+    claude: z.object({ dir: z.string().optional(), settingsFilename: z.string().optional() }).optional(),
+    codeagent: z.object({ dir: z.string().optional(), settingsFilename: z.string().optional() }).optional(),
+    opencode: z.object({ dir: z.string().optional() }).optional(),
+    nga: z.object({ dir: z.string().optional() }).optional(),
   })
   app.put('/api/settings/runtime', async (c) => {
     const parsed = runtimePutSchema.safeParse(await c.req.json().catch(() => ({})))
@@ -1113,29 +1129,54 @@ export function createApp(deps: AppDeps) {
     return c.json({ ...rp, defaults: defaultRuntimePaths() })
   })
 
+  // 实时探测磁盘安装状态（spec 2026-08-19 §status）。探针注入点缺省（undefined）
+  // 时降级 installed:false + 推断路径（不调真实探针、不抛、不触盘），保证测试确定
+  // 性且不碰真实 ~/.claude。daemon 注入真实探针后才会真实探测磁盘。
+  app.get('/api/settings/runtime/status', (c) => {
+    const rp = loadRuntimePaths(deps.db)
+    const probeHooks = (dir: string, fn: string) => {
+      const baseDir = expandTildePath(dir)
+      if (deps.isHooksInstalledFn) {
+        const r = deps.isHooksInstalledFn({ baseDir, settingsFilename: fn })
+        return { installed: r.installed, path: r.settingsPath }
+      }
+      return { installed: false, path: join(baseDir, fn).replace(/\\/g, '/') }
+    }
+    const probePlugin = (dir: string) => {
+      const baseDir = expandTildePath(dir)
+      if (deps.isOpencodePluginInstalledFn) {
+        const r = deps.isOpencodePluginInstalledFn({ baseDir })
+        return { installed: r.installed, path: r.pluginPath }
+      }
+      return { installed: false, path: join(baseDir, 'opencode.json').replace(/\\/g, '/') }
+    }
+    return c.json({
+      claude: probeHooks(rp.claude.dir, rp.claude.settingsFilename),
+      codeagent: probeHooks(rp.codeagent.dir, rp.codeagent.settingsFilename),
+      opencode: probePlugin(rp.opencode.dir),
+      nga: probePlugin(rp.nga.dir),
+    })
+  })
+
   app.post('/api/settings/runtime/install', (c) => {
-    const target = (c.req.query('target') ?? 'claude') as 'claude' | 'opencode'
-    if (target !== 'claude' && target !== 'opencode') {
+    const target = c.req.query('target') ?? 'claude'
+    if (!isKnownTarget(target)) {
       return c.json({ error: `invalid target: ${target}` }, 400)
     }
     const rp = loadRuntimePaths(deps.db)
-    if (target === 'claude') {
-      // ~ 展开：claudeDir 若以 ~ 开头走 resolveHome（spec §6.3）；绝对路径原样用。
-      const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
-      try {
-        doInstall({ port, baseDir, settingsFilename: rp.settingsFilename })
-        const settingsPath = join(baseDir, rp.settingsFilename)
-        return c.json({ ok: true, settingsPath })
-      } catch (e) {
-        return c.json({ ok: false, error: (e as Error).message })
-      }
-    }
-    // target === 'opencode'
-    if (!doInstallOpencode) {
-      return c.json({ ok: false, error: 'opencode 插件源在本启动模式下不可用（仅 dev/exe 启动支持），请用命令行安装' })
-    }
-    const baseDir = rp.opencodeDir.startsWith('~') ? join(resolveHome(), rp.opencodeDir.slice(1)) : rp.opencodeDir
     try {
+      if (target === 'claude' || target === 'codeagent') {
+        const slot = target === 'claude' ? rp.claude : rp.codeagent
+        const baseDir = expandTildePath(slot.dir)
+        doInstall({ port, baseDir, settingsFilename: slot.settingsFilename })
+        return c.json({ ok: true, settingsPath: join(baseDir, slot.settingsFilename) })
+      }
+      // opencode / nga（plugin 型）
+      if (!doInstallOpencode) {
+        return c.json({ ok: false, error: 'opencode 插件源在本启动模式下不可用（仅 dev/exe 启动支持），请用命令行安装' })
+      }
+      const slot = target === 'opencode' ? rp.opencode : rp.nga
+      const baseDir = expandTildePath(slot.dir)
       doInstallOpencode({ baseDir })
       return c.json({ ok: true, pluginPath: join(baseDir, 'memside-opencode') })
     } catch (e) {
@@ -1144,26 +1185,24 @@ export function createApp(deps: AppDeps) {
   })
 
   app.post('/api/settings/runtime/uninstall', (c) => {
-    const target = (c.req.query('target') ?? 'claude') as 'claude' | 'opencode'
-    if (target !== 'claude' && target !== 'opencode') {
+    const target = c.req.query('target') ?? 'claude'
+    if (!isKnownTarget(target)) {
       return c.json({ error: `invalid target: ${target}` }, 400)
     }
     const rp = loadRuntimePaths(deps.db)
-    if (target === 'claude') {
-      const baseDir = rp.claudeDir.startsWith('~') ? join(resolveHome(), rp.claudeDir.slice(1)) : rp.claudeDir
-      try {
-        const r = doUninstall({ baseDir, settingsFilename: rp.settingsFilename })
-        return c.json({ ok: true, removed: r.removed, settingsPath: r.settingsPath })
-      } catch (e) {
-        return c.json({ ok: false, error: (e as Error).message })
-      }
-    }
-    // target === 'opencode'
-    if (!doUninstallOpencode) {
-      return c.json({ ok: false, error: 'opencode 卸载在本启动模式下不可用' })
-    }
-    const baseDir = rp.opencodeDir.startsWith('~') ? join(resolveHome(), rp.opencodeDir.slice(1)) : rp.opencodeDir
     try {
+      if (target === 'claude' || target === 'codeagent') {
+        const slot = target === 'claude' ? rp.claude : rp.codeagent
+        const baseDir = expandTildePath(slot.dir)
+        const r = doUninstall({ baseDir, settingsFilename: slot.settingsFilename })
+        return c.json({ ok: true, removed: r.removed, settingsPath: r.settingsPath })
+      }
+      // opencode / nga
+      if (!doUninstallOpencode) {
+        return c.json({ ok: false, error: 'opencode 卸载在本启动模式下不可用' })
+      }
+      const slot = target === 'opencode' ? rp.opencode : rp.nga
+      const baseDir = expandTildePath(slot.dir)
       const r = doUninstallOpencode({ baseDir })
       return c.json({ ok: true, removed: r.removed, pluginPath: r.pluginPath, dirRemoved: r.dirRemoved })
     } catch (e) {

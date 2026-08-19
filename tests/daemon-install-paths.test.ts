@@ -50,9 +50,10 @@ test('startDaemon installs hooks to default ~/.claude/settings.json when no conf
 })
 
 test('startDaemon installs hooks to configured ~/.cac/setting.json', async () => {
-  // 先存配置（codeagent 路径）
+  // 先存配置（claude 槽指向自定义路径 ~/.cac/setting.json——用户把 claude hooks
+  // 重定向到 .cac。四槽后 daemon 启动只装 claude 槽，故把自定义路径配在 claude 槽）。
   const db = openDb(dbPath)
-  saveRuntimePaths(db, { claudeDir: join(fakeHome, '.cac'), settingsFilename: 'setting.json' })
+  saveRuntimePaths(db, { claude: { dir: join(fakeHome, '.cac'), settingsFilename: 'setting.json' } })
   db.$client.close()
 
   const { server } = await startDaemon({ dbPath, port: 17802, installClaudeHooks: true })
@@ -71,14 +72,16 @@ test('startDaemon without installClaudeHooks does not write settings', async () 
   } finally { server.stop() }
 })
 
-// 回归防护：IF-1 —— 用户在 UI 配 ~/.cac（~ 前缀）后，daemon 重启读 loadRuntimePaths
-// 必须把 ~ 展开为真实 HOME 再透传 installHooks。未展开会让 mkdirSync 建字面 `~`
-// 目录、hooks 落到 ./~/.cac/setting.json，codeagent 读不到，闭环静默断。
+// 回归防护：IF-1 —— 用户在 UI 配 claude 槽为 ~/.cac（~ 前缀）后，daemon 重启读
+// loadRuntimePaths 必须把 ~ 展开为真实 HOME 再透传 installHooks。未展开会让
+// mkdirSync 建字面 `~` 目录、hooks 落到 ./~/.cac/setting.json，agent 读不到，闭环静默断。
 // fakeHome 即 beforeEach 设的 process.env.HOME，~ 展开应指向它。
+// （四槽后 daemon 启动只装 claude 槽，故 ~ 展开回归用 claude 槽验证；codeagent 槽
+// 的 ~ 展开由 §3.6 ?target=codeagent install 端点覆盖，不在 daemon 启动路径。）
 test('startDaemon expands ~ in configured claudeDir instead of creating a literal ~ dir (IF-1)', async () => {
-  // 预存 ~ 前缀路径（codeagent 用户在 UI 配 ~/.cac）
+  // 预存 ~ 前缀路径（claude 槽指向 ~/.cac）
   const db = openDb(dbPath)
-  saveRuntimePaths(db, { claudeDir: '~/.cac', settingsFilename: 'setting.json' })
+  saveRuntimePaths(db, { claude: { dir: '~/.cac', settingsFilename: 'setting.json' } })
   db.$client.close()
 
   const { server } = await startDaemon({ dbPath, port: 17804, installClaudeHooks: true })
@@ -97,7 +100,7 @@ test('startDaemon expands ~ in configured claudeDir instead of creating a litera
 // 无 source → install 返回 ok:false 不可用，但 uninstall 恒可用（不依赖 source）。
 test('startDaemon with opencodePluginSource.srcDir → createApp 收到能装的 installOpencodePluginFn', async () => {
   const db = openDb(dbPath)
-  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode') })
+  saveRuntimePaths(db, { opencode: { dir: join(fakeHome, 'opencode') } })
   db.$client.close()
 
   const { server } = await startDaemon({
@@ -116,7 +119,7 @@ test('startDaemon with opencodePluginSource.srcDir → createApp 收到能装的
 
 test('startDaemon with opencodePluginSource.files → install 用 files 模式', async () => {
   const db = openDb(dbPath)
-  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode2') })
+  saveRuntimePaths(db, { opencode: { dir: join(fakeHome, 'opencode2') } })
   db.$client.close()
 
   const { server } = await startDaemon({
@@ -134,7 +137,7 @@ test('startDaemon with opencodePluginSource.files → install 用 files 模式',
 
 test('startDaemon without opencodePluginSource → install?target=opencode 返回 ok:false 不可用', async () => {
   const db = openDb(dbPath)
-  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode3') })
+  saveRuntimePaths(db, { opencode: { dir: join(fakeHome, 'opencode3') } })
   db.$client.close()
 
   const { server } = await startDaemon({ dbPath, port: 17812 })
@@ -148,7 +151,7 @@ test('startDaemon without opencodePluginSource → install?target=opencode 返�
 
 test('startDaemon always provides uninstallOpencodePluginFn (even without source)', async () => {
   const db = openDb(dbPath)
-  saveRuntimePaths(db, { opencodeDir: join(fakeHome, 'opencode4') })
+  saveRuntimePaths(db, { opencode: { dir: join(fakeHome, 'opencode4') } })
   db.$client.close()
 
   const { server } = await startDaemon({ dbPath, port: 17813 }) // 不传 source
@@ -157,5 +160,45 @@ test('startDaemon always provides uninstallOpencodePluginFn (even without source
     const body = await res.json()
     expect(body.ok).toBe(true) // uninstall 不依赖 source，恒可用
     expect(body.removed).toBe(0)
+  } finally { server.stop() }
+})
+
+// spec 2026-08-19-runtime-settings-four-slots §status：Task 4 让 daemon 把真实探针
+// （isHooksInstalled / isOpencodePluginInstalled）注入 createApp。生产 daemon 的
+// GET /api/settings/runtime/status 应读真实磁盘——装了 hooks 的槽 installed:true，
+// 没装的槽 installed:false。这是「探针已接通」的间接断言：缺省 fallback 会恒返回
+// installed:false，只有真实探针才能在装好后读到 true。
+test('GET /api/settings/runtime/status reports installed:true after installClaudeHooks (real probe wired)', async () => {
+  // installClaudeHooks:true 让 daemon 启动时把 hooks 写进 claude 槽的 settings.json
+  // （默认 ~/.claude/settings.json）。真实探针应读到 installed:true。
+  // spec §5「零回归」：daemon 启动时只装 claude 槽，不自动装 codeagent 槽
+  // （codeagent 装走 §3.6 ?target=codeagent 端点 / UI 按钮）。故 codeagent.installed
+  // 应为 false。opencode/nga 槽没装插件 -> installed:false。
+  const { server } = await startDaemon({ dbPath, port: 17820, installClaudeHooks: true })
+  try {
+    const res = await fetch(`http://127.0.0.1:17820/api/settings/runtime/status`)
+    const body = await res.json()
+    // claude 槽：daemon 启动时 installHooks 写了 ~/.claude/settings.json，真实探针读到。
+    expect(body.claude.installed).toBe(true)
+    expect(body.claude.path).toContain('settings.json')
+    // codeagent 槽：daemon 启动时不自动装（spec §5），真实探针读空盘 -> false。
+    expect(body.codeagent.installed).toBe(false)
+    // opencode/nga 槽：未装插件，真实探针应 false。
+    expect(body.opencode.installed).toBe(false)
+    expect(body.nga.installed).toBe(false)
+  } finally { server.stop() }
+})
+
+test('GET /api/settings/runtime/status reports installed:false for all slots when nothing installed', async () => {
+  // 不传 installClaudeHooks -> daemon 不写任何 settings.json。真实探针读空盘 -> 全 false。
+  // 与上一测试互证：真实探针在「装了」时返回 true、在「没装」时返回 false。
+  const { server } = await startDaemon({ dbPath, port: 17821 })
+  try {
+    const res = await fetch(`http://127.0.0.1:17821/api/settings/runtime/status`)
+    const body = await res.json()
+    expect(body.claude.installed).toBe(false)
+    expect(body.codeagent.installed).toBe(false)
+    expect(body.opencode.installed).toBe(false)
+    expect(body.nga.installed).toBe(false)
   } finally { server.stop() }
 })
