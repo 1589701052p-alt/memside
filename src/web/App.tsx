@@ -626,8 +626,10 @@ export default function App() {
                   fontSize: 12,
                   // 警示着色（spec 2026-08-14 §3.4）：未读 LLM 报错 -> 红色加粗；
                   // 无 LLM 报错但有未读降级 -> 琥珀色；都无保持默认。
+                  // hook_missing 同琥珀色（spec 2026-08-19 显眼化 §3.4）：未装 hook 提醒同等醒目。
                   color: (status.unreadLlmErrors ?? 0) > 0 ? '#c00'
-                    : (status.unreadDegradations ?? 0) > 0 ? '#b26a00' : undefined,
+                    : (status.unreadDegradations ?? 0) > 0 ? '#b26a00'
+                    : (status.unreadHookMissing ?? 0) > 0 ? '#b26a00' : undefined,
                   fontWeight: (status.unreadLlmErrors ?? 0) > 0 ? 700 : undefined,
                 }}
                 onClick={() => setTab('messages')}
@@ -698,6 +700,30 @@ export default function App() {
                 }}
               >
                 ⚠️ 降级 ×{status.unreadDegradations} → 点击查看
+              </button>
+            ) : null}
+            {/* hook_missing 警示条（spec 2026-08-19 显眼化 §3.5）：运行环境未装 hook
+                时提醒用户记忆捕获将失效，整条可点跳设置 tab 装 hook。字段 optional
+                （老 daemon 无），?? 0 兜底；未读清零后条件渲染自动消失。琥珀色与降级
+                条区分（浅底 #fff3e0），跳 settings 而非 messages（修复动作在设置 tab）。 */}
+            {(status.unreadHookMissing ?? 0) > 0 ? (
+              <button
+                onClick={() => setTab('settings')}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  marginTop: 4,
+                  padding: '6px 12px',
+                  background: '#fff3e0',
+                  color: '#b26a00',
+                  border: '1px solid #ffb300',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                  fontSize: 13,
+                  textAlign: 'left',
+                }}
+              >
+                ⚠️ 运行环境未安装 hook——记忆捕获将不生效，去「设置」装一个 agent 的 hook
               </button>
             ) : null}
           </>

@@ -118,6 +118,10 @@ export interface MemsideStatus {
   unreadLlmErrors?: number
   /** 未读 degradation 计数（警示条）；老 daemon 无此字段。 */
   unreadDegradations?: number
+  /** 未读 hook_missing 计数（🔔 角标琥珀 + 顶部警示条跳设置）；老 daemon 无此字段（spec 2026-08-19 显眼化 §3.3）。 */
+  unreadHookMissing?: number
+  /** 最新一条未读 hook_missing（警示条「最近：xxx」）；无则 null；老 daemon 无此字段。 */
+  latestUnreadHookMissing?: { body: string | null; ts: number } | null
   /** 最新一条未读 llm_error（警示条「最近：xxx」）；无则 null；老 daemon 无此字段。 */
   latestUnreadLlmError?: { body: string | null; ts: number } | null
   /** 回收站条目数（spec 2026-08-16 回收站 tab 徽标）；老 daemon 无此字段。 */
