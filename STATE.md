@@ -1,5 +1,43 @@
 # STATE.md - memside 构建状态
 
+## 蒸馏输入膨胀根治：剔除 thinking turn（2026-08-19，数据驱动）
+
+用户反馈「喂 AI 的输入文本太大，Bash 脚本显示过多无用」。先做数据驱动根因分析再动手——**推翻用户假设**：Bash 不是主因。
+
+### 诊断（live DB 1.1 GB / 1,222 条真实蒸馏记录，报告 `distill-input-analysis.html`）
+
+| 指标 | 值 |
+|---|---|
+| Bash 占全部输入字符 | 13.6%（天花板输入里仅 2.2%） |
+| Bash 输出中位数 | 695 字（cap 3000，没顶到） |
+| **thinking 占全部输入** | **50.8%** |
+| **thinking 在撞 256KB 天花板的输入里占** | **86.8%** |
+| 529 条记忆 evidence 溯源到 thinking 块 | **0 条** |
+
+**结论**：Bash 短、占小头、几乎不喂记忆（evidence 命中 6.8% 多为命令文本而非输出）；thinking 是高体积（50.8% / 天花板 86.8%）、**零实证产出**（0 evidence 溯源）的角色。预算裁剪按 turnPriority 丢 tool(p3)→assistant/thinking(p2)，把 tool/assistant 真实信号丢光却把零产出的 thinking 留成主体——方向反了。
+
+### 改动（PR #87，分支 worktree-distill-input-budget-reduce）
+
+1. **`pure.ts` `DROP_THINKING_TURNS=true` 常量 + filter 剔除**：`filterTranscriptForDistill` 在 `stripNoiseTurns` 后、compact 前剔除 thinking turn。常量开关保留可恢复性（flip=false 即逐字节回旧行为，供未来 A/B 验证）。
+2. **`contextDigest.ts` 同步剔除**：digest 路径（`buildDeterministicDigest`/`updateSessionLedger`）吃原始 turns 不经 filter，需单独处理——`renderDigestLines` 复用 `DROP_THINKING_TURNS` 跳过 thinking，前文背景也不再喂 thinking 给 LLM。
+3. **`distiller.ts` prompt 清理**：移除 `DISTILLER_SYSTEM_PROMPT` 里指向已不存在内容的 `[thinking]` 说明段。
+4. **threshold 连带**：`computeSliceSignal` 复用 filter 管线，thinking 不再计入放行信号量——纯 thinking 会话不该因 thinking 体积「够量」放行（零产出触发 distill 浪费 LLM 调用）；也不再抵消琐碎判定。
+
+### 边界
+
+- `detectErrorSignals` 跑在 filter 前（既有不变量），不受影响。
+- capture 层（`parseTranscriptFile`/`parseOpencodeMessages`）零改动——thinking 仍捕获入 transcript，仅 distill 消费侧剔除。
+- 零 schema 迁移、零新依赖。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. 撞 256KB 天花板输入数（>250KB）对比 PR #87 前后——预期 123 条大幅下降（thinking 86.8% 去除）。
+2. empty_output 24h 计数对比——预期下降（天花板输入 empty 占比高）。
+3. produced 候选数 / 质量对比——验证剔除 thinking 不损产出（数据预测 0 损失，因 0 evidence 溯源 thinking）。
+4. 若 produced 异常下降，flip `DROP_THINKING_TURNS=false` 即回退排查。
+
+执行：brainstorming → 数据分析（ad-hoc 脚本，未入库）→ bounded 实现（TDD）。`bun run typecheck && bun test` 1255 pass / 0 fail / 6 skip（基线 1252 → +3 净：剔除旧 thinking 测试改写 + 新增可恢复性/detectErrorSignals 守卫）。
+
 ## LLM 失败处理重构：4 步断点续跑 agent 会话执行器（2026-08-18）
 
 把 memside 与 LLM 的关系从「一次性大请求、失败即丢」重构为「带历史、可中断、可接续的多轮 agent 对话」——任何 LLM 调用失败都不再被当正常业务结果静默吞掉，而是有记忆地重试接续，失败全程可见，内容绝不丢失。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-18-llm-failure-handling*`。根因：内测 distill 阶段连续 360s 网关掐断（aborted），旧代码「失败也标 done + 推 offset + 候选全部未评估」→ 内容永久跳过、judge 全保留冒充成功。
