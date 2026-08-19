@@ -792,6 +792,7 @@ export default function App() {
               <option value="degradation">降级</option>
               <option value="llm_error">LLM错误</option>
               <option value="parse_error">解析失败</option>
+              <option value="hook_missing">未安装hook</option>
             </select>
             <label style={{ fontSize: 13 }}>
               <input
@@ -815,7 +816,7 @@ export default function App() {
           {msgs.items.map((n) => {
             const unread = n.readAt === null
             const expanded = expandedId === n.id
-            const chipColor = n.kind === 'degradation' ? '#e65100' : '#c00'
+            const chipColor = n.kind === 'degradation' || n.kind === 'hook_missing' ? '#e65100' : '#c00'
             const time = new Date(n.ts)
             const timeLabel = `${time.getMonth() + 1}/${time.getDate()} ${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`
             return (
@@ -830,7 +831,7 @@ export default function App() {
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}>
                   {unread ? <span style={{ color: '#e65100' }}>●</span> : <span style={{ color: '#ccc' }}>○</span>}
                   <span style={{ ...CHIP_STYLE, color: chipColor, borderColor: chipColor }}>
-                    {n.kind === 'llm_error' ? 'LLM错误' : n.kind === 'parse_error' ? '解析失败' : '降级'}
+                    {n.kind === 'llm_error' ? 'LLM错误' : n.kind === 'parse_error' ? '解析失败' : n.kind === 'hook_missing' ? '未安装hook' : '降级'}
                   </span>
                   <b>{notificationTitle(n)}</b>
                   <span style={{ marginLeft: 'auto', color: '#999', fontSize: 12 }}>{timeLabel}</span>
