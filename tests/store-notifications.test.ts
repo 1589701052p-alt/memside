@@ -1,14 +1,15 @@
-import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
+import { test, describe, it, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { sql } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import {
   insertNotification, logLlmErrorNotification, logParseErrorNotification, listNotificationsPage,
-  markNotificationRead, markAllNotificationsRead, updateDistillRunDigestMs,
+  markNotificationRead, markAllNotificationsRead, markNotificationsReadByKind,
+  updateDistillRunDigestMs,
   logDegradation, saveDistillRun, getDistillRun,
   NotificationNotFoundError, InvalidNotificationFilterError,
-  NOTIFICATION_RETENTION_CAP,
+  NOTIFICATION_RETENTION_CAP, NOTIFICATION_KINDS,
   type PageCursor,
 } from '@/memory/store'
 
@@ -252,4 +253,61 @@ test('logParseErrorNotification: 落库 kind=parse_error + refId=jobId', async (
   expect(page.items.length).toBe(1)
   expect(page.items[0]!.kind).toBe('parse_error')
   expect(page.items[0]!.refId).toBe('J1')
+})
+
+// ---------------------------------------------------------------------------
+// hook_missing kind + 折叠 + markNotificationsReadByKind（spec 2026-08-19 §3.1-3.3）
+// ---------------------------------------------------------------------------
+
+describe('hook_missing kind + 折叠 + markNotificationsReadByKind', () => {
+  it('NOTIFICATION_KINDS 含 hook_missing', () => {
+    expect((NOTIFICATION_KINDS as readonly string[]).includes('hook_missing')).toBe(true)
+  })
+
+  it('hook_missing 折叠：连插两次同 title 未读只留一条', async () => {
+    const id1 = await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook', body: 'b1' })
+    const id2 = await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook', body: 'b2' })
+    expect(id1).toBe(id2)  // 折叠：返回原 id，不新插
+    const page = await listNotificationsPage(db, { kind: 'hook_missing' })
+    expect(page.items.length).toBe(1)
+  })
+
+  it('已读的 hook_missing 不折叠（新事件新插）', async () => {
+    const id1 = await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook' })
+    await markAllNotificationsRead(db)
+    const id2 = await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook' })
+    expect(id1).not.toBe(id2)  // 旧已读，折叠查不到未读 → 新插
+    const page = await listNotificationsPage(db, { kind: 'hook_missing' })
+    expect(page.items.length).toBe(2)
+  })
+
+  it('degradation 折叠仍生效（回归锁：修复 foldConds 不破坏既有）', async () => {
+    const id1 = await insertNotification(db, { kind: 'degradation', title: '降级了' })
+    const id2 = await insertNotification(db, { kind: 'degradation', title: '降级了' })
+    expect(id1).toBe(id2)
+    const page = await listNotificationsPage(db, { kind: 'degradation' })
+    expect(page.items.length).toBe(1)
+  })
+
+  it('markNotificationsReadByKind 只标指定 kind 未读', async () => {
+    await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook' })
+    await insertNotification(db, { kind: 'hook_missing', title: '运行环境未安装 hook' }) // 折叠→仍 1 条
+    await insertNotification(db, { kind: 'degradation', title: '降级了' })
+    const n = await markNotificationsReadByKind(db, 'hook_missing')
+    expect(n).toBe(1)  // 1 条未读 hook_missing 被标
+    const hm = await listNotificationsPage(db, { kind: 'hook_missing', unreadOnly: true })
+    const dg = await listNotificationsPage(db, { kind: 'degradation', unreadOnly: true })
+    expect(hm.items.length).toBe(0)
+    expect(dg.items.length).toBe(1)  // degradation 仍未读，不受影响
+  })
+
+  it('markNotificationsReadByKind 无未读该 kind 返回 0 不抛', async () => {
+    await insertNotification(db, { kind: 'degradation', title: '降级了' })
+    const n = await markNotificationsReadByKind(db, 'hook_missing')
+    expect(n).toBe(0)
+  })
+
+  it('listNotificationsPage kind=hook_missing 不抛 InvalidNotificationFilterError', async () => {
+    await expect(listNotificationsPage(db, { kind: 'hook_missing' })).resolves.toBeDefined()
+  })
 })
