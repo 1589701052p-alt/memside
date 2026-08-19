@@ -88,3 +88,16 @@ test('LlmSettings 「清除」不删后端，「删除已保存」承担 clear:t
   expect(fnSlice).toContain('清除输入')
   expect(fnSlice).toContain('删除已保存')
 })
+
+// spec 2026-08-19-hook-missing-notification §7.3
+// daemon 层「四槽全空提醒」兜底面（CLAUDE.md 最低要求）：startDaemon 挂载周期检查
+// （启动立即一次 + 每 5min 复探）。daemon.ts 难在 bun test 直接覆盖 startDaemon
+// 全路径，靠源码层文本断言锁 checkHooksAndNotify 导出 + setInterval + unref 接线存在。
+test('daemon.ts 挂载 HOOK_CHECK_INTERVAL_MS + setInterval + checkHooksAndNotify + unref?.()', () => {
+  const daemonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.ts')
+  const src = readFileSync(daemonPath, 'utf-8')
+  expect(src).toContain('HOOK_CHECK_INTERVAL_MS')
+  expect(src).toContain('setInterval')
+  expect(src).toContain('checkHooksAndNotify')
+  expect(src).toMatch(/unref\?\.\(\)/)
+})
