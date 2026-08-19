@@ -246,12 +246,6 @@ export async function startDaemon(opts: DaemonOpts = {}) {
   })
   const server = Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch })
 
-  // 四槽全空提醒（spec 2026-08-19 §3.5）：启动立即一次 + 每 5min 周期复探。
-  // 与 installClaudeHooks 无依赖（spec §5「零回归」），二者前后均可。
-  void checkHooksAndNotify(db)
-  const hookCheckTimer = setInterval(() => { void checkHooksAndNotify(db) }, HOOK_CHECK_INTERVAL_MS)
-  hookCheckTimer.unref?.()
-
   const tickDeps: TickDeps = {
     loadTranscript: makeLoadTranscript(db),
     tracker,
@@ -272,6 +266,14 @@ export async function startDaemon(opts: DaemonOpts = {}) {
     try { rp = loadRuntimePaths(db) } catch { rp = defaultRuntimePaths() }
     installHooks({ port, baseDir: rp.claude.dir, settingsFilename: rp.claude.settingsFilename })
   }
+
+  // 四槽全空提醒（spec 2026-08-19 §3.5）：启动立即一次 + 每 5min 周期复探。
+  // I1 修复（final review 2026-08-19）：探测必须排在 installClaudeHooks 块之后——
+  // 否则 exe 首启 opts.installClaudeHooks:true 时探针先于装 hook 跑，四槽必然全空
+  // → 写一条假阳性「未安装 hook」提醒（实际 memside 马上装好）。装完再探，语义不变。
+  void checkHooksAndNotify(db)
+  const hookCheckTimer = setInterval(() => { void checkHooksAndNotify(db) }, HOOK_CHECK_INTERVAL_MS)
+  hookCheckTimer.unref?.()
 
   return {
     server,

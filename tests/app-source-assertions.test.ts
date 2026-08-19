@@ -102,6 +102,21 @@ test('daemon.ts 挂载 HOOK_CHECK_INTERVAL_MS + setInterval + checkHooksAndNotif
   expect(src).toMatch(/unref\?\.\(\)/)
 })
 
+// I1 回归锁（final review 2026-08-19）：startDaemon 中「启动探测」必须在
+// installClaudeHooks（installHooks）块之后执行——否则 exe 首启 opts.installClaudeHooks:true
+// 时探针先于装 hook 跑，四槽必然全空 → 写一条假阳性「未安装 hook」提醒（实际马上装好）。
+// 锁定源码顺序：installHooks 调用的行号 < void checkHooksAndNotify 调用的行号。
+test('daemon.ts: checkHooksAndNotify 调用在 installHooks 之后（I1：探测顺序）', () => {
+  const daemonPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'daemon.ts')
+  const src = readFileSync(daemonPath, 'utf-8')
+  const installHooksIdx = src.indexOf('installHooks({')
+  const checkIdx = src.indexOf('void checkHooksAndNotify(db)')
+  expect(installHooksIdx).toBeGreaterThan(-1)
+  expect(checkIdx).toBeGreaterThan(-1)
+  // installHooks 在前，checkHooksAndNotify 在后（顺序锁）
+  expect(checkIdx).toBeGreaterThan(installHooksIdx)
+})
+
 // spec 2026-08-19-hook-missing-notification §7.4 / §3.7
 // 前端兜底面（CLAUDE.md 最低要求）：消息 tab 的 kind 下拉 + chip 需支持 hook_missing
 // 类型（琥珀 #e65100，warning 级非 error 红）。App.tsx 无法在 bun test 渲染，

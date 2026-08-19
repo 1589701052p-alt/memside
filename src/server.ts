@@ -11,7 +11,7 @@ import type { RuntimeAdapter } from '@/adapter/types'
 import type { MemoryStatus, TranscriptTurn } from '@/memory/pure'
 import { promoteCandidate, patchMemory, createCandidate, getMemoryById, getSourceInput, archiveMemory, unarchiveMemory, restoreMemory, promoteDiscard, listDiscards, getDistillRun, listRecentDistillRuns, listMemoriesPage, listDiscardsPage, listDistillRunsPage, listFacets, bulkRejectUnevaluated, PROTECTED_VALUE_CLASSES, MemoryNotFoundError, MemoryConflictError, type PageCursor, type MemoryListFilter, type FacetScope, bulkDeleteMemories, restoreFromTrash, emptyTrash, importMemories, listMemoriesForExport, listTrashPage, listTrashFacets, getTrash, type TrashRow, resetJobForRetry, abandonJob, listPendingReviewCandidates, promotePendingReviewToCandidate } from '@/memory/store'
 import { serializeMemoriesJson, parseMemoriesJson, serializeMemoriesMd, parseMemoriesMd, detectExchangeFormat, MEMSIDE_JSON_FORMAT, MEMSIDE_JSON_VERSION } from '@/memory/exchange'
-import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, setSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NotificationNotFoundError } from '@/memory/store'
+import { findWaitingJob, upsertSessionEvent, releaseWaitingJob, touchLastCapture, markFlush, logDegradation, getSessionOffset, setSessionOffset, listDegradationsForJob, listNotificationsPage, markNotificationRead, markAllNotificationsRead, NOTIFICATION_KINDS, type NotificationKind, NotificationNotFoundError } from '@/memory/store'
 import { computeSliceSignal, shouldRelease } from '@/memory/threshold'
 import { parseTranscriptFile, resolveSubagentTranscript } from '@/claude/transcript'
 import { parseOpencodeMessages } from '@/opencode/transcript'
@@ -641,12 +641,15 @@ export function createApp(deps: AppDeps) {
   // --- Notifications（消息中心，spec 2026-08-12 §5.8）------------------------
   app.get('/api/notifications', async (c) => {
     const kindParam = c.req.query('kind')
-    let kind: 'degradation' | 'llm_error' | 'parse_error' | undefined
+    let kind: NotificationKind | undefined
     if (kindParam !== undefined) {
-      if (kindParam !== 'degradation' && kindParam !== 'llm_error' && kindParam !== 'parse_error') {
+      // C1 修复（final review 2026-08-19）：kind 校验读 store 的 NOTIFICATION_KINDS
+      // 单一真源，不再维护独立硬编码白名单——store 加新 kind 后自动同步，根治
+      // 「前端筛 hook_missing 返 400 + 静默空列表」。与 listNotificationsPage:1305 同款校验。
+      if (!(NOTIFICATION_KINDS as readonly string[]).includes(kindParam)) {
         return c.json({ error: `invalid kind: ${kindParam}` }, 400)
       }
-      kind = kindParam
+      kind = kindParam as NotificationKind
     }
     const limitParam = c.req.query('limit')
     const page = await listNotificationsPage(deps.db, {

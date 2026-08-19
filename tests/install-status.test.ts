@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach } from 'bun:test'
+import { test, expect, describe, beforeEach, afterEach } from 'bun:test'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -119,6 +119,9 @@ describe('checkAllHooksInstalled 组合判定', () => {
       nga: { dir: tmpNgaDir },
     })
   })
+  // M2 修复（final review 2026-08-19）：beforeEach 每测 openDb 但无 close，
+  // Windows 留文件句柄。沿用 store-notifications.test.ts 既有模式每测后关库。
+  afterEach(() => { db.$client.close() })
 
   test('四槽全 false → allMissing:true', () => {
     const s = checkAllHooksInstalled(db, {
@@ -169,5 +172,29 @@ describe('checkAllHooksInstalled 组合判定', () => {
     expect(seenClaude!.baseDir).toBe(tmpClaudeDir)
     expect(seenClaude!.settingsFilename).toBe('settings.json')
     expect(seenCodeagent!.settingsFilename).toBe('setting.json')
+  })
+
+  // M1 补全（final review 2026-08-19，spec §7.2）：缺两个 case。
+  // 1) nga 已装（ocProbe 对 nga dir 返回 installed:true）其余未装 → allMissing:false、
+  //    details.nga===true。与 claude/opencode 已装 case 对称，锁 nga 槽归一逻辑。
+  test('nga 已装其余未装 → allMissing:false、details.nga===true', () => {
+    const s = checkAllHooksInstalled(db, {
+      hooksProbe: () => ({ installed: false, settingsPath: '' }),
+      opencodeProbe: (o) => ({ installed: o.baseDir === tmpNgaDir, pluginPath: '', dirExists: true }),
+    })
+    expect(s.allMissing).toBe(false)
+    expect(s.details.nga).toBe(true)
+    expect(s.details.opencode).toBe(false)
+    expect(s.details.claude).toBe(false)
+    expect(s.details.codeagent).toBe(false)
+  })
+
+  // M1 补全（spec §7.2）：2) 生产路径（不传 opts 探针）+ 四槽全 tmp 空目录 →
+  //    allMissing:true。验证真实探针（isHooksInstalled/isOpencodePluginInstalled）
+  //    + loadRuntimePaths 接线：真实探针读空 tmp 目录返回 installed:false。
+  test('生产路径（不传探针）四槽全 tmp 空目录 → allMissing:true', () => {
+    const s = checkAllHooksInstalled(db)
+    expect(s.allMissing).toBe(true)
+    expect(s.details).toEqual({ claude: false, codeagent: false, opencode: false, nga: false })
   })
 })
