@@ -41,19 +41,20 @@ describe('computeSliceSignal', () => {
     expect(s.turnCount).toBe(1)
     expect(s.chars).toBeLessThan(10_000)
   })
-  test('thinking 计入信号量：与 assistant 同等计数（锁放行门槛/琐碎下限的同等对待）', () => {
-    // 锁「thinking 与 assistant 同等对待」在攒量批处理阈值层的体现：
-    // computeSliceSignal 复用 filterTranscriptForDistill，thinking 字符同等计入
-    // 放行门槛（8000 chars）与琐碎下限（1000 chars）。
+  test('thinking 不计入信号量：thinking 被剔除，不触发放行也不抵消琐碎判定', () => {
+    // 2026-08-19 数据驱动决策：thinking 占输入 50.8% 但 0 evidence 产出，
+    // filterTranscriptForDistill 剔除 thinking（DROP_THINKING_TURNS）。computeSliceSignal
+    // 复用过滤管线，故 thinking 字符不再计入信号量——纯 thinking 会话不该因 thinking
+    // 体积而「够量」放行（thinking 喂 LLM 是零产出，触发 distill 是浪费 LLM 调用）。
     const mixed = computeSliceSignal(
       [t('assistant', 'a'.repeat(100)), t('thinking', 'k'.repeat(150))], 0)
-    expect(mixed).toEqual({ chars: 250, turnCount: 2 })
-    // 纯 thinking 达到放行门槛即放行（与纯 assistant 行为一致）
-    const thinkingRelease = computeSliceSignal([t('thinking', 'k'.repeat(DISTILL_RELEASE_MIN_CHARS))], 0)
-    expect(thinkingRelease.chars).toBe(DISTILL_RELEASE_MIN_CHARS)
-    expect(shouldRelease(thinkingRelease)).toBe(true)
-    // 纯 thinking 达到琐碎下限即不判 skipped_trivial
-    expect(isTrivial(computeSliceSignal([t('thinking', 'k'.repeat(DISTILL_TRIVIAL_FLOOR_CHARS))], 0))).toBe(false)
+    expect(mixed).toEqual({ chars: 100, turnCount: 1 })
+    // 纯 thinking 即使体积巨大也不放行（thinking 不算 distill 输入信号）
+    const thinkingOnly = computeSliceSignal([t('thinking', 'k'.repeat(DISTILL_RELEASE_MIN_CHARS))], 0)
+    expect(thinkingOnly).toEqual({ chars: 0, turnCount: 0 })
+    expect(shouldRelease(thinkingOnly)).toBe(false)
+    // 纯 thinking 判琐碎（不抵消 trivial floor）
+    expect(isTrivial(computeSliceSignal([t('thinking', 'k'.repeat(DISTILL_TRIVIAL_FLOOR_CHARS))], 0))).toBe(true)
   })
 })
 

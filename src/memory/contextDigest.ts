@@ -1,6 +1,6 @@
 // src/memory/contextDigest.ts
 
-import type { TranscriptTurn } from './pure'
+import { DROP_THINKING_TURNS, type TranscriptTurn } from './pure'
 
 export const DIGEST_MAX_CHARS = 6000
 export const DIGEST_LINE_MAX_CHARS = 300
@@ -20,7 +20,12 @@ export function renderDigestLines(turns: readonly TranscriptTurn[]): string[] {
   for (const t of turns) {
     if (t.role === 'user') lines.push(`USER: ${squash(t.content).slice(0, DIGEST_LINE_MAX_CHARS)}`)
     else if (t.role === 'assistant') lines.push(`ASSISTANT: ${squash(t.content).slice(0, DIGEST_LINE_MAX_CHARS)}`)
-    else if (t.role === 'thinking') lines.push(`THINKING: ${squash(t.content).slice(0, DIGEST_LINE_MAX_CHARS)}`)
+    else if (t.role === 'thinking') {
+      // 2026-08-19 数据驱动决策：thinking 零 evidence 产出（529 条记忆 0 条溯源），
+      // 与 filterTranscriptForDistill 同步剔除——digest 前文背景也不再喂 thinking 给 LLM。
+      // 复用 DROP_THINKING_TURNS 开关，flip 时 distill 输入 + digest 双向恢复。
+      if (!DROP_THINKING_TURNS) lines.push(`THINKING: ${squash(t.content).slice(0, DIGEST_LINE_MAX_CHARS)}`)
+    }
     else if (t.role === 'tool') {
       const name = t.toolName ?? 'unknown'
       if (t.toolCall) {

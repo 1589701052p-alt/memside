@@ -494,9 +494,13 @@ test('distillTranscript subagent 也覆盖 user-confirmed（不只 stated）', a
   expect(result.candidates[0]!.origin).toBe('agent-observed')
 })
 
-// --- thinking 捕获 + 工具名渲染（spec 2026-08-09 §4.2/§4.3/§4.4）---
+// --- 工具名渲染（spec 2026-08-09 §4.3/§4.4）---
+// 注：thinking 捕获（spec 2026-08-09 §4.2）已由 2026-08-19 数据驱动决策推翻——
+// filterTranscriptForDistill 剔除 thinking turn（DROP_THINKING_TURNS=true），thinking
+// 不再抵达渲染层。故本测试不再断言 [thinking] 标签；下方验证经 distillTranscript
+// 路径 thinking 确被剔除。
 
-test('renderUserPrompt: thinking -> [thinking] 标签；tool 带 toolName -> [tool:Read]；无名兜底 [tool]', async () => {
+test('renderUserPrompt: tool 带 toolName -> [tool:Read]；无名兜底 [tool]；thinking 不抵达', async () => {
   let captured = ''
   await distillTranscript({
     turns: [
@@ -513,17 +517,19 @@ test('renderUserPrompt: thinking -> [thinking] 标签；tool 带 toolName -> [to
       return JSON.stringify({ candidates: [] })
     },
   })
-  expect(captured).toContain('[thinking] why this design')
+  // thinking 经 filterTranscriptForDistill 剔除，不抵达 distiller 输入
+  expect(captured).not.toContain('[thinking]')
+  expect(captured).not.toContain('why this design')
   expect(captured).toContain('[tool:Bash] some bash output')
   // 文件类工具结果压占位（既有三档压缩不动），标签包在占位外
   expect(captured).toContain('[tool:Read] [file: /a.ts, 原文 1 行]')
   expect(captured).toContain('[tool] legacy output')
 })
 
-test('DISTILLER_SYSTEM_PROMPT 含 [thinking] 说明段（spec §4.4）', () => {
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('[thinking]')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('内部推理')
-  expect(DISTILLER_SYSTEM_PROMPT).toContain('evidence 可摘 thinking 原文')
+test('DISTILLER_SYSTEM_PROMPT 不再含 [thinking] 说明段（2026-08-19 thinking 剔除后配套清理）', () => {
+  // thinking 不再喂给 LLM（filterTranscriptForDistill 剔除），prompt 里指向
+  // [thinking] 标签的说明段已移除——避免 prompt 描述 LLM 看不到的内容。
+  expect(DISTILLER_SYSTEM_PROMPT).not.toContain('[thinking]')
 })
 
 // --- 工具调用信息渲染（spec 2026-08-09 §4.2）---

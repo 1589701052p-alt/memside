@@ -213,6 +213,16 @@ export const DEFAULT_DISTILL_INPUT_BUDGET_TOKENS = 64000
 export const TOOL_INPUT_CAP_CHARS = 300
 
 /**
+ * 是否在 distill 输入剔除 thinking turn（spec 2026-08-19，数据驱动决策）。
+ *
+ * distill 输入膨胀根因分析（1222 条真实蒸馏记录）证明 thinking 占输入 50.8%、
+ * 在撞预算天花板（>250KB）的输入里占 86.8%，但 529 条已落库记忆的 evidence 里
+ * 0 条溯源到 thinking 块——高体积、零实证产出。默认 true 剔除；保留常量开关
+ * 供未来 A/B 验证（若需恢复 rationale 通道，flip 为 false 即逐字节回到旧行为）。
+ */
+export const DROP_THINKING_TURNS = true
+
+/**
  * 把 tool_use 的 input 对象序列化成紧凑 JSON 字符串，截断 TOOL_INPUT_CAP_CHARS 字。
  * 非对象 / 缺失 / 序列化抛错 -> undefined（不设 toolCall，与既有"取不到即跳过"一致）。
  * 一刀切：不做按工具特判（spec §4.1），新工具自动覆盖。
@@ -321,7 +331,10 @@ export function filterTranscriptForDistill(
   if (!Array.isArray(turns)) return []
   try {
     const denoised = stripNoiseTurns(turns)
-    const compacted = denoised.map((t) =>
+    const withoutThinking = DROP_THINKING_TURNS
+      ? denoised.filter((t) => t.role !== 'thinking')
+      : denoised
+    const compacted = withoutThinking.map((t) =>
       t.role === 'tool' ? compactToolTurn(t) : { ...t, content: truncate(t.content, NON_TOOL_CAP_CHARS) },
     )
     const used = () => compacted.reduce(

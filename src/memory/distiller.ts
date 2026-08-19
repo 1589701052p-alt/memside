@@ -50,8 +50,6 @@ Origin discipline（[stated] 起源判定）：记用户或领域在会话中明
 6. agent 自言自语的推理过程（未经用户采纳的散漫推理）；但 agent 给出且被用户采纳的设计 rationale 可记。
 硬约束：记 rationale 时必须能在所给 transcript 中找到 agent 原话出处；找不到出处的不记（防止脑补）。
 
-[thinking] 标签说明：[thinking] 是 agent 未对用户展示的内部推理。它可以作为 rationale 的「原话出处」证据（evidence 可摘 thinking 原文）；但仅在 thinking 中出现、未在对话浮现也未被用户采纳的推理，仍按上面的 Origin discipline 不得提取为候选。
-
 REJECT fleeting status updates, moods, one-off acknowledgements.
 不要复述 agent 读到的文件内容或符号细节（那些翻翻代码就能重新知道，不算记忆）。
 但用户亲口陈述的关于本仓库的规则、决策、约束、偏好必须记--用户说过就是价值，

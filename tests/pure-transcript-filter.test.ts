@@ -4,6 +4,7 @@ import {
   DEFAULT_DISTILL_INPUT_BUDGET_TOKENS,
   type TranscriptTurn,
   TOOL_INPUT_CAP_CHARS,
+  DROP_THINKING_TURNS,
 } from '@/memory/pure'
 
 const tool = (over: Partial<TranscriptTurn> & Pick<TranscriptTurn, 'content'>): TranscriptTurn =>
@@ -111,43 +112,67 @@ test('per-turn caps widened: non-tool 20000, tool 3000', async () => {
   expect(out[1]!.content.length).toBeLessThanOrEqual(20000 + '…[truncated]'.length)
 })
 
-// --- thinking 捕获（spec 2026-08-09 §4.2 同等对待）---
+// --- thinking turn 剔除（spec 2026-08-19，数据驱动决策）---
+//
+// 背景：distill 输入膨胀根因分析（1222 条真实蒸馏记录）证明 thinking 占输入
+// 50.8%、在撞预算天花板的输入里占 86.8%，但 529 条已落库记忆的 evidence 里
+// 0 条溯源到 thinking 块——高体积、零实证产出。决策：剔除 thinking turn，
+// 通过 DROP_THINKING_TURNS 常量控制（默认 true）保留可恢复性，供未来 A/B 验证。
+// 详见 STATE.md「2026-08-19 thinking 剔除」与 distill-input-analysis 报告。
 
-test('thinking turn 走非 tool 分支：20000 字符截断', () => {
-  const turns: TranscriptTurn[] = [{ role: 'thinking', content: 'x'.repeat(25000) }]
-  const out = filterTranscriptForDistill(turns)
-  expect(out[0]!.role).toBe('thinking')
-  expect(out[0]!.content.endsWith('…[truncated]')).toBe(true)
-  expect(out[0]!.content.length).toBe(20000 + '…[truncated]'.length)
+test('DROP_THINKING_TURNS 默认 true（剔除 thinking）', () => {
+  expect(DROP_THINKING_TURNS).toBe(true)
 })
 
-test('预算裁剪：thinking 与 assistant 同级（同 tier 最老先丢，user/错误必留）', () => {
-  const big = 'y'.repeat(400) // 每条约 100 token
+test('thinking turn 被剔除，不抵达 distiller 输入', () => {
   const turns: TranscriptTurn[] = [
-    { role: 'user', content: 'keep me' },
-    { role: 'thinking', content: big },   // idx1，同 tier 中更老 -> 先丢
-    { role: 'assistant', content: big },  // idx2
-    { role: 'tool', content: 'err', isError: true },
+    { role: 'user', content: 'hi' },
+    { role: 'thinking', content: 'x'.repeat(25000) },
+    { role: 'assistant', content: 'reply' },
   ]
-  // 总量约 203 token；预算 150 -> 丢一条 p=2（最老的 thinking）即达标
-  const out = filterTranscriptForDistill(turns, 150)
-  expect(out.some((t) => t.role === 'user')).toBe(true)
-  expect(out.some((t) => t.isError)).toBe(true)
-  expect(out.some((t) => t.role === 'assistant')).toBe(true)
+  const out = filterTranscriptForDistill(turns)
   expect(out.some((t) => t.role === 'thinking')).toBe(false)
+  expect(out.map((t) => t.role)).toEqual(['user', 'assistant'])
 })
 
-test('预算裁剪区分场景：p=3 普通 tool 先于 thinking 被丢（锁 thinking 与 assistant 同为 p=2）', () => {
+test('thinking 剔除后 budget 不再被 thinking 撑爆（高信噪比角色让位真实信号）', () => {
+  // 旧 bug（已根治方向）：thinking priority=2 与 assistant 同级，长会话 thinking
+  // 累积成输入主体（86.8%），把 tool/assistant 真实信号挤出预算。剔除后 thinking
+  // 不占预算，tool/assistant 得以保留。
   const big = 'z'.repeat(400) // 每条约 100 token
   const turns: TranscriptTurn[] = [
     { role: 'user', content: 'keep me' },
     { role: 'thinking', content: big },
-    { role: 'tool', content: big }, // 非错误 tool -> p=3，应先于 thinking 被丢
+    { role: 'thinking', content: big },
+    { role: 'assistant', content: big },
   ]
   const out = filterTranscriptForDistill(turns, 150)
-  expect(out.some((t) => t.role === 'thinking')).toBe(true)
-  expect(out.some((t) => t.role === 'tool')).toBe(false)
+  expect(out.some((t) => t.role === 'thinking')).toBe(false)
+  expect(out.some((t) => t.role === 'assistant')).toBe(true)
   expect(out.some((t) => t.role === 'user')).toBe(true)
+})
+
+test('thinking 剔除在 compact/budget 之前执行（不进预算计量）', () => {
+  // 10 条 thinking × 400 字符 = 旧场景下约 1000 token 会顶满小预算。剔除后
+  // 即使预算=0，thinking 也不该出现（它根本没进 compacted 数组）。
+  const turns: TranscriptTurn[] = Array.from({ length: 10 }, () => ({
+    role: 'thinking' as const,
+    content: 'y'.repeat(400),
+  }))
+  const out = filterTranscriptForDistill(turns, 100)
+  expect(out.length).toBe(0)
+})
+
+test('detectErrorSignals 不受影响：跑在 filter 之前的既有不变量保持', async () => {
+  // detectErrorSignals 直接吃原始 turns（不经 filter），thinking 剔除只作用于
+  // distiller 输入，不影响错误信号检测。这里 import 确认接口仍在、行为不变。
+  const { detectErrorSignals } = await import('@/memory/pure')
+  const turns: TranscriptTurn[] = [
+    { role: 'thinking', content: 'some reasoning' },
+    { role: 'tool', content: 'err', isError: true },
+  ]
+  const sig = detectErrorSignals(turns)
+  expect(sig.toolFailures).toBe(1)
 })
 
 // --- 工具调用信息捕获（spec 2026-08-09 §4.1）---

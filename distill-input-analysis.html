@@ -1,0 +1,211 @@
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --ink:#1a1d23; --ink-2:#2d3138; --paper:#faf8f4; --paper-2:#f1ede5;
+    --signal:#2b8a8a; --signal-d:#1f6a6a; --warn:#c87941; --warn-d:#9e5b2e;
+    --muted:#6b6f78; --line:#d8d3c8; --rule:#e3ded3;
+    --bg:#faf8f4; --surface:#f5f1ea; --code-bg:#efe9dd;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ink:#e7e3da; --ink-2:#cdc8bc; --paper:#15171b; --paper-2:#1d2025;
+      --signal:#4ec4c4; --signal-d:#3aa0a0; --warn:#e09a5e; --warn-d:#c8843f;
+      --muted:#8a8f99; --line:#2c2f36; --rule:#26292f;
+      --bg:#15171b; --surface:#1c1f24; --code-bg:#20242b;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#e7e3da; --ink-2:#cdc8bc; --paper:#15171b; --paper-2:#1d2025;
+    --signal:#4ec4c4; --signal-d:#3aa0a0; --warn:#e09a5e; --warn-d:#c8843f;
+    --muted:#8a8f99; --line:#2c2f36; --rule:#26292f;
+    --bg:#15171b; --surface:#1c1f24; --code-bg:#20242b;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+    font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:760px; margin:0 auto; padding:48px 28px 120px}
+  .eyebrow{
+    font-family:"IBM Plex Mono",monospace; font-size:12px; font-weight:500;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+    margin:0 0 14px;
+  }
+  h1{font-size:34px; line-height:1.18; font-weight:600; margin:0 0 10px; text-wrap:balance; letter-spacing:-.01em}
+  .lede{font-size:19px; color:var(--ink-2); margin:0 0 36px; line-height:1.5}
+  .meta{
+    font-family:"IBM Plex Mono",monospace; font-size:12.5px; color:var(--muted);
+    border-top:1px solid var(--rule); border-bottom:1px solid var(--rule);
+    padding:12px 0; margin:0 0 40px; display:flex; gap:24px; flex-wrap:wrap;
+  }
+  .meta span b{color:var(--ink); font-weight:600}
+
+  .thesis{
+    background:var(--surface); border-left:3px solid var(--warn);
+    padding:22px 26px; margin:0 0 44px; border-radius:2px;
+  }
+  .thesis .t-eyebrow{
+    font-family:"IBM Plex Mono",monospace; font-size:11.5px; font-weight:600;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--warn-d);
+    margin:0 0 10px;
+  }
+  .thesis p{margin:0; font-size:18px; line-height:1.55}
+  .thesis .strike{color:var(--muted); text-decoration:line-through; text-decoration-color:var(--warn)}
+
+  h2{
+    font-size:21px; font-weight:600; margin:44px 0 16px; letter-spacing:-.005em;
+    padding-top:22px; border-top:1px solid var(--rule);
+  }
+  h3{font-size:16px; font-weight:600; margin:28px 0 10px; color:var(--ink)}
+  p{margin:0 0 14px}
+  .num{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; font-weight:500}
+
+  /* stat grid */
+  .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin:18px 0 24px}
+  .stat{
+    background:var(--surface); border:1px solid var(--rule); border-radius:4px;
+    padding:16px 14px;
+  }
+  .stat .v{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; font-size:26px; font-weight:600; color:var(--ink); line-height:1}
+  .stat .v.warn{color:var(--warn-d)} .stat .v.signal{color:var(--signal-d)}
+  .stat .l{font-size:12px; color:var(--muted); margin-top:7px; line-height:1.35}
+
+  /* composition bars */
+  .comp{margin:18px 0 28px}
+  .comp-row{display:flex; align-items:center; gap:12px; margin:0 0 8px}
+  .comp-row .name{width:88px; font-size:13.5px; color:var(--ink-2); flex-shrink:0}
+  .comp-row .bar{flex:1; height:20px; background:var(--surface); border-radius:3px; overflow:hidden; border:1px solid var(--rule)}
+  .comp-row .fill{height:100%; border-radius:2px}
+  .comp-row .pct{width:54px; text-align:right; font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; font-size:13px; color:var(--muted); flex-shrink:0}
+
+  table{width:100%; border-collapse:collapse; margin:14px 0 20px; font-size:14px}
+  th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--rule)}
+  th{font-family:"IBM Plex Mono",monospace; font-size:11.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+  td{font-variant-numeric:tabular-nums}
+  td.name,th.name{text-align:left}
+  td.r,th.r{text-align:right; font-family:"IBM Plex Mono",monospace}
+  tr:hover td{background:var(--surface)}
+
+  .callout{
+    border:1px solid var(--rule); border-radius:4px; padding:16px 18px;
+    margin:16px 0; background:var(--surface);
+  }
+  .callout .h{font-size:13px; font-weight:600; color:var(--signal-d); margin:0 0 6px; font-family:"IBM Plex Mono",monospace; letter-spacing:.04em}
+  .callout p{margin:0; font-size:14.5px}
+
+  code{font-family:"IBM Plex Mono",monospace; font-size:.88em; background:var(--code-bg); padding:1px 5px; border-radius:3px}
+  .src{font-size:13.5px; color:var(--muted); margin-top:32px; padding-top:16px; border-top:1px solid var(--rule)}
+  .src b{color:var(--ink-2)}
+  ul{margin:6px 0 16px; padding-left:22px} li{margin-bottom:6px}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">诊断报告 · distill 输入膨胀根因分析</p>
+  <h1>输入爆了，但不是 Bash 的锅</h1>
+  <p class="lede">基于 1,222 条真实蒸馏记录的量化分析。你的假设指向 Bash，数据指向别处。</p>
+  <div class="meta">
+    <span>样本 <b>1,222</b> jobs</span>
+    <span>DB <b>1.1 GB</b></span>
+    <span>日期 <b>2026-08-19</b></span>
+  </div>
+
+  <div class="thesis">
+    <p class="t-eyebrow">核心发现 · 假设反转</p>
+    <p>Bash 平均只占蒸馏输入的 <span class="num">13.6%</span>，在撞预算天花板的输入里只占 <span class="num">2.2%</span>。真正撑爆 256KB 输入的是 <b>thinking 块</b>——在天花板输入里独占 <span class="num">86.8%</span>。<span class="strike">砍 Bash</span> 砍不动多少体积，<b>控 thinking 总量</b>才是减容主战场。</p>
+  </div>
+
+  <h2>数据全景</h2>
+  <p>从 <code>memory_distill_inputs.turns_json</code>（过滤后、已喂给模型的 turns）抽取 1,222 条，按 role 拆字符占比：</p>
+
+  <div class="comp">
+    <div class="comp-row"><span class="name">thinking</span><div class="bar"><div class="fill" style="width:50.8%;background:var(--warn)"></div></div><span class="pct">50.8%</span></div>
+    <div class="comp-row"><span class="name">tool 全类</span><div class="bar"><div class="fill" style="width:31.2%;background:var(--signal)"></div></div><span class="pct">31.2%</span></div>
+    <div class="comp-row"><span class="name">assistant</span><div class="bar"><div class="fill" style="width:10.2%;background:var(--ink-2)"></div></div><span class="pct">10.2%</span></div>
+    <div class="comp-row"><span class="name">user</span><div class="bar"><div class="fill" style="width:7.8%;background:var(--muted)"></div></div><span class="pct">7.8%</span></div>
+  </div>
+  <p style="font-size:13.5px;color:var(--muted);margin-top:-8px">全样本 80.1M 字符，thinking 一项占一半。Bash 是 tool 的子集，见下表。</p>
+
+  <h2>Bash 到底占多少</h2>
+  <div class="stats">
+    <div class="stat"><div class="v">13.6%</div><div class="l">裁剪后 Bash 占全部输入字符</div></div>
+    <div class="stat"><div class="v signal">2.2%</div><div class="l">天花板输入(>250KB)里 Bash 占比</div></div>
+    <div class="stat"><div class="v">695</div><div class="l">Bash 输出字符中位数（cap 3000）</div></div>
+  </div>
+
+  <table>
+    <thead><tr><th class="name">toolName</th><th class="r">字符</th><th class="r">turns</th><th class="r">均值</th><th class="r">占 tool</th></tr></thead>
+    <tbody>
+      <tr><td>Bash</td><td class="r">8,322,594</td><td class="r">12,892</td><td class="r">646</td><td class="r">33.3%</td></tr>
+      <tr><td>Agent</td><td class="r">4,870,313</td><td class="r">3,500</td><td class="r">1,392</td><td class="r">19.5%</td></tr>
+      <tr><td>TaskOutput</td><td class="r">3,984,569</td><td class="r">2,403</td><td class="r">1,658</td><td class="r">15.9%</td></tr>
+      <tr><td>Grep</td><td class="r">3,187,144</td><td class="r">2,401</td><td class="r">1,327</td><td class="r">12.7%</td></tr>
+      <tr><td>Read</td><td class="r">1,224,657</td><td class="r">8,906</td><td class="r">138</td><td class="r">4.9%</td></tr>
+      <tr><td>Edit</td><td class="r">706,936</td><td class="r">2,619</td><td class="r">270</td><td class="r">2.8%</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:13.5px;color:var(--muted);margin-top:-8px">Bash 虽是 tool 类第一大（33%），但平均输出仅 646 字，远没顶到 3000 字上限——它本就短，砍它的 cap 几乎不省体积。</p>
+
+  <h2>真实输入长什么样</h2>
+  <p>从 produced job 的 5,848 条 Bash 成功输出采样，命令类别分布：</p>
+  <table>
+    <thead><tr><th class="name">命令类别</th><th class="r">turns</th><th class="r">字符</th><th class="r">均值</th></tr></thead>
+    <tbody>
+      <tr><td>其他（含 cd/管道/bun -e）</td><td class="r">4,154</td><td class="r">2,592,683</td><td class="r">624</td></tr>
+      <tr><td>git</td><td class="r">695</td><td class="r">319,332</td><td class="r">459</td></tr>
+      <tr><td>test（bun test）</td><td class="r">467</td><td class="r">343,438</td><td class="r">735</td></tr>
+      <tr><td>cat/head/tail</td><td class="r">234</td><td class="r">119,230</td><td class="r">510</td></tr>
+      <tr><td>ls/dir</td><td class="r">203</td><td class="r">105,690</td><td class="r">521</td></tr>
+    </tbody>
+  </table>
+  <p>Bash 输出多是「这次会话发生了什么」——git 分支切换、测试 pass/fail 计数、文件转储。这类内容对提炼<b>持久事实记忆</b>价值低。</p>
+
+  <h2>但「无用」不等于「可砍」</h2>
+  <p>检查已落库记忆的 evidence 来源，判断 Bash 输出到底有没有成为记忆依据：</p>
+  <div class="stats">
+    <div class="stat"><div class="v warn">6.8%</div><div class="l">518 条带 evidence 的记忆里，像命令输出的</div></div>
+    <div class="stat"><div class="v">0</div><div class="l">引用 thinking 推理 prose 的 evidence</div></div>
+    <div class="stat"><div class="v signal">407</div><div class="l">agent-observed 记忆（无 user 原话）</div></div>
+  </div>
+  <p>那 6.8% 里多数引用的还是<b>命令文本本身</b>（如 <code>bun test tests/...</code>），不是 Bash <b>输出</b>——它们是 convention 记忆（「用 bun 跑测试」），命令文本成了规则证据。这说明 Bash 输出几乎不直接喂记忆，但<strong style="color:var(--ink)">这恰恰是 Bash 安全可砍的理由</strong>：它既占体积，又不贡献记忆。</p>
+
+  <h2>真正撑爆输入的：thinking</h2>
+  <p>把 1,222 条输入按最终结果分组，看输入构成：</p>
+  <table>
+    <thead><tr><th class="name">结果</th><th class="r">样本</th><th class="r">输入中位</th><th class="r">thinking%</th><th class="r">tool%</th><th class="r">bash%</th></tr></thead>
+    <tbody>
+      <tr><td>produced</td><td class="r">701</td><td class="r">18,601</td><td class="r">30.8%</td><td class="r">37.8%</td><td class="r">15.2%</td></tr>
+      <tr><td>empty_output</td><td class="r">316</td><td class="r">51,223</td><td class="r">24.1%</td><td class="r">44.3%</td><td class="r">13.3%</td></tr>
+      <tr><td>parse_error</td><td class="r">28</td><td class="r">23,476</td><td class="r">30.9%</td><td class="r">46.6%</td><td class="r">26.6%</td></tr>
+      <tr><td>llm_error</td><td class="r">171</td><td class="r">10,176</td><td class="r">13.3%</td><td class="r">45.8%</td><td class="r">17.6%</td></tr>
+    </tbody>
+  </table>
+
+  <p>输入字符分布：p50=<span class="num">19.9KB</span>，p90=<span class="num">250.6KB</span>，p99=<span class="num">254.8KB</span>，max=<span class="num">255.6KB</span>。<b>123 条输入顶到 250–256KB 天花板</b>（64000 token 预算裁剪硬截断）。这 123 条的最终构成：</p>
+  <div class="comp">
+    <div class="comp-row"><span class="name">thinking</span><div class="bar"><div class="fill" style="width:86.8%;background:var(--warn)"></div></div><span class="pct">86.8%</span></div>
+    <div class="comp-row"><span class="name">user</span><div class="bar"><div class="fill" style="width:7.5%;background:var(--muted)"></div></div><span class="pct">7.5%</span></div>
+    <div class="comp-row"><span class="name">assistant</span><div class="bar"><div class="fill" style="width:3%;background:var(--ink-2)"></div></div><span class="pct">3.0%</span></div>
+    <div class="comp-row"><span class="name">tool 全类</span><div class="bar"><div class="fill" style="width:2.7%;background:var(--signal)"></div></div><span class="pct">2.7%</span></div>
+  </div>
+  <p style="font-size:13.5px;color:var(--muted);margin-top:-8px">预算裁剪砍掉了绝大多数 tool 与 assistant turn（priority=2/3，最先丢），把 thinking（priority=2）+ user（priority=0 永不丢）留了下来。Bash 在天花板输入里只剩 2.2%。</p>
+
+  <div class="callout">
+    <p class="h">机制：thinking 为什么留到最后</p>
+    <p><code>filterTranscriptForDistill</code> 的预算裁剪按 <code>turnPriority</code> 丢 turn：user=priority 0（永不丢）、error-tool=1、assistant/thinking=2、tool=3。超预算时从 priority 高的丢起。thinking 与 assistant 同 priority=2，但 thinking 单条更长、累积更多，于是长会话的 thinking 成了输入的主体。18,872 条 thinking turn 累计 40.7M 字符，平均 2,157 字/条。</p>
+  </div>
+
+  <h2>结论与建议方向</h2>
+  <ul>
+    <li><b>Bash 不是膨胀主因</b>：占 13.6%，输出短（中位 695 字），且几乎不喂记忆（evidence 命中 6.8% 多为命令文本）。砍 Bash 的 cap 收益极小。</li>
+    <li><b>thinking 是膨胀主因</b>：占 50.8%，天花板输入里 86.8%。但 thinking 是 rationale 载体（origin discipline 放宽后「被采纳的 rationale 可记」），不能简单全删。</li>
+    <li><b>预算裁剪方向反了</b>：超预算时把 Bash 等工具结果丢光（p3 先丢），却把大量 thinking（p2）留下——而 thinking 的记忆产出为 0（无 evidence 引用它）。这是高体积零产出的信号。</li>
+  </ul>
+
+  <p>如果要根治输入爆炸，下一步应在 thinking 总量做 budget 级控制（而非单条 20000 cap），并重新审视 turnPriority——让高产出角色（含命令文本的 user/assistant）优先于零产出的 thinking 块。这是新 brainstorming 的切入点，不是砍 Bash。</p>
+
+  <p class="src">
+    <b>数据源</b>：<code>~/.memside/memside.db</code>（1.1 GB，WAL）。<code>memory_distill_inputs.turns_json</code> = 过滤后喂模型的 turns；<code>memory_distill_events.payload</code>（kind=conversation）= 裁剪前原始 turns。<br>
+    <b>方法</b>：role/toolName 字符占比 × 结果分组对比 × evidence 来源审计 × 天花板输入构成。脚本一次性 ad-hoc，未入库。
+  </p>
+</div>
