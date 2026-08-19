@@ -102,6 +102,8 @@ export interface MemsideStatus {
   unevaluatedCandidates?: number
   /** 累加中的 waiting job 数（spec §4.9：单列避免「pending 堆积」假象）；老 daemon 无此字段。 */
   waitingJobs?: number
+  /** 暂停等人处置的 job 数（spec §6：3 次失败暂停）；老 daemon 无此字段。 */
+  pausedJobs?: number
   /** LLM 实时活动（spec 2026-08-12 §5.8）；老 daemon 无此字段。 */
   llmActivity?: { phase: string; detail: string | null; since: number } | null
   /** 三阶段近 24h 次数与累计耗时；老 daemon 无此字段。 */
@@ -249,12 +251,22 @@ export interface DistillRunListItem {
   sourceAgentId: string | null
   /** spec §4.9 行降级徽标；详情端点（getDistillRun）不带此字段，故可选。 */
   hasDegradations?: boolean
+  /** spec §4.1 暂停在哪步；非暂停 null。详情端点同样返回。 */
+  pausedStep?: string | null
+  /** job 整体尝试轮次（spec §6 重试轮次显示）；详情端点不带，故可选。 */
+  attempts?: number
+  /** 当前步骤失败计数（step_attempts 列，final-fix-3：暂停徽标读真实步骤重试轮次）。 */
+  stepAttempts?: number
+  /** 当前断点步骤（current_step 列，final-fix-3：状态栏「某步骤第 N 轮重试中」用）。 */
+  currentStep?: string | null
 }
 
 export interface DistillRunDetail extends DistillRunListItem {
   rawOutput: unknown | null
   /** parse_error 时详情端点带出的模型原始输出（截断存储）；其余 outcome 为 null/缺省。 */
   rawText?: string | null
+  /** spec §4.1 暂停在哪步；详情端点返回（run 行 paused_step 列）。 */
+  pausedStep?: string | null
 }
 
 export async function listDistillRuns(fetchFn: FetchLike = fetch): Promise<DistillRunListItem[]> {
@@ -274,6 +286,58 @@ export async function getDistillRunSourceInput(
   const res = await fetchFn(`/api/distill-runs/${jobId}/source-input`)
   if (!res.ok) return null
   return (await res.json()) as { turnCount: number; charCount: number; turns: SourceTurn[] }
+}
+
+// --- 暂停 job 处置（spec §6）client ------------------------------------------
+// retry/abandon no-throw 契约（与 restoreMemory 同模式）：404/409 返回 undefined，
+// UI 操作后 refresh 收敛真实状态（paused -> pending/done），不静默吞错误。
+
+/** POST /api/distill-runs/:jobId/retry — resetJobForRetry，回 pending 等下个 tick 重跑。 */
+export async function retryJob(
+  jobId: string, fetchFn: FetchLike = fetch,
+): Promise<{ ok: boolean; error?: string } | undefined> {
+  const res = await fetchFn(`/api/distill-runs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({})) as { error?: string }
+    return { ok: false, error: data.error ?? `retry failed (${res.status})` }
+  }
+  return { ok: true }
+}
+
+/** POST /api/distill-runs/:jobId/abandon — abandonJob，标 done 放弃重试。 */
+export async function abandonJob(
+  jobId: string, fetchFn: FetchLike = fetch,
+): Promise<{ ok: boolean; error?: string } | undefined> {
+  const res = await fetchFn(`/api/distill-runs/${encodeURIComponent(jobId)}/abandon`, { method: 'POST' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({})) as { error?: string }
+    return { ok: false, error: data.error ?? `abandon failed (${res.status})` }
+  }
+  return { ok: true }
+}
+
+// --- 待审查候选（spec §6.4）client -------------------------------------------
+
+/** GET /api/memories/pending-review?project=<cwd> — judge 暂停期间标的 pending_review 候选。 */
+export async function listPendingReview(
+  project: string, fetchFn: FetchLike = fetch,
+): Promise<MemoryItem[]> {
+  const qs = project ? `?project=${encodeURIComponent(project)}` : ''
+  const res = await fetchFn(`/api/memories/pending-review${qs}`)
+  const data = await res.json()
+  return (data.items ?? []) as MemoryItem[]
+}
+
+/** POST /api/memories/:id/promote-pending-review — pending_review → candidate 进审批队列。 */
+export async function promotePendingReview(
+  id: string, fetchFn: FetchLike = fetch,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetchFn(`/api/memories/${id}/promote-pending-review`, { method: 'POST' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({})) as { error?: string }
+    return { ok: false, error: data.error ?? `promote failed (${res.status})` }
+  }
+  return { ok: true }
 }
 
 // --- 降级可见化（spec §4.9）client --------------------------------------------

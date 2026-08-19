@@ -8,7 +8,7 @@ import { openDb, type DbClient } from '@/db/client'
 import { memoryDistillJobs, memoryDistillEvents, memoryDistillRuns, memories } from '@/db/schema'
 import { eq } from 'drizzle-orm'
 import { tick, sweepWaitingJobs, type TickDeps } from '@/scheduler'
-import { createCandidate, markFlush, upsertSessionEvent, getSessionDigest, setSessionOffset, upsertSessionDigest } from '@/memory/store'
+import { createCandidate, markFlush, upsertSessionEvent, getSessionDigest, setSessionOffset, upsertSessionDigest, getSessionOffset } from '@/memory/store'
 import { SESSION_FLUSH_TTL_MS } from '@/memory/threshold'
 import type { LLMCall } from '@/llm'
 import { mkdtempSync } from 'node:fs'
@@ -236,9 +236,11 @@ describe('滚动账本接线（质量模式，spec 2026-08-11-digest-ledger-rede
     expect(degs.some((d) => d.kind === 'digest_truncated')).toBe(false)
   })
 
-  test('digest LLM 抛错 -> digest_llm_failed 落表 + job 仍 done', async () => {
+  test('digest LLM 抛错 -> digest_llm_failed 落表 + job 回 pending 断点停 digest（Task 7：不再 done 冒进）', async () => {
     // 判别 digest 调用：sliceDigestSystemPrompt 含 'compressor'，distill 系统 prompt 不含。
     // 必须用大切片：小切片直追不调 digest LLM，抛错路径不可达。
+    // Task 7（spec P5）：digest 失败是 step 失败——回 pending + 退避、offset 不推进，
+    // 不再「降级落表 + 仍标 done + 推 offset」。
     const failLLM: LLMCall = async (sys) => {
       if (sys.includes('compressor')) throw new Error('ark 502')
       return JSON.stringify({ candidates: [] })
@@ -252,7 +254,10 @@ describe('滚动账本接线（质量模式，spec 2026-08-11-digest-ledger-rede
     deps.loadTranscript = async () => ({ turns: longTurns(), fullLength: 5, prefixTurns: [] })
     await tick(db, deps)
     const [j] = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'j1'))
-    expect(j!.status).toBe('done')
+    expect(j!.status).toBe('pending')         // 非 done：失败不消费 job
+    expect(j!.currentStep).toBe('digest')     // 断点停 digest（前三步不重算）
+    expect(j!.stepAttempts).toBe(1)
+    expect(await getSessionOffset(db, 's1')).toBe(0)  // offset 不冒进（P5）
     const degs = await db.query.memoryDegradations.findMany()
     expect(degs.some((d) => d.kind === 'digest_llm_failed')).toBe(true)
   })
@@ -285,10 +290,12 @@ describe('降级错误路径（spec §5：digest_read_failed / titles_query_fail
   // DROP TABLE 只让目标查询失效，logDegradation 写的 memory_degradations 不受影响，
   // 因此能断言「落表」本身。
 
-  test('getSessionDigest 抛错 -> digest_read_failed 落表 + 降级为无 priorContext + job 仍 done', async () => {
+  test('getSessionDigest 抛错 -> digest_read_failed 落表 + 降级无 priorContext + job 断点停 digest（Task 7）', async () => {
     // 构造：质量模式 + sessionId + offset>0（fullLength 2 - newTurns 1），tick 才走
-    // getSessionDigest 分支；DROP memory_session_digests 让它抛。后续 distill 照常
-    // （priorContext=null），滚动摘要阶段再读 digest 亦抛 -> digest_llm_failed 共现。
+    // getSessionDigest 分支；DROP memory_session_digests 让它抛。distill 照常
+    // （priorContext=null，digest_read_failed 落表）。滚动摘要阶段再读 digest 亦抛
+    // -> digest_llm_failed 共现；Task 7 起 digest 失败是 step 失败：job 回 pending
+    // 断点停 digest、offset 不推进（旧「仍标 done」语义已废，spec P5）。
     let seen = ''
     const spyLLM: LLMCall = async (_s, user) => { seen = user; return JSON.stringify({ candidates: [] }) }
     await db.insert(memoryDistillJobs).values({
@@ -303,9 +310,11 @@ describe('降级错误路径（spec §5：digest_read_failed / titles_query_fail
     })
     db.$client.exec('DROP TABLE memory_session_digests')
     await tick(db, deps)
-    const [j] = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'j1'))
-    expect(j!.status).toBe('done') // 降级不阻塞 distill
     expect(seen).not.toContain('旧讨论') // priorContext=null：未注入前文 digest
+    const [j] = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, 'j1'))
+    expect(j!.status).toBe('pending')         // digest step 失败：回 pending 非 done
+    expect(j!.currentStep).toBe('digest')     // 断点停 digest（distill/dedup/judge 不重算）
+    expect(await getSessionOffset(db, 's1')).toBe(0)  // offset 不冒进（P5）
     const degs = await db.query.memoryDegradations.findMany()
     const readFail = degs.find((d) => d.kind === 'digest_read_failed')
     expect(readFail).toBeDefined()

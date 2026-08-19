@@ -22,7 +22,7 @@ export function openDb(path: string) {
       title TEXT NOT NULL,
       body_md TEXT NOT NULL,
       tags TEXT NOT NULL DEFAULT '[]',
-      status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected')),
+      status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected','pending_review')),
       source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual','subagent')),
       source_cwd TEXT,
       source_event_id TEXT,
@@ -53,6 +53,9 @@ export function openDb(path: string) {
       attempts INTEGER NOT NULL DEFAULT 0,
       next_run_at INTEGER NOT NULL,
       last_error TEXT,
+      current_step TEXT,
+      step_attempts INTEGER NOT NULL DEFAULT 0,
+      step_error TEXT,
       created_at INTEGER NOT NULL,
       finished_at INTEGER
     );
@@ -99,6 +102,7 @@ export function openDb(path: string) {
       stored_count     INTEGER NOT NULL,
       discarded_count  INTEGER NOT NULL,
       duration_ms      INTEGER NOT NULL,
+      paused_step      TEXT,
       error_message    TEXT,
       raw_text         TEXT,
       digest_ms        INTEGER,
@@ -246,7 +250,7 @@ export function openDb(path: string) {
         title TEXT NOT NULL,
         body_md TEXT NOT NULL,
         tags TEXT NOT NULL DEFAULT '[]',
-        status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected')),
+        status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected','pending_review')),
         source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual','subagent')),
         source_cwd TEXT,
         source_event_id TEXT,
@@ -295,6 +299,59 @@ export function openDb(path: string) {
   {
     raw.exec("UPDATE memories SET origin = 'agent-observed' WHERE source_kind = 'subagent' AND status = 'candidate' AND (origin IS NULL OR origin != 'agent-observed')")
   }
+  // Idempotent migration: widen memories.status CHECK to include 'pending_review'（spec 2026-08-18 §4.1）。
+  // judge 3 次失败暂停期间候选标 pending_review（不进审批队列）。sqlite 无法 ALTER CHECK，
+  // 旧库的窄 CHECK（5 值，无 pending_review）会拒绝插入 -> 表重建扩展。
+  // 刻意放在 subagent 表重建 + origin/evidence ALTER 之后：
+  //  - 旧库已跑过 subagent 重建（status CHECK 仍窄 5 值、source_kind 含 subagent）-> subagent 重建 guard 跳过，
+  //    由本块检测 sqlite_master 建表 SQL 不含 'pending_review' -> 重建。
+  //  - 旧库两者都缺 -> 上面 subagent 重建块（DDL 已含 pending_review）一次性扩展，本块 guard 见 pending_review 跳过。
+  //  - 全新库 -> CREATE TABLE 已含 pending_review，本块跳过。
+  // 事务包裹（与 subagent 重建同模式）：DDL 事务性，BEGIN...COMMIT 间失败 ROLLBACK，避免半重建丢失窗口。
+  {
+    const tbl = raw.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").get() as { sql?: string } | undefined
+    if (tbl?.sql && !tbl.sql.includes("'pending_review'")) {
+      raw.exec('BEGIN')
+      try {
+        raw.exec(`CREATE TABLE memories_new (
+        id TEXT PRIMARY KEY,
+        scope_type TEXT NOT NULL CHECK (scope_type IN ('project','global')),
+        scope_id TEXT,
+        runtime TEXT CHECK (runtime IN ('claude-code','opencode') OR runtime IS NULL),
+        title TEXT NOT NULL,
+        body_md TEXT NOT NULL,
+        tags TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK (status IN ('candidate','approved','archived','superseded','rejected','pending_review')),
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('conversation','error','manual','subagent')),
+        source_cwd TEXT,
+        source_event_id TEXT,
+        distill_job_id TEXT,
+        distill_action TEXT CHECK (distill_action IN ('new','update_of','duplicate_of','conflict_with') OR distill_action IS NULL),
+        supersedes_id TEXT,
+        superseded_by_id TEXT,
+        approved_at INTEGER,
+        created_at INTEGER NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        subject_slug TEXT,
+        value_class TEXT,
+        origin TEXT,
+        evidence TEXT,
+        CHECK ((scope_type='global' AND scope_id IS NULL) OR (scope_type='project' AND scope_id IS NOT NULL))
+      )`)
+      raw.exec(`INSERT INTO memories_new (id, scope_type, scope_id, runtime, title, body_md, tags, status, source_kind, source_cwd, source_event_id, distill_job_id, distill_action, supersedes_id, superseded_by_id, approved_at, created_at, version, subject_slug, value_class, origin, evidence)
+        SELECT id, scope_type, scope_id, runtime, title, body_md, tags, status, source_kind, source_cwd, source_event_id, distill_job_id, distill_action, supersedes_id, superseded_by_id, approved_at, created_at, version, subject_slug, value_class, origin, evidence FROM memories`)
+      raw.exec('DROP TABLE memories')
+      raw.exec('ALTER TABLE memories_new RENAME TO memories')
+      raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_scope_status ON memories(scope_type, scope_id, status)')
+      raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_status_created ON memories(status, created_at)')
+      raw.exec('CREATE INDEX IF NOT EXISTS idx_memories_subject ON memories(scope_type, scope_id, subject_slug)')
+      raw.exec('COMMIT')
+      } catch (e) {
+        raw.exec('ROLLBACK')
+        throw e
+      }
+    }
+  }
   // Idempotent migration: add error_message to pre-existing memory_distill_runs.
   // llm_error 时存 LLM 调用错误描述（spec 数据模型）。无 backfill（老行 NULL）。
   {
@@ -327,6 +384,21 @@ export function openDb(path: string) {
     if (!cols.some((c) => c.name === 'raw_text')) {
       raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN raw_text TEXT')
     }
+  }
+  // Idempotent migration: add step-state columns to memory_distill_jobs (spec 2026-08-18 §4.1).
+  // 断点续跑：current_step 记当前步骤、step_attempts 记当前步骤失败计数（3 次暂停）、step_error 汇总通知用。
+  // 无 backfill（老行 current_step/step_error = NULL = distill 新任务；step_attempts 默认 0）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_jobs)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'current_step')) raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN current_step TEXT')
+    if (!cols.some((c) => c.name === 'step_attempts')) raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN step_attempts INTEGER NOT NULL DEFAULT 0')
+    if (!cols.some((c) => c.name === 'step_error')) raw.exec('ALTER TABLE memory_distill_jobs ADD COLUMN step_error TEXT')
+  }
+  // Idempotent migration: add paused_step to memory_distill_runs (spec 2026-08-18 §4.1).
+  // 暂停任务记暂停在哪步；非暂停 NULL。无 backfill（老行 NULL = 未暂停）。
+  {
+    const cols = raw.prepare('PRAGMA table_info(memory_distill_runs)').all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'paused_step')) raw.exec('ALTER TABLE memory_distill_runs ADD COLUMN paused_step TEXT')
   }
   return db
 }

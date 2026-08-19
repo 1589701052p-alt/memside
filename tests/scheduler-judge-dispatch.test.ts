@@ -102,7 +102,10 @@ test('mode=economy -> 走单发 judge(无 agent 协议段)', async () => {
   expect(judgeSystems[0]).not.toContain(AGENT_PROTOCOL_LINE)
 })
 
-test('质量模式 agent LLM 报错 -> 候选仍入库(全保留兜底),job done 非 failed', async () => {
+test('质量模式 agent LLM 报错 -> step 失败：job 回 pending 断点停 judge（Task 7 正式语义）', async () => {
+  // Task 7（2026-08-18 §5）：agent 失败不再 WIP「空 verdicts + done」——judge 步
+  // 失败回 pending + 退避，断点停 judge（distill/dedup 不重算）；3 次暂停 +
+  // pending_review 由 tests/scheduler-resume.test.ts 锁定，此处锁首跳。
   const jobId = await seedDueJob(dir)  // 真实存在的 cwd -> 走 agent 路径
   let createCalls = 0
   await tick(db, {
@@ -115,9 +118,11 @@ test('质量模式 agent LLM 报错 -> 候选仍入库(全保留兜底),job done
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
     loadJudgeConfig: () => ({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 }),
   })
-  expect(createCalls).toBe(1)  // 全保留兜底:候选照样入库(valueClass=null,人工审批兜底)
+  expect(createCalls).toBe(0)  // judge 未完成：无候选入库、不丢
   const jobs = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
-  expect(jobs[0]!.status).toBe('done')
+  expect(jobs[0]!.status).toBe('pending')      // 非 done：失败不消费 job
+  expect(jobs[0]!.currentStep).toBe('judge')   // 断点停 judge
+  expect(jobs[0]!.stepAttempts).toBe(1)
 })
 
 test('质量模式 + job.cwd 目录不存在 -> 降级经济模式单发判定(不跑 agent,蒸馏记录注明降级)', async () => {
@@ -195,12 +200,15 @@ test('judgeValueAgentic 纵深防御:rootDir=null 时工具为 stub,永不构造
     if (calls === 1) return '{"tool": "read", "args": {"path": "src/scheduler.ts"}}'
     return '{"final": {"verdicts": [{"index": 0, "category": "trap"}]}}'
   }
-  const { verdicts, trace } = await judgeValueAgentic(
+  const r = await judgeValueAgentic(
     [{ title: 'T', bodyMd: 'b', scopeType: 'project', runtime: 'claude-code', distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }],
     { callLLM, rootDir: null, approvedTitles: [], sourceKind: 'conversation', maxRounds: 5, timeBudgetMs: 60_000 },
   )
+  // Task 6：judgeValueAgentic 现返回 union；此成功路径应得到 verdicts + trace。
+  expect('failed' in r).toBe(false)
+  const { verdicts, trace } = r as Exclude<typeof r, { failed: true }>
   expect(verdicts[0]).toEqual({ index: 0, keep: true, valueClass: 'trap' })
-  const toolSteps = trace.filter((s) => s.kind === 'tool')
+  const toolSteps = trace.filter((s: { kind: string }) => s.kind === 'tool')
   expect(toolSteps.length).toBe(1)
   expect(toolSteps[0]!.toolResult).toContain('工具不可用')
   expect(toolSteps[0]!.toolResult).not.toContain('judgeValue')  // 没读到真文件内容

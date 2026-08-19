@@ -1,6 +1,6 @@
 import { detectErrorSignals, filterTranscriptForDistill, normalizeSubjectSlug, type TranscriptTurn, type MemoryScope, type RuntimeTag } from './pure'
 import type { LLMCall } from '@/llm'
-import { callWithRetry } from './retry'
+import { runLlmSession, type RoundRecord } from './llmSession'
 
 export const DISTILLER_SYSTEM_PROMPT = `You are memside-distiller, an internal subsystem that extracts durable long-term memories from a developer's recent claude code / opencode session.
 
@@ -110,6 +110,15 @@ export interface DistillInput {
   priorContext?: string | null
   /** 已审批记忆标题清单（上限 100 条由调用方保证）。空数组 = 无该节。 */
   approvedTitles?: string[]
+  /**
+   * Task 7 断点续跑接线（spec 2026-08-18 §5）：传 loadHistory 即走「带历史接续」
+   * 模式——每次调用只跑一轮新回合（maxAttempts = history.length + 1），由 scheduler
+   * 的 tick 逐轮驱动；persistRound 把每轮对话落 memory_distill_events。缺省（测试/
+   * 独立调用）为无记忆的 3 轮。
+   */
+  jobId?: string
+  persistRound?: (r: RoundRecord) => Promise<void>
+  loadHistory?: () => Promise<RoundRecord[]>
 }
 
 export interface DistillResult {
@@ -119,14 +128,21 @@ export interface DistillResult {
   rawOutput: unknown | null
   /** LLM 返回的原始候选数（含格式不合格被丢的）。 */
   rawCount: number
-  /** 底层 LLM 调用是否抛错（scheduler 据此判 llm_error vs empty_output）。 */
+  /**
+   * Task 7：session 失败标识（runLlmSession ok:false，重试轮耗尽）。scheduler 据此
+   * 走 step 失败分支（回 pending 退避 / 3 次暂停 + 通知），绝不把失败当「0 候选」
+   * 业务结果吞掉（spec P1）。
+   */
+  sessionFailed: boolean
+  /** session 失败原因列表（每轮一条，前缀 aborted/format/incomplete）。 */
+  reasons: string[]
+  /** 旧失败分类字段（向后兼容保留，由 reasons 推导）：末轮为 aborted 时 true。 */
   callThrew: boolean
-  /** LLM 调用错误描述（最后一次 attempt 的错误 message）。仅 llm_error 时非 null；
-   *  produced/empty_output/skipped 时 null。retry-success 时 null（错误被成功覆盖）。 */
+  /** 末次 aborted 轮的错误描述（剥前缀）。仅 sessionFailed 且末轮 aborted 时非 null。 */
   errorMessage: string | null
-  /** 解析失败描述（末次 attempt 的 parse/校验错误）。仅「调用未抛错但重试耗尽未获合法结构」时非 null。 */
+  /** 非 aborted 的失败原因汇总。仅 sessionFailed 且末轮非 aborted 时非 null。 */
   parseError: string | null
-  /** 末次未抛错 attempt 的原始输出文本。仅解析失败路径非 null（供 raw_text 落盘）。 */
+  /** 兼容字段：原始输出文本现落 llm_round 历史（saveLlmRound），此处恒 null。 */
   lastRawText: string | null
 }
 
@@ -191,103 +207,109 @@ function distillShouldRetry(parsed: unknown): string | null {
   return null
 }
 
+/**
+ * 解析 + 规范化 distill 产出（Task 7 从 distillTranscript 抽出）：parsed 形状不对
+ * 返回 null；合法时逐条规范化（origin/evidence 贴金防护、subjectSlug 降级等，
+ * 语义与旧内联实现逐字一致）。
+ */
+function parseDistillCandidates(parsed: unknown, sourceKind?: 'subagent' | 'conversation'): { candidates: DistillCandidate[]; rawCount: number } | null {
+  if (!parsed || typeof parsed !== 'object') return null
+  const p = parsed as { candidates?: unknown }
+  if (!Array.isArray(p.candidates)) return null
+  const rawCount = p.candidates.length
+  const out: DistillCandidate[] = []
+  for (const c of p.candidates) {
+    if (!c || typeof c !== 'object') continue
+    const o = c as Record<string, unknown>
+    if (typeof o.title !== 'string' || typeof o.bodyMd !== 'string') continue
+    if (!o.title.includes('[category:')) continue
+    const scope = o.scope === 'global' ? 'global' : 'project'
+    const rt = o.runtime === 'claude-code' || o.runtime === 'opencode' ? o.runtime : null
+    const action =
+      o.distillAction === 'update_of' ||
+      o.distillAction === 'duplicate_of' ||
+      o.distillAction === 'conflict_with'
+        ? o.distillAction
+        : 'new'
+    const rawOrigin = o.origin
+    let origin: DistillOrigin =
+      rawOrigin === 'user-stated' || rawOrigin === 'user-confirmed' ? rawOrigin : 'agent-observed'
+    const evidence =
+      typeof o.evidence === 'string' && o.evidence.trim() ? o.evidence.trim() : null
+    // 贴金防护（spec §R1）：摘不出原话就不许戴 user-stated/user-confirmed 的帽子。
+    if (origin !== 'agent-observed' && evidence === null) origin = 'agent-observed'
+    // subagent 降级（spec §3.2）：subagent 的 role:user 是主 agent 派发的 task brief，
+    // 非真人陈述。强制 agent-observed，不享受 stated 免疫。evidence 保留作观察依据。
+    if (sourceKind === 'subagent') origin = 'agent-observed'
+    out.push({
+      title: o.title,
+      bodyMd: o.bodyMd,
+      scopeType: scope,
+      runtime: rt as RuntimeTag,
+      distillAction: action,
+      origin,
+      evidence,
+      subjectSlug: normalizeSubjectSlug(o.subjectSlug),
+    })
+  }
+  return { candidates: out, rawCount }
+}
+
 export async function distillTranscript(input: DistillInput): Promise<DistillResult> {
   try {
     const signals = detectErrorSignals(input.turns)
     const filtered = filterTranscriptForDistill(input.turns)
     const userPrompt = renderUserPrompt(filtered, input.runtime, input.cwd, signals, input.existingSlugs, input.sourceKind, input.priorContext, input.approvedTitles)
-    // callWithRetry swallows callLLM throws (returns undefined after exhausting
-    // retries). callThrew tracks whether the underlying call threw, for two uses:
-    // (a) errorMessage 取值（callThrew ? lastErrorMessage : null）,
-    // (b) scheduler 分类 llm_error vs empty_output.
-    // filteredTurns 已与调用成败解耦（恒为过滤快照，见下方注释）。
-    let callThrew = false
-    let lastErrorMessage: string | null = null
-    let lastAttemptRaw: string | null = null
-    let lastAttemptError: string | null = null
-    const wrappedCall: LLMCall = async (sys, user, opts) => {
-      // reset per attempt: a prior failed attempt must not stain a later success.
-      // callWithRetry re-invokes wrappedCall on throw; without this reset, an
-      // attempt-0 throw (callThrew=true) would persist even after attempt-1
-      // succeeds, misclassifying a produced result as llm_error (spec §4).
-      callThrew = false
-      try {
-        return await input.callLLM(sys, user, opts)
-      } catch (e) {
-        callThrew = true
-        lastErrorMessage = e instanceof Error ? e.message : String(e)
-        throw e
+    // filteredTurns 恒为过滤快照（调用前已算出，与调用成败无关——既有不变量）。
+    // Task 7：蒸馏步走可接续执行器（runLlmSession）。传 loadHistory = 断点续跑模式
+    // （单次只跑一轮新回合，历史/落盘由 scheduler 经 memory_distill_events 驱动）；
+    // 缺省 = 无记忆 3 轮（独立调用/旧测试语义）。
+    const history = input.loadHistory ? await input.loadHistory() : []
+    const session = await runLlmSession({
+      callLLM: input.callLLM,
+      system: DISTILLER_SYSTEM_PROMPT,
+      initialUser: userPrompt,
+      step: 'distill',
+      jobId: input.jobId ?? '',
+      persistRound: input.persistRound,
+      shouldRetry: distillShouldRetry,
+      ...(input.loadHistory
+        ? { loadHistory: async () => history, maxAttempts: history.length + 1 }
+        : {}),
+    })
+    if (!session.ok) {
+      // 执行器重试耗尽：失败就是失败（P1），绝不吞成「0 候选」业务结果。
+      // callThrew/parseError 由 reasons 推导（末轮 aborted → callThrew）。
+      const lastReason = session.reasons[session.reasons.length - 1] ?? 'aborted:'
+      const callThrew = lastReason.startsWith('aborted')
+      return {
+        candidates: [], filteredTurns: filtered, rawOutput: null, rawCount: 0,
+        sessionFailed: true, reasons: session.reasons,
+        callThrew,
+        errorMessage: callThrew ? lastReason.replace(/^aborted:/, '') : null,
+        parseError: callThrew ? null : (session.reasons.join('；') || '解析失败：无错误描述'),
+        lastRawText: null,
       }
     }
-    const parsed = await callWithRetry({
-      call: wrappedCall,
-      system: DISTILLER_SYSTEM_PROMPT,
-      user: userPrompt,
-      shouldRetry: distillShouldRetry,
-      onAttempt: ({ raw, error }) => { lastAttemptRaw = raw; lastAttemptError = error },
-    }) as { candidates?: unknown } | undefined
-    const rawOutput: unknown = parsed ?? null
-    if (!parsed || !Array.isArray(parsed.candidates)) {
-      // filteredTurns 恒为过滤快照（调用前已算出，与调用成败无关）。
-      // 历史 bug 曾在 callThrew 时清空 -> llm_error job 丢失 source input（spec §source input 修复）。
-      // 空字符串/纯空白 = 模型无产出（与 {"candidates":[]} 同义），归 empty_output 非 parse_error。
-      // 非空但解析失败 = 真 parse_error。callThrew 与 parseError 互斥不变。
-      // lastAttemptRaw null 的可达性：仅当所有 attempt 都 call 抛错（onAttempt 在抛错路径不触发，
-      // retry.ts:41-45）——此时 callThrew=true，下方三元 callThrew?null 短路，isEmpty 不求值。
-      // 故 null 分支不可观测，(lastAttemptRaw ?? '').trim() 的 ?? '' 仅满足 TS CFA（闭包赋值不可见，
-      // lastAttemptRaw 被窄化为 null→never，`!= null &&` 写法 typecheck 不过）。
-      // 不变量：callThrew=false ⟹ 末次 attempt 未抛 ⟹ fireAttempt 触发 ⟹ lastAttemptRaw 非空。
-      // 若未来改 retry.ts 破坏此不变量，需加断言锁。
-      const isEmpty = (lastAttemptRaw ?? '').trim() === ''
-      return { candidates: [], filteredTurns: filtered, rawOutput, rawCount: 0, callThrew,
-        errorMessage: callThrew ? lastErrorMessage : null,
-        parseError: callThrew ? null : (isEmpty ? null : (lastAttemptError ?? '解析失败：无错误描述')),
-        lastRawText: callThrew ? null : lastAttemptRaw }
+    const rawOutput: unknown = session.parsed
+    const parsedRes = parseDistillCandidates(session.parsed, input.sourceKind)
+    if (!parsedRes) {
+      // 空字符串/纯空白 = 模型无产出（与 {"candidates":[]} 同义），归 empty_output 非
+      // parse_error——session ok 意味着末轮 parse+shouldRetry 已通过（合法 JSON 且有
+      // candidates 数组），此分支仅防御形状突变（不可达路径）。
+      return { candidates: [], filteredTurns: filtered, rawOutput, rawCount: 0,
+        sessionFailed: false, reasons: [], callThrew: false, errorMessage: null,
+        parseError: null, lastRawText: null }
     }
-    const rawCount = parsed.candidates.length
-    const out: DistillCandidate[] = []
-    for (const c of parsed.candidates) {
-      if (!c || typeof c !== 'object') continue
-      const o = c as Record<string, unknown>
-      if (typeof o.title !== 'string' || typeof o.bodyMd !== 'string') continue
-      if (!o.title.includes('[category:')) continue
-      const scope = o.scope === 'global' ? 'global' : 'project'
-      const rt = o.runtime === 'claude-code' || o.runtime === 'opencode' ? o.runtime : null
-      const action =
-        o.distillAction === 'update_of' ||
-        o.distillAction === 'duplicate_of' ||
-        o.distillAction === 'conflict_with'
-          ? o.distillAction
-          : 'new'
-      const rawOrigin = o.origin
-      let origin: DistillOrigin =
-        rawOrigin === 'user-stated' || rawOrigin === 'user-confirmed' ? rawOrigin : 'agent-observed'
-      const evidence =
-        typeof o.evidence === 'string' && o.evidence.trim() ? o.evidence.trim() : null
-      // 贴金防护（spec §R1）：摘不出原话就不许戴 user-stated/user-confirmed 的帽子。
-      if (origin !== 'agent-observed' && evidence === null) origin = 'agent-observed'
-      // subagent 降级（spec §3.2）：subagent 的 role:user 是主 agent 派发的 task brief，
-      // 非真人陈述。强制 agent-observed，不享受 stated 免疫。evidence 保留作观察依据。
-      if (input.sourceKind === 'subagent') origin = 'agent-observed'
-      out.push({
-        title: o.title,
-        bodyMd: o.bodyMd,
-        scopeType: scope,
-        runtime: rt as RuntimeTag,
-        distillAction: action,
-        origin,
-        evidence,
-        subjectSlug: normalizeSubjectSlug(o.subjectSlug),
-      })
-    }
-    return { candidates: out, filteredTurns: filtered, rawOutput, rawCount, callThrew, errorMessage: null,
+    return { candidates: parsedRes.candidates, filteredTurns: filtered, rawOutput, rawCount: parsedRes.rawCount,
+      sessionFailed: false, reasons: [], callThrew: false, errorMessage: null,
       parseError: null, lastRawText: null }
   } catch (e) {
-    // Never throw: distill failures degrade to "no candidates this round".
-    // 顶层兜底（detectErrorSignals/filterTranscriptForDistill 等纯函数抛错时），
-    // 不可达路径，errorMessage 仍透出异常 message 供诊断。
-    return { candidates: [], filteredTurns: [], rawOutput: null, rawCount: 0, callThrew: true,
-      errorMessage: e instanceof Error ? e.message : String(e),
-      parseError: null, lastRawText: null }
+    // Never throw: 顶层兜底（detectErrorSignals/filterTranscriptForDistill 等纯函数抛错时），
+    // 不可达路径，转成 session 失败标识让 scheduler 走 step 失败分支（不再吞成 done）。
+    const msg = e instanceof Error ? e.message : String(e)
+    return { candidates: [], filteredTurns: [], rawOutput: null, rawCount: 0,
+      sessionFailed: true, reasons: [`aborted:${msg}`], callThrew: true,
+      errorMessage: msg, parseError: null, lastRawText: null }
   }
 }

@@ -26,7 +26,7 @@ export function serializeMemoriesJson(memories: Memory[], exportedAt?: number): 
 
 const VALID_SCOPES = new Set(['project', 'global'])
 const VALID_RUNTIMES = new Set(['claude-code', 'opencode', null])
-const VALID_STATUSES = new Set(['candidate', 'approved', 'archived', 'superseded', 'rejected'])
+const VALID_STATUSES = new Set(['candidate', 'approved', 'archived', 'superseded', 'rejected', 'pending_review'])
 
 function asStr(v: unknown): string { return typeof v === 'string' ? v : '' }
 function asStrOrNull(v: unknown): string | null { return typeof v === 'string' ? v : null }

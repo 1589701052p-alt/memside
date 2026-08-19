@@ -56,9 +56,13 @@ test('runDistillOnce wires loadTranscript + callLLM + createCandidate end-to-end
   })
   await runDistillOnce(db, {
     loadClaudeCreds: () => ({ apiKey: 'sk-test', source: 'test' }),
-    callLLM: async () => JSON.stringify({
-      candidates: [{ title: '[category:invariant] refund 14d', bodyMd: '14 days', scope: 'project', runtime: null, distillAction: 'new' }],
-    }),
+    // Task 7：judge 失败即 step 失败（回 pending），成功路径按 system 分派。
+    callLLM: async (sys: string) => {
+      if (sys.includes('memside-distiller')) return JSON.stringify({
+        candidates: [{ title: '[category:invariant] refund 14d', bodyMd: '14 days', scope: 'project', runtime: null, distillAction: 'new' }],
+      })
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
+    },
   })
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(rows[0]!.status).toBe('done')

@@ -1,6 +1,6 @@
 import type { DistillCandidate } from '@/memory/distiller'
 import type { LLMCall } from '@/llm'
-import { callWithRetry } from './retry'
+import { runLlmSession, type RoundRecord } from './llmSession'
 
 export type ValueClass = 'user-rule' | 'decision' | 'preference' | 'convention' | 'trap' | 'topology'
 export type DiscardReason = 'public-knowledge' | 'derivable' | 'taming' | 'fleeting' | 'exact-duplicate' | 'duplicate'
@@ -201,45 +201,57 @@ function valueShouldRetry(n: number): (parsed: unknown) => string | null {
 
 /**
  * Origin-driven value classification (9 类：6 留 + 3 丢) + stated 免疫 derivable 兜底。
- * keepNull 失败兜底：用户陈述类（user-stated/user-confirmed）给 decision（免疫 Web UI
+ * 用户陈述类（user-stated/user-confirmed）缺合法类别时给 decision（免疫 Web UI
  * "批量拒绝未评估" 按钮，该按钮 target value_class IS NULL），agent-observed 给 null。
  * 主路径映射 LLM 9 类 verdict：retain 6 类 -> keep+valueClass；drop 3 类（public-knowledge
  * /derivable/fleeting）-> discard。代码硬兜底（spec §R2，7-30 误杀回归锁）：origin 非
  * agent-observed 的候选被判 derivable 时改判 keep+decision（prompt 已禁考 Q2，LLM 违规
- * 时代码再兜一道）。judgeValueBase 吞自身 LLM 错误（全 keep+null/decision），不冒泡。
+ * 时代码再兜一道）。
+ *
+ * Task 6（2026-08-18 spec §缺陷2/§8.4）：judge 失败绝不走 keepNull 全保留冒充成功。
+ * judgeValueBase 走 runLlmSession，失败返回 {failed:true, reasons} 让 scheduler 据此
+ * 暂停任务。Task 7 起可传 session 选项（jobId/persistRound/loadHistory）接断点续跑：
+ * 传 loadHistory 即带历史接续、单次只跑一轮新回合；缺省为无记忆 3 轮（独立调用）。
  */
+export type JudgeResult = ValueVerdict[] | { failed: true; reasons: string[] }
+
+/** Task 7：judge 步执行器接线选项（与 distiller/dedup 同款约定）。 */
+export interface JudgeSessionOpts {
+  jobId?: string
+  persistRound?: (r: RoundRecord) => Promise<void>
+  loadHistory?: () => Promise<RoundRecord[]>
+}
+
 async function judgeValueBase(
   candidates: DistillCandidate[],
   callLLM: LLMCall,
-): Promise<ValueVerdict[]> {
+  session?: JudgeSessionOpts,
+): Promise<JudgeResult> {
   const n = candidates.length
   if (n === 0) return []
-  const keepNull = (): ValueVerdict[] =>
-    candidates.map((c, i) => ({
-      index: i,
-      keep: true,
-      // R3 失败兜底（spec）：用户陈述类给 decision（免疫批量拒绝），observed 给 null。
-      valueClass: c.origin === 'agent-observed' ? null : ('decision' as ValueClass),
-    }))
-  try {
-    const parsed = await callWithRetry({
-      call: callLLM,
-      system: VALUE_JUDGE_SYSTEM_PROMPT,
-      user: renderUserPrompt(candidates),
-      shouldRetry: valueShouldRetry(n),
-    }) as { verdicts?: unknown } | undefined
-    if (!parsed || !Array.isArray(parsed.verdicts)) return keepNull()
-    const entries = (parsed.verdicts as unknown[]).filter(
-      (v): v is { index: number; category: string } =>
-        !!v && typeof v === 'object' &&
-        typeof (v as { index?: unknown }).index === 'number' &&
-        typeof (v as { category?: unknown }).category === 'string',
-    )
-    // Task 5:逐条映射逻辑抽为 verdictsFromCategories(与 agent 判定器共用),语义不变。
-    return verdictsFromCategories(entries, candidates, VALID_CATEGORIES, DISCARD_CATEGORIES)
-  } catch {
-    return keepNull()
+  const history = session?.loadHistory ? await session.loadHistory() : []
+  const result = await runLlmSession({
+    callLLM, system: VALUE_JUDGE_SYSTEM_PROMPT,
+    initialUser: renderUserPrompt(candidates), step: 'judge', jobId: session?.jobId ?? '',
+    persistRound: session?.persistRound,
+    ...(session?.loadHistory
+      ? { loadHistory: async () => history, maxAttempts: history.length + 1 }
+      : {}),
+    shouldRetry: valueShouldRetry(n),
+  })
+  if (!result.ok) return { failed: true, reasons: result.reasons }
+  const parsed = result.parsed as { verdicts?: unknown } | undefined
+  if (!parsed || !Array.isArray(parsed.verdicts)) {
+    return { failed: true, reasons: ['verdicts 字段缺失'] }
   }
+  const entries = (parsed.verdicts as unknown[]).filter(
+    (v): v is { index: number; category: string } =>
+      !!v && typeof v === 'object' &&
+      typeof (v as { index?: unknown }).index === 'number' &&
+      typeof (v as { category?: unknown }).category === 'string',
+  )
+  // Task 5:逐条映射逻辑抽为 verdictsFromCategories(与 agent 判定器共用),语义不变。
+  return verdictsFromCategories(entries, candidates, VALID_CATEGORIES, DISCARD_CATEGORIES)
 }
 
 /**
@@ -247,18 +259,19 @@ async function judgeValueBase(
  * override (fix6). Code maps public-knowledge/derivable/fleeting => discard,
  * user-rule/decision/preference/convention/trap/topology => keep with valueClass;
  * stated-immune backstop (spec §R2) re-classifies non-observed candidates that the LLM
- * wrongly tagged derivable to keep+decision. judgeValueBase swallows its own LLM errors
- * (all keep+null/decision), never bubbles. The taming override (fix6) runs last and
- * overrides the stated-immune backstop (safety > stated-immune): a taming instruction is
- * discarded even if it would otherwise be retained.
+ * wrongly tagged derivable to keep+decision. Task 6: judge 失败不再 keepNull 全保留冒充
+ * 成功——judgeValueBase 失败时返回 {failed:true,reasons} 冒泡给 scheduler（Task 7 接
+ * 暂停）。taming override 仅在成功路径末尾跑，覆盖 stated 免疫（安全 > stated 免疫）。
  */
 export async function judgeValue(
   candidates: DistillCandidate[],
   callLLM: LLMCall,
-): Promise<ValueVerdict[]> {
+  session?: JudgeSessionOpts,
+): Promise<JudgeResult> {
   const n = candidates.length
   if (n === 0) return []
-  const base = await judgeValueBase(candidates, callLLM)
+  const base = await judgeValueBase(candidates, callLLM, session)
+  if (!Array.isArray(base)) return base  // 失败标识冒泡，不冒充成功
   // 第六轮第 4 项：taming override，最后跑，覆盖 stated 免疫（安全 > stated 免疫）。
   // 驯化指令即使 origin=user-stated，仍丢弃--合法用户规则不会含反馈压制词，无现实冲突。
   return base.map((v, i) =>

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { loadClaudeCreds, type ClaudeCreds } from './creds'
 import { DEFAULT_LLM_MAX_TOKENS, type LLMCall, type LLMCallOpts } from './llm'
+import { isAbortLike } from './memory/stepPrompt'
 import type { UiLlmConfig } from './settings'
 
 export interface AnthropicDeps {
@@ -32,7 +33,7 @@ export const DISTILL_MODEL = 'claude-haiku-4-5-20251001'
 
 /**
  * Build the `callLLM(system, user, opts?)` seam the distiller / dedup /
- * valueFilter (via callWithRetry) consume. Production wires the real
+ * valueFilter (via runLlmSession) consume. Production wires the real
  * `@anthropic-ai/sdk` client using `loadClaudeCreds`; tests inject a mock
  * `callLLM` directly (or `loadClaudeCreds` here).
  *
@@ -78,7 +79,28 @@ export function makeLLMCall(deps: AnthropicDeps = {}): LLMCall {
       },
       { timeout: 600_000 },
     )
-    const msg = await stream.finalMessage()
+    let msg
+    try {
+      msg = await stream.finalMessage()
+    } catch (e) {
+      // 诊断化（spec §缺陷3 / Task 10）：只有当原始错误确实是 abort / 连接中断 /
+      // 超时 / socket 复位等「网关掐断」类异常时，才 re-throw 带诊断前缀的 Error
+      // （供 runLlmSession 接续重试落盘 + UI 可见，原文作 cause 保留）。
+      // 其它错误（401 / 400 / 校验失败等）原样 re-throw——保留 SDK 原生消息，
+      // 避免把鉴权 / 入参错误误诊为「网关掐断」（P1/P8：失败要准确、不可静默）。
+      //
+      // P6 不变量：memside 与 LLM/网关解耦——不设主动 setTimeout / AbortController
+      // 掐断（已有的 timeout:600_000 是 SDK 硬上限兜底，流式字节流动期间不触发）。
+      // 只改错误文案，不改流式语义、不加主动超时。
+      if (isAbortLike(e)) {
+        const raw = e instanceof Error ? e.message : String(e)
+        throw new Error(
+          `LLM 调用被中断，可能是网关掐断或超时；memside 会自动接续重试（原始错误：${raw}）`,
+          { cause: e },
+        )
+      }
+      throw e
+    }
     // extract text from content blocks (TextBlock has type:'text' + text:string;
     // ToolUseBlock is silently dropped). The `ContentBlock` union doesn't narrow
     // through `.filter` without a type predicate, so narrow explicitly.

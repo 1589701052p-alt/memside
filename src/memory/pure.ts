@@ -150,7 +150,7 @@ export function detectErrorSignals(turns: readonly TranscriptTurn[]): ErrorSigna
   }
 }
 
-export type MemoryStatus = 'candidate' | 'approved' | 'archived' | 'superseded' | 'rejected'
+export type MemoryStatus = 'candidate' | 'approved' | 'archived' | 'superseded' | 'rejected' | 'pending_review'
 
 const TRANSITIONS: Record<MemoryStatus, MemoryStatus[]> = {
   candidate: ['approved', 'rejected'],
@@ -158,6 +158,9 @@ const TRANSITIONS: Record<MemoryStatus, MemoryStatus[]> = {
   archived: ['approved'],
   superseded: [],
   rejected: ['candidate'],
+  // judge 暂停期间标记的 pending_review：judge 成功 / 用户手动接管可回 candidate；
+  // 用户也可在暂停期间直接 approve / reject（spec §6.4 手动接管审批）。
+  pending_review: ['candidate', 'approved', 'rejected'],
 }
 
 export function canTransition(from: MemoryStatus, to: MemoryStatus): boolean {

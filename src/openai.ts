@@ -52,7 +52,7 @@ export function loadOpenAiUiCreds(
  * 构造由 OpenAI /chat/completions 支撑的 LLMCall seam。fetch 直连，Bearer 鉴权，
  * system+user 两条 message，取 choices[0].message.content。max_tokens 走
  * opts?.maxTokens ?? DEFAULT_LLM_MAX_TOKENS。无凭据 / HTTP 非 2xx / 超时 / 响应异常
- * 均抛错，交由 callWithRetry 重试 + 各层降级。
+ * 均抛错，交由 runLlmSession 执行器重试 + 各层降级。
  */
 export function makeLLMCall(deps: OpenAiDeps = {}): LLMCall {
   const load = deps.loadOpenAiCreds ?? loadOpenAiCreds
