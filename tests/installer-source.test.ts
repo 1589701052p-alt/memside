@@ -94,3 +94,34 @@ describe('发版产物名带版本号', () => {
     expect(yml).not.toMatch(/installer\/memside-setup\.exe/)
   })
 })
+
+/**
+ * 升级识别已安装目录（2026-08-20 用户反馈「升级版本时安装器不能识别已安装
+ * 的目录」）：NSIS 只有配置 InstallDirRegKey 才会在升级时预填上次安装目录，
+ * 否则每次都从硬编码默认值开始——首装选了自定义目录的用户升级即「失忆」。
+ * 读的键正是安装器自己写入的卸载注册表 InstallLocation（读写闭环）。
+ * 伴生：升级先 taskkill 在跑的 daemon（运行中的 exe 锁文件，否则 File 覆盖
+ * 弹「正在使用」重试框）；Add/Remove 写 DisplayVersion 供版本对照。
+ */
+describe('安装器升级识别已安装目录', () => {
+  const nsi = readFileSync(join(repoRoot, 'installer', 'installer.nsi'), 'utf-8')
+
+  test('InstallDirRegKey 读回上次安装目录（写读同键闭环）', () => {
+    expect(nsi).toContain(
+      'InstallDirRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${APP_NAME}" "InstallLocation"',
+    )
+    // 写侧仍存在（InstallDirRegKey 读的就是这行写的值）
+    expect(nsi).toContain('"InstallLocation" "$INSTDIR"')
+    // 默认目录 fallback 仍在（首装无键时用）
+    expect(nsi).toContain('InstallDir "$LOCALAPPDATA\\memside"')
+  })
+
+  test('升级前结束在跑的 daemon（防 exe 锁文件）且在 File 拷贝之前', () => {
+    expect(nsi).toContain('nsExec::Exec \'taskkill /IM ${APP_EXE} /F\'')
+    expect(nsi.indexOf('taskkill')).toBeLessThan(nsi.indexOf('File /oname=memside.exe'))
+  })
+
+  test('Add/Remove 注册 DisplayVersion 供升级对照', () => {
+    expect(nsi).toContain('"DisplayVersion" "${APP_VERSION}"')
+  })
+})

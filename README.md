@@ -36,6 +36,8 @@ AI agent（Claude Code / opencode）的本地记忆 sidecar。它监听你的 AI
 3. 双击桌面/开始菜单的 `memside` 快捷方式启动。
 
 > 首次双击未签名的 exe，Windows 会弹"已保护你的电脑"（SmartScreen）。点 **"更多信息"** → **"仍运行"** 即可。这是 v1 未签名的正常现象，后续版本会评估代码签名。
+>
+> **升级**：下载新版本的 `memside-setup-<版本号>.exe` 直接运行即可。安装器会自动识别上次的安装目录（在跑的旧 daemon 会被先结束，数据不受影响）。
 
 <details>
 <summary>不想装安装器？直接用便携 exe</summary>
