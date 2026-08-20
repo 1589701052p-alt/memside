@@ -1,5 +1,8 @@
 import { test, expect } from 'bun:test'
 import { distillTranscript, DISTILLER_SYSTEM_PROMPT } from '@/memory/distiller'
+import { parseTranscriptFile } from '@/claude/transcript'
+import { writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 
 /**
  * Origin 归因三层防线（spec 2026-08-20 §3.5/§3.6）。
@@ -101,4 +104,53 @@ test('subagent 降级与无真人行兜底叠加：均为 agent-observed，互�
     callLLM: async () => JSON.stringify(fakeResponse),
   })
   expect(result.candidates[0]!.origin).toBe('agent-observed')
+})
+
+// ---------------------------------------------------------------------------
+// 事故复现回归锁（spec 2026-08-20 §1）：复刻 distill job 01M0EKC0AGBAENJQ8KWS3E4PDQ
+// 的输入形状——/loop 会话，真人早已离场，turns 全是 loop 重放（promptSource=system）
+// 与 assistant/tool 轮转。全链路：JSONL 文件 → parseTranscriptFile → distillTranscript，
+// 断言捕获层重标 system + 蒸馏器兜底降级 origin，双重防线同时生效。
+// ---------------------------------------------------------------------------
+
+test('e2e 事故复现：/loop 会话 transcript → 捕获层 system + origin 强制降级', async () => {
+  const dir = join(import.meta.dir, '.tmp-origin-e2e')
+  rmSync(dir, { recursive: true, force: true })
+  mkdirSync(dir, { recursive: true })
+  const p = join(dir, 'loop-session.jsonl')
+  // 复刻实测 transcript 行形状（去掉长字段，保留来源字段与内容）
+  const rows = [
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '正在等待 Task 5。' }] } },
+    { type: 'user', promptSource: 'system', isMeta: true, message: { role: 'user', content: '检查 Task 5 implementer (a11a0f3be1ceeb11c) 是否完成。若完成则处理 report（DONE→生成 review package 派 task reviewer；DONE_WITH_CONCERNS→先读 concerns；NEEDS_CONTEXT→补上下文重派；BLOCKED→裁决）' } },
+    { type: 'user', isMeta: true, message: { role: 'user', content: '[1 prior /loop wakeup found nothing actionable; loop is healthy.]' } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '唤醒已触发。正在检查 Task 5。' }] } },
+    // 工具结果行（toolUseResult 形态走 array 分支 → role:tool）
+    { type: 'user', toolUseResult: { success: true }, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: '4cb64a8 refactor commit' }] } },
+  ]
+  writeFileSync(p, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+
+  // 第一道防线：捕获层
+  const turns = parseTranscriptFile(p)
+  const roles = turns.map((t) => t.role)
+  expect(roles).toEqual(['assistant', 'system', 'system', 'assistant', 'tool'])
+  expect(turns.some((t) => t.role === 'user')).toBe(false)  // 无真人行
+
+  // 第二道防线：蒸馏器兜底（LLM 顽固标 user-stated 也被推翻）
+  const fakeResponse = {
+    candidates: [{
+      title: '[category:process] 子代理任务报告的处理分支：DONE/DONE_WITH_CONCERNS/NEEDS_CONTEXT/BLOCKED',
+      bodyMd: '按 report 状态分支处理任务结果。',
+      scope: 'project', runtime: null, distillAction: 'new',
+      origin: 'user-stated',
+      evidence: '按 report 状态分支处理 Task 1 结果',
+    }],
+  }
+  const result = await distillTranscript({
+    turns, runtime: 'claude-code', cwd: '/repo', existingSlugs: [],
+    callLLM: async () => JSON.stringify(fakeResponse),
+  })
+  expect(result.candidates.length).toBe(1)
+  expect(result.candidates[0]!.origin).toBe('agent-observed')
+
+  rmSync(dir, { recursive: true, force: true })
 })
