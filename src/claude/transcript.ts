@@ -1,6 +1,6 @@
 import { readFileSync, statSync, existsSync, readdirSync } from 'node:fs'
 import type { TranscriptTurn } from '@/memory/pure'
-import { captureToolCall } from '@/memory/pure'
+import { captureToolCall, isInjectedMemoryBlock } from '@/memory/pure'
 
 /**
  * Guard against pathological inputs: a real claude code transcript JSONL is
@@ -60,7 +60,10 @@ function extractToolInputPath(input: unknown): string | undefined {
  * `file-history-snapshot`, `file-history-delta`, ...) is skipped.
  *
  * Row mapping:
- * - `type:"user"` with `message.content` a string -> `{role:'user', content}`.
+ * - `type:"user"` with `message.content` a string -> `{role, content}` where role
+ *   按来源字段判定（spec 2026-08-20 §3.2，D1/D2）：真人（origin.kind=human /
+ *   promptSource=typed，OR 语义）-> user，其余（loop 重放 / 注入记忆块 /
+ *   task 通知 / peer / 无字段）-> system。
  *   With `content` an array, each `{type:'tool_result'}` item becomes a
  *   `{role:'tool', content: extractText(item.content), isError: !!is_error}`
  *   turn (so `detectErrorSignals` can count tool failures).
@@ -78,6 +81,27 @@ function extractToolInputPath(input: unknown): string | undefined {
  * possibly-shorter `[]`-or-valid-prefix result. Order of turns is preserved as
  * they appear in the file.
  */
+/**
+ * user 行来源判定（spec 2026-08-20 §3.2，D1/D2）。claude transcript 的 user 行
+ * 带来源字段（实测 2.1.235）：真人 = origin.kind=human / promptSource=typed（D2 OR）；
+ * loop 重放 = promptSource=system + isMeta；task 通知 = origin.kind=task-notification；
+ * 注入记忆块 = 无字段（靠 INJECTED_MEMORY_MARKER 内容识别）。无任何字段的行
+ * 保守判 system（D1：误降级可丢优于误升级锁死）。永不抛：畸形 origin 降级 system。
+ */
+function userRowRole(row: Record<string, unknown>, content: string): 'user' | 'system' {
+  try {
+    if (isInjectedMemoryBlock(content)) return 'system'
+    const origin = row.origin
+    if (origin && typeof origin === 'object' && !Array.isArray(origin)) {
+      if ((origin as { kind?: unknown }).kind === 'human') return 'user'
+    }
+    if (row.promptSource === 'typed') return 'user'
+    return 'system'
+  } catch {
+    return 'system'
+  }
+}
+
 export function parseTranscriptFile(path: string): TranscriptTurn[] {
   try {
     // Stat first so we can refuse oversized files without reading them.
@@ -119,7 +143,8 @@ export function parseTranscriptFile(path: string): TranscriptTurn[] {
         if (!msg || typeof msg !== 'object' || Array.isArray(msg)) continue
         const content = (msg as { content?: unknown }).content
         if (typeof content === 'string') {
-          turns.push({ role: 'user', content })
+          // 来源判定（spec 2026-08-20 §3.2）：传原始未收窄的 row 才能读 origin/promptSource。
+          turns.push({ role: userRowRole(row as Record<string, unknown>, content), content })
         } else if (Array.isArray(content)) {
           for (const item of content) {
             if (item && typeof item === 'object' && !Array.isArray(item)) {
