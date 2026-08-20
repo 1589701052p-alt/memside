@@ -92,10 +92,10 @@ test('distill 成功 → 推进到 dedup；第二次 tick 不重算 distill 的 
         ],
       })
     }
-    if (sys.includes('memside-dedup')) {
+    if (sys.includes('memside-consolidate')) {
       dedupCalls++
       if (dedupCalls <= 1) throw new Error('dedup api down')  // tick1：dedup 失败（单 tick 单轮）
-      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: false }] })
+      return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }, { action: 'keep', members: ['new-1'] }] })
     }
     return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }, { index: 1, category: 'decision' }] })
   }
@@ -256,6 +256,9 @@ test('final-fix-1: judge 成功后崩溃于 checkpoint 前 → 重跑不产生�
           { title: '[category:x] keep-b', bodyMd: 'b2', scope: 'project', runtime: null, distillAction: 'new' },
         ],
       })
+    }
+    if (sys.includes('memside-consolidate')) {
+      return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }, { action: 'keep', members: ['new-1'] }] })
     }
     return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }, { index: 1, category: 'decision' }] })
   }

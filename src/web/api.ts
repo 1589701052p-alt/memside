@@ -30,6 +30,10 @@ export interface MemoryItem {
   /** 出处原句摘抄（spec §R1）；老行/无标注为 null。 */
   evidence?: string | null
   subjectSlug?: string | null
+  /** 蒸馏动作（spec 2026-08-19-candidate-consolidation）；老行/null 无。update_of 表示精炼既有记忆。 */
+  distillAction?: string | null
+  /** 被取代的既有记忆 id（spec 2026-08-19-candidate-consolidation）；update_of 时非空。 */
+  supersedesId?: string | null
 }
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
