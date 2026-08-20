@@ -1,5 +1,6 @@
 import { DEFAULT_LLM_MAX_TOKENS, type LLMCall, type LLMCallOpts } from './llm'
 import type { UiLlmConfig } from './settings'
+import { parseSseChunks } from './memory/sse'
 
 export interface OpenAiCreds {
   apiKey: string
@@ -13,7 +14,7 @@ export interface OpenAiDeps {
   loadOpenAiCreds?: () => OpenAiCreds | null
   /** 注入 UI 级 LLM 配置；存在时 makeLLMCall 走 UI creds（loadOpenAiUiCreds），否则走注入/默认 loader。 */
   loadUiConfig?: () => UiLlmConfig | null
-  /** 单次请求硬超时；默认 120s。 */
+  /** 单次请求硬超时；默认 600s（流式总上限兜底，字节流动期间不触发）。 */
   timeoutMs?: number
 }
 
@@ -50,14 +51,14 @@ export function loadOpenAiUiCreds(
 
 /**
  * 构造由 OpenAI /chat/completions 支撑的 LLMCall seam。fetch 直连，Bearer 鉴权，
- * system+user 两条 message，取 choices[0].message.content。max_tokens 走
+ * system+user 两条 message，流式读 body 累加 choices[0].delta.content。max_tokens 走
  * opts?.maxTokens ?? DEFAULT_LLM_MAX_TOKENS。无凭据 / HTTP 非 2xx / 超时 / 响应异常
  * 均抛错，交由 runLlmSession 执行器重试 + 各层降级。
  */
 export function makeLLMCall(deps: OpenAiDeps = {}): LLMCall {
   const load = deps.loadOpenAiCreds ?? loadOpenAiCreds
   const loadUi = deps.loadUiConfig
-  const timeoutMs = deps.timeoutMs ?? 120_000
+  const timeoutMs = deps.timeoutMs ?? 600_000
   return async function callLLM(system: string, user: string, opts?: LLMCallOpts): Promise<string> {
     const c = loadUi ? loadOpenAiUiCreds(loadUi(), process.env) : load()
     if (!c) throw new Error('no OpenAI credentials; set OPENAI_API_KEY + OPENAI_BASE_URL + OPENAI_MODEL')
@@ -70,6 +71,7 @@ export function makeLLMCall(deps: OpenAiDeps = {}): LLMCall {
         body: JSON.stringify({
           model: c.model,
           max_tokens: opts?.maxTokens ?? DEFAULT_LLM_MAX_TOKENS,
+          stream: true,
           messages: [
             { role: 'system', content: system },
             { role: 'user', content: user },
@@ -81,9 +83,28 @@ export function makeLLMCall(deps: OpenAiDeps = {}): LLMCall {
         const body = await resp.text().catch(() => '')
         throw new Error(`OpenAI HTTP ${resp.status}: ${body.slice(0, 200)}`)
       }
-      const data = await resp.json() as { choices?: { message?: { content?: unknown } }[] }
-      const text = data?.choices?.[0]?.message?.content
-      if (typeof text !== 'string') throw new Error('OpenAI response missing choices[0].message.content')
+      if (!resp.body) throw new Error('OpenAI streaming response missing body')
+      // 流式：逐块读 body，SSE 解析，累加 delta.content。字节持续流动期间不触发超时。
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let leftover = ''
+      let text = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        leftover += decoder.decode(value, { stream: true })
+        const { events, leftover: next } = parseSseChunks(leftover, '')
+        leftover = next
+        for (const ev of events) {
+          if (ev.data === '[DONE]') { reader.cancel(); break }
+          let parsed: unknown
+          try { parsed = JSON.parse(ev.data) } catch { continue }
+          const delta = (parsed as { choices?: { delta?: { content?: unknown } }[] })?.choices?.[0]?.delta?.content
+          if (typeof delta === 'string') text += delta
+        }
+      }
+      // 兼容：响应可能为空（极少），返回空串（与旧「无 content 抛错」略不同——
+      // 流式语义下空响应更可能合法地返回空串；调用方 shouldRetry 路径会兜住非 JSON）。
       return text
     } finally {
       clearTimeout(timer)

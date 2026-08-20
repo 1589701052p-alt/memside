@@ -41,3 +41,10 @@ test('不完整行（无换行结尾）留作 leftover', () => {
   expect(r.events).toHaveLength(0)
   expect(r.leftover).toBe('data: {"un')
 })
+
+test('CRLF 行尾正确剥离 \\r', () => {
+  const r = parseSseChunks('data: {"a":1}\r\n\r\n', '')
+  expect(r.events).toHaveLength(1)
+  expect(r.events[0]!.data).toBe('{"a":1}')
+  expect(r.leftover).toBe('')
+})
