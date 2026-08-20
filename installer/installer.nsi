@@ -4,6 +4,10 @@
 ; EnVar:: 调用经 Plugins DLL 自动发现，无需 !include 头文件（插件未随附 .nsh）。
 !include "MUI2.nsh"
 
+!define APP_NAME "memside"
+!define APP_EXE "memside.exe"
+!define APP_PUBLISHER "memside"
+
 Name "memside"
 ; 产物名带版本号（发版约定 2026-08-20）：setup 输出与打包的 exe 均按
 ; `-DAPP_VERSION=<version>`（package.json build:installer 注入）命名，如
@@ -17,10 +21,10 @@ OutFile "memside-setup-${APP_VERSION}.exe"
 Unicode True
 RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\memside"
-
-!define APP_NAME "memside"
-!define APP_EXE "memside.exe"
-!define APP_PUBLISHER "memside"
+; 升级识别已安装目录（2026-08-20 用户反馈）：读上次安装写在卸载注册表里的
+; InstallLocation 作初始目录——首次安装（无键）落回上面的默认目录；升级时
+; 目录页直接预填上次的真实安装目录，不再「失忆」回 LOCALAPPDATA 默认值。
+InstallDirRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation"
 
 ; ------ finish 页引导（2026-08-18-exe-autostart-browser）：装完勾选立即启动 exe → 开浏览器 ------
 !define MUI_FINISHPAGE_RUN "$INSTDIR\memside.exe"
@@ -39,6 +43,11 @@ InstallDir "$LOCALAPPDATA\memside"
 
 Section "memside" SecMain
   SectionIn RO
+  ; 升级时旧 daemon 可能正跑着锁住 memside.exe（Windows 锁运行中的 exe），
+  ; 直接 File 覆盖会弹「文件正在使用」重试对话框。先结束旧进程——daemon 无
+  ; 内存态（数据全在 sqlite），杀掉无损；未在跑时 taskkill 报错，忽略即可。
+  nsExec::Exec 'taskkill /IM ${APP_EXE} /F'
+  Pop $0
   SetOutPath "$INSTDIR"
   ; 主程序（从构建产物拷入；CI build:installer 前先 build:exe；产物名带版本号，
   ; /oname= 保持装到用户机器后仍叫 memside.exe——快捷方式/PATH/MUI_FINISHPAGE_RUN 都指它）
@@ -58,6 +67,8 @@ Section "memside" SecMain
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "Publisher" "${APP_PUBLISHER}"
+  ; 已装版本号（Add/Remove「安装的应用」列表可见）——升级时用户可对照安装器版本
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayVersion" "${APP_VERSION}"
 SectionEnd
 
 Section "Uninstall"
