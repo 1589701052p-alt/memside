@@ -191,6 +191,9 @@ export function consolidateShouldRetry(approvedIds: Set<string>): (parsed: unkno
         if (typeof g.mergedTitle !== 'string' || !g.mergedTitle.includes('[category:'))
           return `group ${i} 缺少 mergedTitle 或 [category:] 前缀`
         if (typeof g.mergedBody !== 'string') return `group ${i} 缺少 mergedBody`
+        // spec §4.5：mergedSlug 与 mergedTitle/mergedBody 并列为合法 merge/update_of group 必备字段。
+        // 第一道防线：漏标 → 重试，避免 normalizeSubjectSlug(null) 静默产出无 slug 合并候选。
+        if (typeof g.mergedSlug !== 'string' || g.mergedSlug.trim() === '') return `group ${i} 缺少 mergedSlug`
       }
     }
     return null

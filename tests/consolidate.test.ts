@@ -130,6 +130,12 @@ describe('consolidateShouldRetry', () => {
   it('merge missing mergedTitle → retry', () => {
     expect(fn({ groups: [{ action: 'merge', members: ['new-0'], mergedBody: 'b', mergedEvidence: 'e', mergedSlug: 's', mergedOrigin: 'agent-observed' }] })).toMatch(/mergedTitle/)
   })
+  it('merge missing mergedSlug → retry', () => {
+    expect(fn({ groups: [{ action: 'merge', members: ['new-0'], mergedTitle: '[category:convention] x', mergedBody: 'b', mergedEvidence: 'e', mergedOrigin: 'agent-observed' }] })).toMatch(/mergedSlug/)
+  })
+  it('update_of missing mergedSlug → retry', () => {
+    expect(fn({ groups: [{ action: 'update_of', targetId: 'A', members: ['new-0'], mergedTitle: '[category:convention] x', mergedBody: 'b', mergedEvidence: 'e', mergedOrigin: 'agent-observed' }] })).toMatch(/mergedSlug/)
+  })
   it('legal → null (accept)', () => {
     expect(fn(llmOutput)).toBeNull()
   })
