@@ -1,4 +1,4 @@
-import { test, expect } from 'bun:test'
+import { test, expect, afterEach } from 'bun:test'
 import { distillTranscript, DISTILLER_SYSTEM_PROMPT } from '@/memory/distiller'
 import { parseTranscriptFile } from '@/claude/transcript'
 import { writeFileSync, mkdirSync, rmSync } from 'node:fs'
@@ -113,8 +113,17 @@ test('subagent 降级与无真人行兜底叠加：均为 agent-observed，互�
 // 断言捕获层重标 system + 蒸馏器兜底降级 origin，双重防线同时生效。
 // ---------------------------------------------------------------------------
 
+// M5 终审 fix：e2e 用例用的临时目录路径固定，提到模块级让 afterEach 兜底清理。
+// 原代码只在用例开头 + 结尾 rmSync，断言失败时中途抛错会残留目录。开头的 rmSync
+// 保留作「前置干净」兜底，afterEach 保证无论用例成功失败都清干净。
+const originE2eDir = join(import.meta.dir, '.tmp-origin-e2e')
+
+afterEach(() => {
+  rmSync(originE2eDir, { recursive: true, force: true })
+})
+
 test('e2e 事故复现：/loop 会话 transcript → 捕获层 system + origin 强制降级', async () => {
-  const dir = join(import.meta.dir, '.tmp-origin-e2e')
+  const dir = originE2eDir
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })
   const p = join(dir, 'loop-session.jsonl')

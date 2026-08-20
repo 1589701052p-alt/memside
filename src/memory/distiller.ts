@@ -302,7 +302,11 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
     }
     const rawOutput: unknown = session.parsed
     // 无真人行兜底的数据来源（spec §3.6）：用过滤前原始 turns 判——预算裁剪可能
-    // 丢真人行，而「会话里有没有真人发言」是 session 级事实，不该被裁剪影响。
+    // 丢真人行，而「该输入切片里有没有真人发言」是切片级事实，不该被裁剪影响。
+    // 切片级语义（M1 终审 fix）：scheduler 增量蒸馏只喂新增切片，判定是切片级而非
+    // session 级。切片无真人行时 user-stated 声明的 evidence 本就不在切片内，降级
+    // 反而正确——D1 误降级可丢方向（真人若在更早切片已发声，那一切片的候选当时已
+    // 保留 user-stated；本切片无真人行则其声明不成立，agent-observed 才对）。
     const hasHumanUserTurn = input.turns.some((t) => t.role === 'user')
     const parsedRes = parseDistillCandidates(session.parsed, input.sourceKind, hasHumanUserTurn)
     if (!parsedRes) {

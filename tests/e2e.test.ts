@@ -75,6 +75,12 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
     }) + '\n' +
     JSON.stringify({
       type: 'user',
+      // 来源归因（spec 2026-08-20 §3.2，I1 终审 fix）：补 origin.kind=human +
+      // promptSource=typed 使捕获层映 role:"user"（D1/D2 语义）。缺字段会静默
+      // 翻成 role:"system"，导致全仓库无任何测试断言真人 JSONL 行经真实链路以
+      // [user] 标签抵达蒸馏器——此行是唯一一条真人发言 fixture。
+      origin: { kind: 'human' },
+      promptSource: 'typed',
       message: { role: 'user', content: 'we only issue refunds within 14 days of shipment' },
     }) + '\n' +
     JSON.stringify({
@@ -157,6 +163,11 @@ test('MVP loop: hook -> distill -> candidate -> approve -> inject', async () => 
   // C1 lock: the transcript turn content ('we only issue refunds within 14 days
   // of shipment') must appear in the userPrompt that reached the distiller.
   expect(capturedUserPrompt).toContain('refunds within 14 days')
+  // I1 终审 fix：真人 JSONL 行（origin.kind=human + promptSource=typed）经真实
+  // 链路（JSONL -> parseTranscriptFile -> events -> makeLoadTranscript ->
+  // distiller）必须以 [user] 标签抵达蒸馏器——此断言锁住「真人发言在 prompt 里
+  // 带来源锚点」，缺字段静默翻 system 的回归会在此暴露。
+  expect(capturedUserPrompt).toContain('[user]')
 
   // thinking 剔除锁（2026-08-19 数据驱动决策）：thinking 块经真实链路
   // （JSONL -> parseTranscriptFile -> events -> makeLoadTranscript）捕获后，在
