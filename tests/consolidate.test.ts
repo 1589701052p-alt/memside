@@ -127,6 +127,14 @@ describe('consolidateShouldRetry', () => {
   it('update_of targetId points to candidate (non-approved) → retry', () => {
     expect(fn({ groups: [{ action: 'update_of', targetId: 'C', members: ['new-0'] }] })).toMatch(/targetId/)
   })
+  // 回归锁（spec 2026-08-20）：报错必须携带可执行引导，否则 followup 轮模型无据可改、3 轮同错
+  it('targetId not in approved → retry message lists APPROVED 分区合法 id', () => {
+    expect(fn({ groups: [{ action: 'update_of', targetId: 'C', members: ['new-0'] }] })).toMatch(/仅限 APPROVED 分区: A/)
+  })
+  it('approvedIds 为空 → retry message 明示不可使用 update_of', () => {
+    const fnEmpty = consolidateShouldRetry(new Set<string>())
+    expect(fnEmpty({ groups: [{ action: 'update_of', targetId: 'C', members: ['new-0'] }] })).toMatch(/不可使用 update_of/)
+  })
   it('merge missing mergedTitle → retry', () => {
     expect(fn({ groups: [{ action: 'merge', members: ['new-0'], mergedBody: 'b', mergedEvidence: 'e', mergedSlug: 's', mergedOrigin: 'agent-observed' }] })).toMatch(/mergedTitle/)
   })

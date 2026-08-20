@@ -193,7 +193,14 @@ export function consolidateShouldRetry(approvedIds: Set<string>): (parsed: unkno
         return `group ${i} members 必须是字符串数组`
       if (action === 'update_of') {
         if (typeof g.targetId !== 'string') return `group ${i} update_of 缺少 targetId`
-        if (!approvedIds.has(g.targetId)) return `group ${i} targetId 不在 approved 集合内`
+        if (!approvedIds.has(g.targetId)) {
+          // 防御纵深（spec 2026-08-20）：报错携带引导让 followup 轮可收敛，
+          // 不再 3 轮同错——prompt 分区（Task 1/2）是第一道防线，这里是第二道。
+          const ids = [...approvedIds].join(', ')
+          return approvedIds.size > 0
+            ? `group ${i} targetId 不在 approved 集合内（合法 targetId 仅限 APPROVED 分区: ${ids}）`
+            : `group ${i} targetId 不在 approved 集合内（本批 approved 为空，不可使用 update_of）`
+        }
       }
       if (action === 'merge' || action === 'update_of') {
         if (typeof g.mergedTitle !== 'string' || !g.mergedTitle.includes('[category:'))
