@@ -1,5 +1,6 @@
 // src/memory/agentLoop.ts
 import { extractJsonObject } from './pure'
+import { isAbortLike } from './stepPrompt'
 import type { LLMCall } from '@/llm'
 import type { RepoTools } from './repoTools'
 
@@ -51,7 +52,12 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
     let raw: string
     try {
       raw = await opts.callLLM(opts.system, conversation)
-    } catch {
+    } catch (e) {
+      // spec 2026-08-20 §3.2：不再笼统丢原因——按 isAbortLike 分类，trace 透出真实原因。
+      // stopReason 外部契约不变（仍 llm-error，scheduler 据此暂停 + pending_review）。
+      const reason = isAbortLike(e) ? 'aborted' : 'llm-error'
+      const msg = e instanceof Error ? e.message : String(e)
+      trace.push({ kind: 'correction', text: `${reason}:${msg}`.slice(0, TRACE_CAP) })
       return { final: null, trace, stopReason: 'llm-error' }
     }
     let parsed: unknown
