@@ -89,19 +89,33 @@ export function makeLLMCall(deps: OpenAiDeps = {}): LLMCall {
       const decoder = new TextDecoder('utf-8')
       let leftover = ''
       let text = ''
+      let dataEventCount = 0
+      let rawBody = ''
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
-        leftover += decoder.decode(value, { stream: true })
+        const decoded = decoder.decode(value, { stream: true })
+        rawBody += decoded
+        leftover += decoded
         const { events, leftover: next } = parseSseChunks(leftover, '')
         leftover = next
         for (const ev of events) {
+          dataEventCount++
           if (ev.data === '[DONE]') { reader.cancel(); break }
           let parsed: unknown
           try { parsed = JSON.parse(ev.data) } catch { continue }
+          // Finding 2：流式 error 帧（如 Azure content-filter）显式抛错，避免截断文本冒充成功。
+          if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
+            throw new Error(`OpenAI 流式响应含错误帧: ${JSON.stringify((parsed as { error: unknown }).error).slice(0, 200)}`)
+          }
           const delta = (parsed as { choices?: { delta?: { content?: unknown } }[] })?.choices?.[0]?.delta?.content
           if (typeof delta === 'string') text += delta
         }
+      }
+      // Finding 1：网关忽略 stream:true 返回非 SSE JSON body 时，无任何 data: 事件被解析、
+      // 原始响应非空 —— 旧码会返回 ''（下游变 opaque aborted 重试暂停）。现抛诊断错误带原始响应前缀。
+      if (dataEventCount === 0 && rawBody.trim().length > 0) {
+        throw new Error(`OpenAI 非流式响应（网关可能忽略 stream:true；原始响应: ${rawBody.slice(0, 200)})`)
       }
       // 兼容：响应可能为空（极少），返回空串（与旧「无 content 抛错」略不同——
       // 流式语义下空响应更可能合法地返回空串；调用方 shouldRetry 路径会兜住非 JSON）。

@@ -290,3 +290,40 @@ test('makeLLMCall timeoutMs 缺省：源码层文本锁 600_000（防回退 120k
   expect(src).toContain('600_000')
   expect(src).not.toContain('120_000')
 })
+
+// ---- makeLLMCall：终审 Important 修复（2026-08-20）----
+// Finding 1：网关忽略 stream:true 返回非 SSE JSON body，旧码静默返回 ''（下游变 opaque aborted）。
+// Finding 2：流式 error 帧（如 Azure content-filter）被静默跳过，截断文本冒充成功。
+// 两条锁回归：非流式响应 / error 帧必须显式抛错，让调用方重试降级路径感知。
+
+test('makeLLMCall 网关忽略 stream:true 返回非 SSE JSON body -> 抛「非流式响应」带原始响应前缀', async () => {
+  const rawBody = '{"choices":[{"message":{"content":"hi"}}]}'
+  fetchImpl = async () => new Response(rawBody, { status: 200, headers: { 'content-type': 'application/json' } })
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  let caught: Error | undefined
+  try { await call('s', 'u') } catch (e) { caught = e as Error }
+  expect(caught).toBeInstanceOf(Error)
+  expect(caught!.message).toMatch(/非流式响应/)
+  expect(caught!.message).toContain('hi') // 原始响应前缀透出，便于诊断
+})
+
+test('makeLLMCall 流式含 error 帧 -> 抛「错误帧」带 error 详情', async () => {
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+    'data: {"error":{"message":"content filter","code":"content_filter"}}\n\n',
+    'data: [DONE]\n\n',
+  ])
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  let caught: Error | undefined
+  try { await call('s', 'u') } catch (e) { caught = e as Error }
+  expect(caught).toBeInstanceOf(Error)
+  expect(caught!.message).toMatch(/错误帧/)
+  expect(caught!.message).toContain('content filter')
+})
+
+test('makeLLMCall 非流式空响应（body 为空）仍返回空串（不误抛非流式响应）', async () => {
+  fetchImpl = async () => new Response('', { status: 200, headers: { 'content-type': 'application/json' } })
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  const out = await call('s', 'u')
+  expect(out).toBe('')
+})
