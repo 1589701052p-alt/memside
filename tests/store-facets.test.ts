@@ -107,8 +107,8 @@ test('discards scope: 只查 memory_discards，slugs/valueClasses 恒空；memor
 })
 
 test('空表 -> 四个空数组（任何 scope）', async () => {
-  expect(await listFacets(db, CANDIDATE)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [] })
-  expect(await listFacets(db, DISCARDS)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [] })
+  expect(await listFacets(db, CANDIDATE)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [], origins: [] })
+  expect(await listFacets(db, DISCARDS)).toEqual({ projects: [], categories: [], slugs: [], valueClasses: [], origins: [] })
 })
 
 // 回归锁定（spec web-memory-filters §4.1 + per-tab spec §2 G3）：

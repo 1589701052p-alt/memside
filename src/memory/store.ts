@@ -837,6 +837,16 @@ export function clampPageLimit(limit?: number): number {
  *  value_class 里没有这个词，URL/接口层无歧义。 */
 export const VALUE_CLASS_UNEVALUATED = 'unevaluated'
 
+/** origin 筛「未标注」的哨兵值（= origin IS NULL）。三个合法 origin 值里
+ *  没有这个词，URL/接口层无歧义；与 VALUE_CLASS_UNEVALUATED 同款模式。 */
+export const ORIGIN_UNLABELED = 'unlabeled'
+
+/** 3 个保护类 origin（= schema memories.origin 的合法枚举；spec §接口契约）。
+ *  其余 origin 值视为非法，筛选取宽松策略忽略该条件（不报错不空列表）。 */
+export const PROTECTED_ORIGINS: readonly string[] = [
+  'user-stated', 'user-confirmed', 'agent-observed',
+]
+
 export interface MemoryListFilter {
   /** memories.source_cwd / discards.source_cwd 精确匹配。 */
   sourceCwd?: string
@@ -846,6 +856,9 @@ export interface MemoryListFilter {
   category?: string
   /** 'unevaluated' 哨兵 -> IS NULL；合法六值 -> eq；其余值忽略（宽松）。 */
   valueClass?: string
+  /** 'unlabeled' 哨兵 -> IS NULL；合法三值（PROTECTED_ORIGINS）-> eq；
+   *  其余值忽略（宽松，与 valueClass 同策略；discards 无 origin 列，静默忽略）。 */
+  origin?: string
 }
 
 function memoryFilterConds(filter?: MemoryListFilter) {
@@ -862,6 +875,13 @@ function memoryFilterConds(filter?: MemoryListFilter) {
       conds.push(eq(memories.valueClass, filter.valueClass))
     }
     // 其余值 -> 忽略该条件（白名单宽松策略，与非法 status 同风格，spec §4.2）
+  }
+  if (filter.origin) {
+    if (filter.origin === ORIGIN_UNLABELED) conds.push(isNull(memories.origin))
+    else if ((PROTECTED_ORIGINS as readonly string[]).includes(filter.origin)) {
+      conds.push(eq(memories.origin, filter.origin))
+    }
+    // 其余值 -> 忽略该条件（白名单宽松策略，与 valueClass 同款）
   }
   return conds
 }
@@ -974,6 +994,8 @@ export interface Facets {
   categories: FacetValue[]
   slugs: FacetValue[]
   valueClasses: FacetValue[]
+  /** memories scope: origin 分组（NULL → ORIGIN_UNLABELED 桶）；discards scope: []（无 origin 列）。 */
+  origins: FacetValue[]
 }
 export const FACET_LIST_CAP = 200
 
@@ -1013,7 +1035,7 @@ export async function listFacets(db: DbClient, scope: FacetScope): Promise<Facet
       const c = categoryFromTitle(r.t)
       if (c) bump(cats, c, 1)
     }
-    return { projects: sortFacets(projects), categories: sortFacets(cats), slugs: [], valueClasses: [] }
+    return { projects: sortFacets(projects), categories: sortFacets(cats), slugs: [], valueClasses: [], origins: [] }
   }
 
   const statusCond = inArray(memories.status, scope.statuses)
@@ -1039,11 +1061,17 @@ export async function listFacets(db: DbClient, scope: FacetScope): Promise<Facet
     .from(memories).where(statusCond).groupBy(memories.valueClass).all()
   for (const r of vcRows) bump(vcs, r.v ?? VALUE_CLASS_UNEVALUATED, Number(r.n))
 
+  const origins = new Map<string, number>()
+  const originRows = await db.select({ v: memories.origin, n: sql<number>`COUNT(*)` })
+    .from(memories).where(statusCond).groupBy(memories.origin).all()
+  for (const r of originRows) bump(origins, r.v ?? ORIGIN_UNLABELED, Number(r.n))
+
   return {
     projects: sortFacets(projects),
     categories: sortFacets(cats),
     slugs: sortFacets(slugs),
     valueClasses: sortFacets(vcs),
+    origins: sortFacets(origins),
   }
 }
 
@@ -1817,5 +1845,5 @@ export async function listTrashFacets(db: DbClient): Promise<Facets> {
     const c = categoryFromTitle(r.t)
     if (c) cats.set(c, (cats.get(c) ?? 0) + 1)
   }
-  return { projects: sortFacets(projects), categories: sortFacets(cats), slugs: [], valueClasses: [] }
+  return { projects: sortFacets(projects), categories: sortFacets(cats), slugs: [], valueClasses: [], origins: [] }
 }
