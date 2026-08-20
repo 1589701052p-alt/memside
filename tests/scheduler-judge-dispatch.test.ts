@@ -3,7 +3,7 @@
 // (fix round 1:makeRepoTools('/') 会把 grep/read/list 放宽到整个文件系统)。
 // spec: docs/superpowers/specs/2026-08-06-agentic-value-judge-design.md §4.6/§6/失败矩阵
 // mock LLM 按 system prompt 内容分派(distill/dedup/单发 judge/agent judge),
-// 不按调用顺序——judgeDuplicates 是否消耗调用取决于库里有没有 existing,按序脚本太脆。
+// 不按调用顺序——consolidateCandidates 是否消耗调用取决于库里有没有 existing,按序脚本太脆。
 import { test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { rmSync, mkdirSync } from 'node:fs'
 import { join, parse as parsePath } from 'node:path'

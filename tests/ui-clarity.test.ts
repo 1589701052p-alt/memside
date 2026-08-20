@@ -1,7 +1,7 @@
-import { test, expect } from 'bun:test'
+import { test, expect, describe, it } from 'bun:test'
 import {
   categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo,
-  originBadge, scopeInfo, runtimeLabel, runtimeTip, SLUG_BADGE_TIP,
+  originBadge, scopeInfo, runtimeLabel, runtimeTip, SLUG_BADGE_TIP, updateBadge,
 } from '@/web/ui-utils'
 import { categoryFromTitle as backendCategoryFromTitle } from '@/memory/pure'
 
@@ -169,4 +169,37 @@ test('一致性: stripCategoryPrefix 后提不出分类', () => {
 
 test('SLUG_BADGE_TIP: 含分组语义', () => {
   expect(SLUG_BADGE_TIP).toContain('主题分组标识')
+})
+
+// --- updateBadge（spec 2026-08-19-candidate-consolidation §6.3）---
+// 为什么存在：update_of 候选显紫色「更新 #」徽标，提示这是对既有已审批记忆的精炼
+// 而非全新条目；批准时会取代原记忆。纯函数层锁 label/color/tip 语义，防措辞回退。
+
+describe('updateBadge', () => {
+  it('update_of + supersedesId -> badge with 更新 label + 紫色 + 取代提示', () => {
+    const b = updateBadge({ distillAction: 'update_of', supersedesId: '01HXYZ123' })
+    expect(b).not.toBeNull()
+    expect(b!.label).toContain('更新')
+    expect(b!.label).toContain('#01HXYZ')  // short = supersedesId.slice(0,6)
+    expect(b!.color).toBe('purple')
+    expect(b!.tip).toContain('取代原记忆')
+  })
+
+  it('update_of + supersedesId 非空（极短 id，<6 字也安全）', () => {
+    const b = updateBadge({ distillAction: 'update_of', supersedesId: 'abc' })
+    expect(b).not.toBeNull()
+    expect(b!.label).toBe('更新 #abc')
+  })
+
+  it('new / null supersedesId -> null (no badge)', () => {
+    expect(updateBadge({ distillAction: 'new', supersedesId: null })).toBeNull()
+    expect(updateBadge({ distillAction: 'update_of', supersedesId: null })).toBeNull()
+    expect(updateBadge({ distillAction: 'update_of', supersedesId: '' })).toBeNull()
+  })
+
+  it('null distillAction / 其它 action -> null', () => {
+    expect(updateBadge({ distillAction: null, supersedesId: '01HXYZ' })).toBeNull()
+    expect(updateBadge({ distillAction: 'duplicate_of', supersedesId: '01HXYZ' })).toBeNull()
+    expect(updateBadge({ distillAction: 'conflict_with', supersedesId: '01HXYZ' })).toBeNull()
+  })
 })

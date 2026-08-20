@@ -38,6 +38,9 @@ export interface MemoryInput {
   origin?: DistillOrigin | null
   /** 出处原句摘抄；缺省/null = 无。 */
   evidence?: string | null
+  /** 合并步 update_of 产物：被精炼的既有 approved 记忆 id（spec 2026-08-19 §3）。
+   *  缺省/null = 非 update_of（new/普通候选）。schema memories.supersedes_id 透传。 */
+  supersedesId?: string | null
 }
 
 export interface Memory {
@@ -99,7 +102,7 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     status: 'candidate', sourceKind: input.sourceKind,
     sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
-    distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null,
+    distillAction: input.distillAction ?? null, supersedesId: input.supersedesId ?? null, supersededById: null,
     approvedAt: null, createdAt: now, version: 1, valueClass: input.valueClass ?? null,
     subjectSlug: input.subjectSlug ?? null,
     origin: input.origin ?? null, evidence: input.evidence ?? null,
@@ -108,7 +111,7 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     title: input.title, bodyMd: input.bodyMd, tags: JSON.stringify(input.tags), status: 'candidate',
     sourceKind: input.sourceKind, sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
-    distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null, approvedAt: null,
+    distillAction: input.distillAction ?? null, supersedesId: input.supersedesId ?? null, supersededById: null, approvedAt: null,
     createdAt: now, version: 1, valueClass: input.valueClass ?? null,
     subjectSlug: input.subjectSlug ?? null, origin: input.origin ?? null, evidence: input.evidence ?? null })
 }
@@ -159,6 +162,9 @@ export async function listApprovedByScope(
   }
 }
 
+/** 无 slug fallback 上限（slug 预筛路径不限条数）。spec §3.3 合并步按 subjectSlug
+ *  预筛 existing：本批 slugs 非空 → inArray(subjectSlug, slugs) 不限条数，解除
+ *  旧 50 条盲区；slugs 空 → fallback 最近 N 防爆 prompt（保留旧行为）。 */
 export const DEDUP_EXISTING_LIMIT = 50
 
 export const SUBJECT_SLUG_LIST_LIMIT = 50
@@ -188,29 +194,40 @@ export async function listSubjectSlugs(
 /**
  * Load same-scope candidate + approved memories for dedup comparison. project =
  * exact scopeId match; global = scopeId IS NULL. Returns approved (all) + candidate
- * (createdAt DESC LIMIT DEDUP_EXISTING_LIMIT), de-duped by id, projecting
- * {id,title,bodyMd,scopeType,scopeId,status} (no runtime; bodyMd now included so
- * cross-batch dedup sees full context per spec §3.4). Other statuses
- * (archived/rejected/superseded) excluded.
+ * (spec §3.3：本批 slugs 非空 → inArray(subjectSlug, slugs) 不限条数，解除 50 条盲区；
+ * slugs 空 → fallback createdAt DESC LIMIT DEDUP_EXISTING_LIMIT), de-duped by id,
+ * projecting {id,title,bodyMd,scopeType,scopeId,status,subjectSlug} (no runtime;
+ * bodyMd + subjectSlug now included so cross-batch dedup sees full context per
+ * spec §3.4 / §3.3). Other statuses (archived/rejected/superseded) excluded.
  */
 export async function listForDedupByScope(
   db: DbClient,
-  opts: { scopeType: MemoryScope; scopeId: string | null },
+  opts: { scopeType: MemoryScope; scopeId: string | null; slugs?: string[] },
 ): Promise<ExistingMemoryForDedup[]> {
   const scopeClause = opts.scopeId === null ? isNull(memories.scopeId) : eq(memories.scopeId, opts.scopeId)
-  const cols = { id: memories.id, title: memories.title, bodyMd: memories.bodyMd, scopeType: memories.scopeType, scopeId: memories.scopeId, status: memories.status }
+  const cols = { id: memories.id, title: memories.title, bodyMd: memories.bodyMd, scopeType: memories.scopeType, scopeId: memories.scopeId, status: memories.status, subjectSlug: memories.subjectSlug }
+  // approved 全量（不变）
   const approvedRows = await db.select(cols).from(memories).where(
     and(eq(memories.scopeType, opts.scopeType), scopeClause, eq(memories.status, 'approved')),
   ).orderBy(desc(memories.createdAt)).all()
-  const candidateRows = await db.select(cols).from(memories).where(
-    and(eq(memories.scopeType, opts.scopeType), scopeClause, eq(memories.status, 'candidate')),
-  ).orderBy(desc(memories.createdAt)).limit(DEDUP_EXISTING_LIMIT).all()
+  // candidate：本批有 slug → 只取同 slug（不限条数）；无 slug → fallback 最近 50
+  const slugs = opts.slugs ?? []
+  let candidateRows
+  if (slugs.length > 0) {
+    candidateRows = await db.select(cols).from(memories).where(
+      and(eq(memories.scopeType, opts.scopeType), scopeClause, eq(memories.status, 'candidate'), inArray(memories.subjectSlug, slugs)),
+    ).orderBy(desc(memories.createdAt)).all()
+  } else {
+    candidateRows = await db.select(cols).from(memories).where(
+      and(eq(memories.scopeType, opts.scopeType), scopeClause, eq(memories.status, 'candidate')),
+    ).orderBy(desc(memories.createdAt)).limit(DEDUP_EXISTING_LIMIT).all()
+  }
   const seen = new Set<string>()
   const out: ExistingMemoryForDedup[] = []
   for (const r of [...approvedRows, ...candidateRows]) {
     if (seen.has(r.id)) continue
     seen.add(r.id)
-    out.push({ id: r.id, title: r.title, bodyMd: r.bodyMd, scopeType: r.scopeType as MemoryScope, scopeId: r.scopeId, status: r.status as MemoryStatus })
+    out.push({ id: r.id, title: r.title, bodyMd: r.bodyMd, scopeType: r.scopeType as MemoryScope, scopeId: r.scopeId, status: r.status as MemoryStatus, subjectSlug: r.subjectSlug as string | null })
   }
   return out
 }

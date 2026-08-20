@@ -322,3 +322,30 @@ export function truncateAlertBody(body: string | null, max = 40): string {
   if (body.length <= max) return body
   return body.slice(0, max) + '…'
 }
+
+// ---------------------------------------------------------------------------
+// update_of 候选徽标（spec 2026-08-19-candidate-consolidation §6.3）
+// ---------------------------------------------------------------------------
+
+export interface UpdateBadge {
+  label: string
+  color: 'purple'
+  tip: string
+}
+
+/**
+ * update_of 候选显紫色「更新 #<short>」徽标，提示这是对既有已审批记忆的精炼
+ * （而非全新条目）；批准时会取代原记忆。distillAction !== 'update_of' 或
+ * supersedesId 为空 -> null（不显示徽标）。short = supersedesId.slice(0,6)。
+ *
+ * 纯函数，可单测（CLAUDE.md「首选可断言面」）。
+ */
+export function updateBadge(c: { distillAction: string | null; supersedesId: string | null }): UpdateBadge | null {
+  if (c.distillAction !== 'update_of' || !c.supersedesId) return null
+  const short = c.supersedesId.slice(0, 6)
+  return {
+    label: `更新 #${short}`,
+    color: 'purple',
+    tip: '这是对既有已审批记忆的精炼/更新提案；批准时会取代原记忆，而非新增独立条目。',
+  }
+}

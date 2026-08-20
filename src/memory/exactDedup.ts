@@ -49,9 +49,9 @@ function resolveScopeId(scopeType: MemoryScope, cwd: string | null): string | nu
 }
 
 /**
- * 按 (scopeType, scopeId) 分组(与 scheduler.dedupCandidates 同规则,防 scopeId 漂移),
+ * 按 (scopeType, scopeId) 分组(与 scheduler.consolidateBatch 同规则,防 scopeId 漂移),
  * 每组查存量 candidate+approved 标题做逐字比对。返回幸存者与合并项。
- * listForDedupByScope 的 DB 错误上抛(基础设施故障 → job 重试,与 dedupCandidates 一致)。
+ * listForDedupByScope 的 DB 错误上抛(基础设施故障 → job 重试,与 consolidateBatch 一致)。
  */
 export async function exactDedupCandidates(
   db: DbClient,

@@ -89,15 +89,15 @@ test('dedup 收到的 prompt 不含 distill 的 LLM 对话历史', async () => {
         ],
       }) + ` /* ${DISTILL_MARKER} internal distill conversation trace */`
     }
-    if (sys.includes('memside-dedup')) {
-      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: false }] })
+    if (sys.includes('memside-consolidate')) {
+      return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }, { action: 'keep', members: ['new-1'] }] })
     }
     // judge (memside-value-judge)
     return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }, { index: 1, category: 'decision' }] })
   })
 
   const dedupRounds = await listLlmRounds(db, jobId, 'dedup')
-  expect(dedupRounds.length).toBeGreaterThan(0)  // dedup 确实调了 LLM（2 候选兄弟比较）
+  expect(dedupRounds.length).toBeGreaterThan(0)  // 合并步确实调了 LLM（2 候选兄弟比较）
   assertRequestExcludes(dedupRounds, DISTILL_MARKER)
 
   // 正向锚：marker 确实在 distill 的 LLM 对话历史里（response 含它），证明隔离测试有意义。
@@ -126,9 +126,9 @@ test('judge 收到的 prompt 不含 dedup 的 LLM 对话历史', async () => {
         ],
       })
     }
-    if (sys.includes('memside-dedup')) {
-      // 特征串塞进 dedup 的 LLM 响应文本（response 原样落盘为 dedup llm_round）。
-      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }, { index: 1, isDuplicate: false }] })
+    if (sys.includes('memside-consolidate')) {
+      // 特征串塞进合并步的 LLM 响应文本（response 原样落盘为 dedup llm_round）。
+      return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }, { action: 'keep', members: ['new-1'] }] })
         + ` /* ${DEDUP_MARKER} internal dedup conversation trace */`
     }
     // judge (memside-value-judge)
