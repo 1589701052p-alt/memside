@@ -30,6 +30,13 @@ Write a matching category as a "[category:xxx]" prefix on each candidate title:
 - user-confirmed = agent 提出、用户明确采纳（"对"/"就这么办"/"可以"）。
 - agent-observed = 其余一切（agent 从工具报错/代码阅读/事件自行总结）。
 
+Transcript 行标签区分说话人：[user] = 真人陈述；[system] = 机器注入内容
+（loop 框架重放的 prompt、--- BEGIN INJECTED MEMORY --- 注入的既有记忆块、
+task 通知、peer 消息）。硬规则：user-stated / user-confirmed 只能锚定在
+[user]（真人陈述）行的原话上；[system] 行的内容不是真人陈述，至多标
+agent-observed；[system] 注入记忆块是你之前注入的旧记忆，不得当新规则
+重复提炼，也不得作为 evidence 出处。
+
 每条候选必须带 evidence：从 transcript 摘抄的出处原句（不超过 1 句；user-confirmed
 摘 agent 提议句 + 用户采纳句；agent-observed 摘观察依据的对话片段）。
 硬约束：找不到原话出处，就不许标 user-stated / user-confirmed，只能标 agent-observed。
@@ -210,7 +217,7 @@ function distillShouldRetry(parsed: unknown): string | null {
  * 返回 null；合法时逐条规范化（origin/evidence 贴金防护、subjectSlug 降级等，
  * 语义与旧内联实现逐字一致）。
  */
-function parseDistillCandidates(parsed: unknown, sourceKind?: 'subagent' | 'conversation'): { candidates: DistillCandidate[]; rawCount: number } | null {
+function parseDistillCandidates(parsed: unknown, sourceKind?: 'subagent' | 'conversation', hasHumanUserTurn: boolean = true): { candidates: DistillCandidate[]; rawCount: number } | null {
   if (!parsed || typeof parsed !== 'object') return null
   const p = parsed as { candidates?: unknown }
   if (!Array.isArray(p.candidates)) return null
@@ -239,6 +246,10 @@ function parseDistillCandidates(parsed: unknown, sourceKind?: 'subagent' | 'conv
     // subagent 降级（spec §3.2）：subagent 的 role:user 是主 agent 派发的 task brief，
     // 非真人陈述。强制 agent-observed，不享受 stated 免疫。evidence 保留作观察依据。
     if (sourceKind === 'subagent') origin = 'agent-observed'
+    // 无真人行兜底（spec 2026-08-20 §3.6）：会话里一条真人 [user] 行都没有时
+    // （纯 loop 会话），任何 stated/confirmed 都不可能成立，强制降级。
+    // 默认 true 向后兼容（独立调用/旧测试不降级）。
+    if (!hasHumanUserTurn) origin = 'agent-observed'
     out.push({
       title: o.title,
       bodyMd: o.bodyMd,
@@ -290,7 +301,10 @@ export async function distillTranscript(input: DistillInput): Promise<DistillRes
       }
     }
     const rawOutput: unknown = session.parsed
-    const parsedRes = parseDistillCandidates(session.parsed, input.sourceKind)
+    // 无真人行兜底的数据来源（spec §3.6）：用过滤前原始 turns 判——预算裁剪可能
+    // 丢真人行，而「会话里有没有真人发言」是 session 级事实，不该被裁剪影响。
+    const hasHumanUserTurn = input.turns.some((t) => t.role === 'user')
+    const parsedRes = parseDistillCandidates(session.parsed, input.sourceKind, hasHumanUserTurn)
     if (!parsedRes) {
       // 空字符串/纯空白 = 模型无产出（与 {"candidates":[]} 同义），归 empty_output 非
       // parse_error——session ok 意味着末轮 parse+shouldRetry 已通过（合法 JSON 且有
