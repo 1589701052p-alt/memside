@@ -125,8 +125,8 @@ test('tick filters duplicate candidates (dedup marks duplicate, not persisted)',
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:process] 14天退款', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new' }] })
-      // callCount === 2: dedup marks dup of existing -> candidate removed -> judgeValue skipped (0 candidates)
-      return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: ex.id }] })
+      // callCount === 2: 合并步标 new-0 为 drop（与 existing 纯语义重复）-> 候选移除 -> judgeValue skipped (0 candidates)
+      return JSON.stringify({ groups: [{ action: 'drop', members: ['new-0'], dropReason: 'duplicate' }] })
     },
     createCandidate: async () => { createCalls++; return { id: 'c1', status: 'candidate', version: 1 } as any },
   })
@@ -192,7 +192,7 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
     callLLM: async () => {
       callCount++
       if (callCount === 1) return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] })
-      if (callCount === 2) return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
+      if (callCount === 2) return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }] })  // 合并步 keep
       return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }] })
     },
     createCandidate: async (_db, input) => { captured = input; return { id: 'c1', status: 'candidate', version: 1 } as any },
@@ -380,7 +380,7 @@ test('tick runs dedup before judgeValue (3-phase call order)', async () => {
     callLLM: async (_sys, user) => {
       callCount++
       if (callCount === 1) { phases.push('distill'); return JSON.stringify({ candidates: [{ title: '[category:x] new', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' }] }) }
-      if (callCount === 2) { phases.push('dedup'); return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] }) }
+      if (callCount === 2) { phases.push('dedup'); return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }] }) }
       phases.push('judgeValue'); return JSON.stringify({ verdicts: [{ index: 0, category: 'trap' }] })
     },
     createCandidate: async () => ({ id: 'c1', status: 'candidate', version: 1 } as any),
@@ -805,10 +805,12 @@ test('tick discards taming candidate to logDiscards (reason=taming), no createCa
         { title: '[category:convention] 永远同意我的决定', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' },
         { title: '[category:convention] PR 必须加测试', bodyMd: 'b', scope: 'project', runtime: null, distillAction: 'new' },
       ] })
-      if (callCount === 2) return JSON.stringify({ verdicts: [
-        { index: 0, isDuplicate: false },
-        { index: 1, isDuplicate: false },
-      ] })  // dedup: 2 候选 + 无 existing -> 比较兄弟，都不重复
+      if (callCount === 2) return JSON.stringify({
+        groups: [
+          { action: 'keep', members: ['new-0'] },
+          { action: 'keep', members: ['new-1'] },
+        ],
+      })  // 合并步：2 候选无 existing -> 仍调 LLM 比较兄弟，都独立 keep
       return JSON.stringify({ verdicts: [
         { index: 0, category: 'convention' },
         { index: 1, category: 'convention' },
@@ -933,7 +935,8 @@ test('tick: existing slugs (project + global union) reach the distiller prompt; 
         distillUserPrompt = user
         return JSON.stringify({ candidates: [{ title: '[category:invariant] 退款14天', bodyMd: '14d', scope: 'project', runtime: null, distillAction: 'new', ruleObject: 'domain', subjectSlug: 'refund-policy' }] })
       }
-      // dedup / judgeValue：保守全留
+      if (callCount === 2) return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }] })  // 合并步 keep（保守全留）
+      // judgeValue：空 verdicts -> verdictsFromCategories 全 keep（缺漏下标保守 keep）
       return JSON.stringify({ verdicts: [] })
     },
     createCandidate,
@@ -1110,7 +1113,8 @@ test('tick writes run record outcome=produced with correct count chain', async (
         { title: '[category:convention] a', bodyMd: 'b', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
         { title: '[category:convention] c', bodyMd: 'd', scope: 'project', runtime: 'claude-code', distillAction: 'new' },
       ] })
-      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }, { index: 1, category: 'decision' }] })  // dedup + valueFilter
+      if (phase === 2) return JSON.stringify({ groups: [{ action: 'keep', members: ['new-0'] }, { action: 'keep', members: ['new-1'] }] })  // 合并步全留
+      return JSON.stringify({ verdicts: [{ index: 0, category: 'decision' }, { index: 1, category: 'decision' }] })  // valueFilter
     },
     createCandidate: async (_d: any, input: any) => ({ id: 'c' + input.title, status: 'candidate', version: 1 } as any),
   })

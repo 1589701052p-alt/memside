@@ -38,6 +38,9 @@ export interface MemoryInput {
   origin?: DistillOrigin | null
   /** 出处原句摘抄；缺省/null = 无。 */
   evidence?: string | null
+  /** 合并步 update_of 产物：被精炼的既有 approved 记忆 id（spec 2026-08-19 §3）。
+   *  缺省/null = 非 update_of（new/普通候选）。schema memories.supersedes_id 透传。 */
+  supersedesId?: string | null
 }
 
 export interface Memory {
@@ -99,7 +102,7 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     status: 'candidate', sourceKind: input.sourceKind,
     sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
-    distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null,
+    distillAction: input.distillAction ?? null, supersedesId: input.supersedesId ?? null, supersededById: null,
     approvedAt: null, createdAt: now, version: 1, valueClass: input.valueClass ?? null,
     subjectSlug: input.subjectSlug ?? null,
     origin: input.origin ?? null, evidence: input.evidence ?? null,
@@ -108,7 +111,7 @@ export async function createCandidate(db: DbClient, input: MemoryInput): Promise
     title: input.title, bodyMd: input.bodyMd, tags: JSON.stringify(input.tags), status: 'candidate',
     sourceKind: input.sourceKind, sourceCwd: input.sourceCwd ?? null,
     sourceEventId: input.sourceEventId ?? null, distillJobId: input.distillJobId ?? null,
-    distillAction: input.distillAction ?? null, supersedesId: null, supersededById: null, approvedAt: null,
+    distillAction: input.distillAction ?? null, supersedesId: input.supersedesId ?? null, supersededById: null, approvedAt: null,
     createdAt: now, version: 1, valueClass: input.valueClass ?? null,
     subjectSlug: input.subjectSlug ?? null, origin: input.origin ?? null, evidence: input.evidence ?? null })
 }

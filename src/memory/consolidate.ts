@@ -157,10 +157,16 @@ export function parseConsolidate(
 
 const VALID_ACTIONS = new Set(['merge', 'keep', 'drop', 'update_of'])
 
+/**
+ * keep / short-circuit / 兜底未覆盖 三条「原样保留」路径的候选构造（spec §4 line 185
+ * 「keep → 原样 candidate」）：保留原始 origin（不降级——只有 merge/update_of 的
+ * 综合产物在 parseConsolidate 内强制 agent-observed）。distillAction 透传调用方
+ * 给定的值（keep 路径='new'；update_of fallback='new'）。
+ */
 function toConsolidated(c: DistillCandidate, action: 'new' | 'update_of', supersedesId: string | null): ConsolidatedCandidate {
   return {
     title: c.title, bodyMd: c.bodyMd, scopeType: c.scopeType, runtime: c.runtime,
-    distillAction: action, origin: 'agent-observed', evidence: c.evidence,
+    distillAction: action, origin: c.origin, evidence: c.evidence,
     subjectSlug: c.subjectSlug, supersedesId,
   }
 }

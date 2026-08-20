@@ -16,6 +16,7 @@ import {
 import { advanceStep, nextStep, type DistillStep } from '@/memory/stepState'
 import { exactDedupCandidates } from '@/memory/exactDedup'
 import { judgeDuplicates } from '@/memory/dedup'
+import { consolidateCandidates, type ConsolidatedCandidate } from '@/memory/consolidate'
 import { judgeValue, type ValueClass, type ValueVerdict, type JudgeSessionOpts } from '@/memory/valueFilter'
 import { judgeValueAgentic } from '@/memory/agentJudge'
 import { DEFAULT_JUDGE_CONFIG, type JudgeConfig } from '@/memory/judgeConfig'
@@ -162,6 +163,51 @@ export async function dedupCandidates(
     }
   }
   return candidates.filter((_, i) => keepFlags[i])
+}
+
+/**
+ * 合并步（spec 2026-08-19 §3）：替换旧二元丢弃 dedup。按 (scopeType, scopeId)
+ * 分组，每组调 consolidateCandidates（1 LLM）：同主题碎片熔合、纯重复 drop、对既有
+ * approved 的精炼 update_of。返回合并后候选 + drop 的全局下标（走 logDiscards
+ * reason='duplicate'）。LLM 失败 → {failed:true,reasons}（P1 不吞错）。existing 按
+ * subjectSlug 预筛（§3.3，Task 2 listForDedupByScope 新签名）。
+ *
+ * 步骤名仍为 'dedup'（stepState 四步不动，断点续跑历史兼容；consolidateCandidates
+ * 走 runLlmSession step='dedup'）。dropIndices 指向 exact.kept（exact dedup 后幸存
+ * 候选）的下标，调用方据此走 logDiscards。
+ */
+export async function consolidateBatch(
+  db: DbClient,
+  callLLM: LLMCall,
+  candidates: DistillCandidate[],
+  jobCwd: string | null,
+  session?: JudgeSessionOpts,
+): Promise<{ kept: ConsolidatedCandidate[]; dropIndices: number[] } | { failed: true; reasons: string[] }> {
+  if (candidates.length === 0) return { kept: [], dropIndices: [] }
+  const groups = new Map<string, { scopeType: DistillCandidate['scopeType']; scopeId: string | null; items: { c: DistillCandidate; globalIndex: number }[] }>()
+  candidates.forEach((c, i) => {
+    const scopeId = resolveScopeId(c.scopeType, jobCwd)
+    const key = `${c.scopeType}:${scopeId ?? ''}`
+    if (!groups.has(key)) groups.set(key, { scopeType: c.scopeType, scopeId, items: [] })
+    groups.get(key)!.items.push({ c, globalIndex: i })
+  })
+  const kept: ConsolidatedCandidate[] = []
+  const dropGlobal: number[] = []
+  for (const g of groups.values()) {
+    const slugs = [...new Set(g.items.map((it) => it.c.subjectSlug).filter((s): s is string => !!s))]
+    const existing = await listForDedupByScope(db, { scopeType: g.scopeType, scopeId: g.scopeId, slugs })
+    const res = await consolidateCandidates({
+      newCandidates: g.items.map((it) => it.c),
+      existing, callLLM,
+      jobId: session?.jobId, persistRound: session?.persistRound, loadHistory: session?.loadHistory,
+    })
+    if ('failed' in res) return res
+    kept.push(...res.candidates)
+    for (const localIdx of res.dropIndices) {
+      dropGlobal.push(g.items[localIdx]!.globalIndex)
+    }
+  }
+  return { kept, dropIndices: dropGlobal.sort((a, b) => a - b) }
 }
 
 /**
@@ -375,10 +421,10 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           cp = { currentStep: 'distill', stepAttempts: 0, stepError: null }
         }
       }
-      let deduped: DistillCandidate[] | null = null
+      let deduped: ConsolidatedCandidate[] | null = null
       let dedupExactDrops = 0
       if (cp.currentStep === 'judge' || cp.currentStep === 'digest') {
-        const saved = await getStepOutput<{ deduped: DistillCandidate[]; exactDrops: number }>(db, job.id, 'dedup')
+        const saved = await getStepOutput<{ deduped: ConsolidatedCandidate[]; exactDrops: number; consolidatedDrops?: number }>(db, job.id, 'dedup')
         if (saved && Array.isArray(saved.deduped)) {
           deduped = saved.deduped
           dedupExactDrops = typeof saved.exactDrops === 'number' ? saved.exactDrops : 0
@@ -486,8 +532,10 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
 
       // -------------------------------------------------------------------
       // 步骤 2：去重（dedup）。逐字去重(spec §4.1)先于 LLM（省调用），drops 不进
-      // 后续任何 LLM 判定（既有不变量）；随后语义 dedup（同批兄弟 + 跨批 existing），
-      // valueFilter 只看幸存者。dedup 会话失败 → step 失败（不再保守全保留吞错，P1）。
+      // 后续任何 LLM 判定（既有不变量）；随后合并步（consolidateBatch，spec
+      // 2026-08-19 §3）：同主题碎片熔合 / 纯重复 drop / 对既有 approved 精炼 update_of。
+      // 合并步 drop 的候选走 logDiscards reason='duplicate'（旧二元丢弃不落审计表，
+      // 合并步补审计）。合并步失败 → step 失败（不再保守全保留吞错，P1）。
       // -------------------------------------------------------------------
       if (!failed && currentStep === 'dedup') {
         const exact = await exactDedupCandidates(db, candidates, job.cwd ?? null)
@@ -506,9 +554,9 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         }
         const pDedup = phase('dedup')
         let dedupPhase = { calls: 0, ms: 0 }
-        let dedupOut: DistillCandidate[] | { failed: true; reasons: string[] }
+        let dedupOut: { kept: ConsolidatedCandidate[]; dropIndices: number[] } | { failed: true; reasons: string[] }
         try {
-          dedupOut = await dedupCandidates(db, tracked, exact.kept, job.cwd ?? null, {
+          dedupOut = await consolidateBatch(db, tracked, exact.kept, job.cwd ?? null, {
             jobId: job.id,
             persistRound: (r) => saveLlmRound(db, { jobId: job.id, step: 'dedup', round: r.round, request: r.request, response: r.response, result: r.result }),
             loadHistory: () => listLlmRounds(db, job.id, 'dedup'),
@@ -518,8 +566,23 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         if ('failed' in dedupOut) {
           failed = { step: 'dedup', reasons: dedupOut.reasons }
         } else {
-          deduped = dedupOut
-          await saveStepOutput(db, job.id, 'dedup', { deduped, exactDrops: exact.drops.length })
+          // 合并步 drop 的候选走 logDiscards reason='duplicate'（审计可见，可捞回）
+          if (dedupOut.dropIndices.length > 0) {
+            const dropRecords = dedupOut.dropIndices.map((i) => {
+              const c = exact.kept[i]!
+              return {
+                title: c.title, bodyMd: c.bodyMd, reason: 'duplicate' as const,
+                scopeType: c.scopeType,
+                scopeId: resolveScopeId(c.scopeType, job.cwd ?? null),
+                sourceCwd: job.cwd ?? null,
+                runtime: c.runtime,
+                sourceKind,
+              }
+            })
+            try { await logDiscards(db, job.id, dropRecords) } catch (e) { console.warn('memside: logDiscards failed', e) }
+          }
+          deduped = dedupOut.kept
+          await saveStepOutput(db, job.id, 'dedup', { deduped, exactDrops: exact.drops.length, consolidatedDrops: dedupOut.dropIndices.length })
           await setJobCheckpoint(db, job.id, { currentStep: 'judge', stepAttempts: 0, stepError: null })
           currentStep = 'judge'
           stepAttempts = 0
@@ -576,7 +639,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           judgeMs = judgePhase.calls > 0 ? judgePhase.ms : null
         }
         if (!failed) {
-          const keepWithClass: { cand: DistillCandidate; valueClass: ValueClass | null }[] = []
+          const keepWithClass: { cand: ConsolidatedCandidate; valueClass: ValueClass | null }[] = []
           const discarded: DiscardRecord[] = []
           verdicts.forEach((v, i) => {
             const c = deduped![i]
@@ -612,7 +675,8 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
               sourceCwd: job.cwd ?? null,
               runtime: k.cand.runtime,
               distillJobId: job.id,
-              distillAction: k.cand.distillAction,
+              distillAction: k.cand.distillAction,        // 合并步产物覆盖（merge→new, update_of→update_of）
+              supersedesId: k.cand.supersedesId ?? null,  // update_of 透传 targetId（spec §3）
               sourceEventId: job.sourceEventId,
               valueClass: k.valueClass,
               subjectSlug: k.cand.subjectSlug,
@@ -763,6 +827,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
                   runtime: c.runtime,
                   distillJobId: job.id,
                   distillAction: c.distillAction,
+                  supersedesId: c.supersedesId ?? null,
                   sourceEventId: job.sourceEventId,
                   valueClass: null,       // 未评估：等 judge 重试或人工接管
                   subjectSlug: c.subjectSlug,
