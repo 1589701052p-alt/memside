@@ -696,6 +696,7 @@ export function createApp(deps: AppDeps) {
       const slug = c.req.query('slug'); if (slug) filter.subjectSlug = slug
       const category = c.req.query('category'); if (category) filter.category = category
       const valueClass = c.req.query('valueClass'); if (valueClass) filter.valueClass = valueClass
+      const origin = c.req.query('origin'); if (origin) filter.origin = origin
       const page = await listMemoriesPage(deps.db, {
         statuses: wanted,
         limit: Number(c.req.query('limit')),
@@ -861,6 +862,7 @@ export function createApp(deps: AppDeps) {
     if (body.filter?.subjectSlug) filter.subjectSlug = body.filter.subjectSlug
     if (body.filter?.category) filter.category = body.filter.category
     if (body.filter?.valueClass) filter.valueClass = body.filter.valueClass
+    if (body.filter?.origin) filter.origin = body.filter.origin
     const statuses: MemoryStatus[] = Array.isArray(body.statuses) ? body.statuses.filter((s: unknown) => typeof s === 'string') : []
     const rows = await listMemoriesForExport(deps.db, { scope, ids: body.ids, statuses, filter })
     if (format === 'markdown') {
