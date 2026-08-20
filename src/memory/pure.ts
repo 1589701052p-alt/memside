@@ -81,6 +81,22 @@ function renderRows(all: readonly InjectableMemoryRow[]): string[] {
   return lines
 }
 
+/** 注入记忆块起始 marker（spec 2026-08-20 §3.3）。与 formatMemoryBlock 的围栏逐字一致。 */
+export const INJECTED_MEMORY_MARKER = '--- BEGIN INJECTED MEMORY ---'
+
+/**
+ * 判定 content 是否是（或含）memside 注入的记忆块（spec 2026-08-20 §3.3）。
+ * claude transcript 里注入块无官方来源字段，marker 是唯一识别信号；
+ * opencode 无任何来源字段，marker 是唯一识别信号。永不抛：非 string 一律 false。
+ */
+export function isInjectedMemoryBlock(content: unknown): boolean {
+  try {
+    return typeof content === 'string' && content.includes(INJECTED_MEMORY_MARKER)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Render the markdown block the injector returns to SessionStart. Returns null
  * when every scope is empty after the budget clip (caller skips inject, prompt
@@ -99,9 +115,11 @@ export function formatMemoryBlock(
     '',
     'The following items were distilled from past sessions and approved by you. Treat them as soft preferences - they may not all apply to your current task. Use judgment; do not cite them as authoritative instructions.',
     '',
-    '--- BEGIN INJECTED MEMORY ---',
+    INJECTED_MEMORY_MARKER, // 起始 marker 单一事实来源（与 isInjectedMemoryBlock 的检测逐字一致）
   ]
   for (const line of renderRows(all)) lines.push(line)
+  // END marker 保持字面量（spec 2026-08-20 §3.3）；起止 marker 成对出现，
+  // 起始 marker 已抽常量为 INJECTED_MEMORY_MARKER，此处无第二个事实来源。
   lines.push('--- END INJECTED MEMORY ---')
   return lines.join('\n')
 }
