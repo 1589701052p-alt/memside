@@ -1403,6 +1403,8 @@ export interface LlmRoundRow {
   request: string
   response: string
   result: StepAttemptResult
+  /** shouldRetry 引导串（spec 2026-08-20 final-fix C1），旧行无此字段 → undefined。 */
+  detail?: string
 }
 
 /** 读 job 断点（spec §4.1）。job 不存在或 currentStep NULL → 'distill'/0/null。 */
@@ -1438,11 +1440,11 @@ export async function setJobCheckpoint(
  */
 export async function saveLlmRound(
   db: DbClient,
-  input: { jobId: string; step: DistillStep; round: number; request: string; response: string; result: StepAttemptResult },
+  input: { jobId: string; step: DistillStep; round: number; request: string; response: string; result: StepAttemptResult; detail?: string },
 ): Promise<void> {
   const payload = JSON.stringify({
     step: input.step, round: input.round, request: input.request,
-    response: input.response, result: input.result,
+    response: input.response, result: input.result, detail: input.detail,
   })
   await db.insert(memoryDistillEvents).values({
     distillJobId: input.jobId, attemptIndex: input.round, ts: Date.now(),
@@ -1472,6 +1474,7 @@ export async function listLlmRounds(
       request: typeof p.request === 'string' ? p.request : '',
       response: typeof p.response === 'string' ? p.response : '',
       result: p.result as StepAttemptResult,
+      detail: typeof p.detail === 'string' ? p.detail : undefined,
     })
   }
   return out

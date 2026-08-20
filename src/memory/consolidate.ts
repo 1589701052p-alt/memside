@@ -196,10 +196,14 @@ export function consolidateShouldRetry(approvedIds: Set<string>): (parsed: unkno
         if (!approvedIds.has(g.targetId)) {
           // 防御纵深（spec 2026-08-20）：报错携带引导让 followup 轮可收敛，
           // 不再 3 轮同错——prompt 分区（Task 1/2）是第一道防线，这里是第二道。
-          const ids = [...approvedIds].join(', ')
-          return approvedIds.size > 0
-            ? `group ${i} targetId 不在 approved 集合内（合法 targetId 仅限 APPROVED 分区: ${ids}）`
-            : `group ${i} targetId 不在 approved 集合内（本批 approved 为空，不可使用 update_of）`
+          // M1：approvedIds 过大时只列前 20 个 + 「等 N 条」，避免 token 溢出 / prompt 失焦。
+          // M2：ids/more 仅在非空分支计算，空集合走「不可使用 update_of」分支（死计算消除）。
+          if (approvedIds.size > 0) {
+            const ids = [...approvedIds].slice(0, 20).join(', ')
+            const more = approvedIds.size > 20 ? ` 等 ${approvedIds.size} 条` : ''
+            return `group ${i} targetId 不在 approved 集合内（合法 targetId 仅限 APPROVED 分区: ${ids}${more}）`
+          }
+          return `group ${i} targetId 不在 approved 集合内（本批 approved 为空，不可使用 update_of）`
         }
       }
       if (action === 'merge' || action === 'update_of') {

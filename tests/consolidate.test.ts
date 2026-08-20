@@ -131,6 +131,18 @@ describe('consolidateShouldRetry', () => {
   it('targetId not in approved → retry message lists APPROVED 分区合法 id', () => {
     expect(fn({ groups: [{ action: 'update_of', targetId: 'C', members: ['new-0'] }] })).toMatch(/仅限 APPROVED 分区: A/)
   })
+  // 回归锁（spec 2026-08-20-consolidate-update-of-target-prompt final-fix M1）：
+  // approvedIds 过大时引导串不得把全部 id 列出（token 溢出 / prompt 失焦），
+  // 最多列前 20 个 + 「等 N 条」尾注。空集合不计算 ids（M2 死计算）。
+  it('approvedIds > 20 → retry message 只列前 20 个 id + 「等 N 条」', () => {
+    const ids = new Set<string>()
+    for (let i = 0; i < 25; i++) ids.add(`id-${i}`)
+    const fn25 = consolidateShouldRetry(ids)
+    const msg = fn25({ groups: [{ action: 'update_of', targetId: 'BAD', members: ['new-0'] }] })
+    expect(msg).toContain('id-0')           // 第 1 个列出
+    expect(msg).not.toContain('id-20')     // 第 21 个不列出
+    expect(msg).toContain('等 25 条')
+  })
   it('approvedIds 为空 → retry message 明示不可使用 update_of', () => {
     const fnEmpty = consolidateShouldRetry(new Set<string>())
     expect(fnEmpty({ groups: [{ action: 'update_of', targetId: 'C', members: ['new-0'] }] })).toMatch(/不可使用 update_of/)

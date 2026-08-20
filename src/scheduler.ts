@@ -511,7 +511,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
         try {
           dedupOut = await consolidateBatch(db, tracked, exact.kept, job.cwd ?? null, {
             jobId: job.id,
-            persistRound: (r) => saveLlmRound(db, { jobId: job.id, step: 'dedup', round: r.round, request: r.request, response: r.response, result: r.result }),
+            persistRound: (r) => saveLlmRound(db, { jobId: job.id, step: 'dedup', round: r.round, request: r.request, response: r.response, result: r.result, detail: r.detail }),
             loadHistory: () => listLlmRounds(db, job.id, 'dedup'),
           })
         } finally { dedupPhase = pDedup.end() }
