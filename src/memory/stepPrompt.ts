@@ -67,14 +67,15 @@ function isClosedJson(s: string): boolean {
   return inString || depth <= 0
 }
 
-/** 根据失败原因拼追问文本（spec §5.3）。 */
-export function buildFollowupPrompt(reason: StepFailReason, lastResponse: string, _step: DistillStep): string {
+/** 根据失败原因拼追问文本（spec §5.3）。detail 为可选的补充引导（如 shouldRetry 返回的合法 id 列表），仅 format 分支插入。 */
+export function buildFollowupPrompt(reason: StepFailReason, lastResponse: string, _step: DistillStep, detail?: string): string {
   const suffix = '请只输出纯 JSON 对象，不要 markdown 围栏，不要解释文字，键与字符串值用双引号。'
   if (reason === 'incomplete') {
     return `\n\n[系统] 你上次的回复没回完，请接着上面的内容输出完整的 JSON。上次的回复：\n${lastResponse}\n${suffix}`
   }
   if (reason === 'format') {
-    return `\n\n[系统] 你上次的回复格式不对，请输出合规的 JSON 对象。上次的回复：\n${lastResponse}\n${suffix}`
+    const detailLine = detail ? `具体问题：${detail}\n` : ''
+    return `\n\n[系统] 你上次的回复格式不对，请输出合规的 JSON 对象。${detailLine}上次的回复：\n${lastResponse}\n${suffix}`
   }
   // aborted
   return `\n\n[系统] 上次请求被中断，请重新输出完整的 JSON 结果。${suffix}`

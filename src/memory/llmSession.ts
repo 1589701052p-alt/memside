@@ -81,7 +81,7 @@ export async function runLlmSession(opts: LlmSessionOpts): Promise<LlmSessionRes
       result = { ok: false, reason: 'format' as StepFailReason }
       reasons.push(`format:${retryErr}`)
       await opts.persistRound?.({ round, request: conversation, response: raw, result })
-      conversation = opts.initialUser + buildFollowupPrompt('format', raw, opts.step)
+      conversation = opts.initialUser + buildFollowupPrompt('format', raw, opts.step, retryErr)
     } catch (e) {
       // 裁决 #2：catch 块 response 传 null，避免 aborted 被 partial raw 遮蔽
       const reason = classifyFailure(e, null)
