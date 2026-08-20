@@ -4,7 +4,8 @@
 // 把 scheduler「去重」步从二元丢弃升级为「合并步」：merge / keep / drop / update_of。
 // 本模块为纯逻辑（不接 scheduler/store）：consolidateCandidates 走 runLlmSession
 // step='dedup'（步骤名不改，断点续跑历史兼容），parseConsolidate/consolidateShouldRetry
-// 为可断言纯函数。origin 一律降级 agent-observed（无例外）；成功响应内单条幻觉兜底 keep。
+// 为可断言纯函数。user prompt 分区渲染 approved/candidate（update_of 合法 target 只限 APPROVED 区）。
+// origin 一律降级 agent-observed（无例外）；成功响应内单条幻觉兜底 keep。
 import type { DistillCandidate } from './distiller'
 import type { ExistingMemoryForDedup } from './dedup'
 import type { LLMCall } from '@/llm'
@@ -21,17 +22,18 @@ export const CONSOLIDATE_SYSTEM_PROMPT = `You are memside-consolidate. You recei
 HARD RULES:
 - 仅当确属同一规则/决策/约束的不同侧面才合并（MERGE）。不同事实、不同规则、不同主题的记忆必须保持独立——宁可多留不可误并。MERGE 必须保留所有独特侧面，绝不允许「为减量丢事实」。
 - DROP 仅限纯语义重复（同一规则换个说法），不可用于「内容相似但角度不同」的候选。
-- update_of 仅当新候选是对既有 approved 记忆同一主题的精炼/补充/纠正；targetId 必须是本 prompt 列出的 existing 记忆中 status=approved 的 id 之一（candidate 不可作 target）。
+- update_of 仅当新候选是对既有 approved 记忆同一主题的精炼/补充/纠正；targetId 必须是 user prompt 中 APPROVED 分区列出的 id 之一——CANDIDATE 分区的记忆与任何 candidate 均不可作 target。APPROVED 分区为 (none) 时，本批禁止使用 update_of。
 - 合并后 origin 一律 agent-observed（综合产物按观察处理）。
 - 合并后 subjectSlug 必须给出：优先复用 existing subject slugs 清单；成员无 slug 但确属同主题时据内容造 kebab-case（2~4 个英文小写单词）。
 
 对每条新候选 id 形如 new-<i>。每个 group 的 members 必须是合法 new-id 字符串数组；所有 new-<i> 必须被恰好一个 group 覆盖。
 
 输出格式如下（仅示范结构，勿照抄内容；只输出这一个 JSON 对象，无 markdown 围栏，无解释文字）：
+示例中 targetId 的占位符 <an id from the APPROVED section> 必须替换为 user prompt APPROVED 分区实际列出的 id。
 {
   "groups": [
     { "action": "merge", "members": ["new-0", "new-2"], "mergedTitle": "[category:invariant] ...", "mergedBody": "...", "mergedEvidence": "出处1; 出处2", "mergedSlug": "refund-policy", "mergedOrigin": "agent-observed" },
-    { "action": "update_of", "targetId": "A", "members": ["new-1"], "mergedTitle": "...", "mergedBody": "...", "mergedEvidence": "...", "mergedSlug": "refund-policy", "mergedOrigin": "agent-observed" },
+    { "action": "update_of", "targetId": "<an id from the APPROVED section>", "members": ["new-1"], "mergedTitle": "...", "mergedBody": "...", "mergedEvidence": "...", "mergedSlug": "refund-policy", "mergedOrigin": "agent-observed" },
     { "action": "keep", "members": ["new-3"] },
     { "action": "drop", "members": ["new-4"], "dropReason": "duplicate" }
   ]

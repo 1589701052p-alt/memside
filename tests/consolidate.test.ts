@@ -147,6 +147,14 @@ describe('CONSOLIDATE_SYSTEM_PROMPT', () => {
     expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('update_of 仅当')
     expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('approved')
   })
+  // 回归锁（spec 2026-08-20）：分区规则必须写进系统提示，且旧的假 id 示例必须清除
+  it('contains partition rules + empty-approved ban + no fake id example', () => {
+    expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('APPROVED 分区')
+    expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('CANDIDATE 分区')
+    expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('(none)')
+    expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('禁止使用 update_of')
+    expect(CONSOLIDATE_SYSTEM_PROMPT).not.toContain('"targetId": "A"')
+  })
 })
 
 // 回归锁（spec 2026-08-20-consolidate-update-of-target-prompt）：
