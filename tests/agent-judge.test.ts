@@ -51,3 +51,34 @@ test('LLM 全程报错:返回 failed 标识（不再 keepAll 全保留冒充成�
 test('DEFAULT_JUDGE_CONFIG: 质量模式默认 + 预算 30 轮/300 秒', () => {
   expect(DEFAULT_JUDGE_CONFIG).toEqual({ mode: 'quality', maxRounds: 30, timeBudgetS: 300 })
 })
+
+// Task 4（2026-08-20 spec §3.2）：judge 失败时 reasons 优先取 agentLoop trace 末条
+// 真实原因（Task 3 透出的 aborted:/llm-error:），trace 为空才回退 stopReason 文案。
+// 旧实现固定 `agent loop ended without final: llm-error`，掩盖了真实 abort/error。
+test('agentLoop 失败: reasons 透出真实原因（aborted:），不再固定 llm-error', async () => {
+  // callLLM 抛 AbortError -> agentLoop trace 末条含 aborted: -> reasons 含 aborted:
+  const callLLM = async () => {
+    const e = new Error('The operation was aborted')
+    e.name = 'AbortError'
+    throw e
+  }
+  const r = await judgeValueAgentic(
+    [cand('[category:x] t')], { ...base, callLLM })
+  expect('failed' in r).toBe(true)
+  if ('failed' in r) {
+    const joined = r.reasons.join(' | ')
+    expect(joined).toContain('aborted:')
+  }
+})
+
+test('agentLoop 预算耗尽无 trace 真实原因时: reasons 回退带 stopReason', async () => {
+  // maxRounds=1 + 永远要工具 -> rounds-budget，trace 末条是 correction（工具请求），
+  // 非 catch 路径 -> reasons 取 trace 末条原文（保留旧兜底语义：reasons 非空）。
+  const callLLM = async () => '{"tool": "grep", "args": {"pattern": "x"}}'
+  const r = await judgeValueAgentic(
+    [cand('[category:x] t')], { ...base, callLLM, maxRounds: 1 })
+  expect('failed' in r).toBe(true)
+  if ('failed' in r) {
+    expect(r.reasons.length).toBeGreaterThan(0)
+  }
+})

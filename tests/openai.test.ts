@@ -1,4 +1,5 @@
 import { test, expect, beforeEach, afterEach } from 'bun:test'
+import { join } from 'node:path'
 import { makeLLMCall, loadOpenAiCreds, loadOpenAiUiCreds, testConnection } from '@/openai'
 import { DEFAULT_LLM_MAX_TOKENS } from '@/llm'
 
@@ -21,6 +22,17 @@ const savedEnv: Record<string, string | undefined> = {}
 
 function okResp(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+}
+
+function sseStreamResponse(chunks: string[], status = 200): Response {
+  // 返回一个 body 逐块吐出 chunks 的流式 Response
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(new TextEncoder().encode(c))
+      controller.close()
+    },
+  })
+  return new Response(stream, { status, headers: { 'content-type': 'text/event-stream' } })
 }
 
 beforeEach(() => {
@@ -68,7 +80,10 @@ test('loadOpenAiCreds defaults baseURL to https://api.openai.com/v1 and strips t
 // ---- makeLLMCall：请求形状 + 响应抽取（spec §9 断言 1-4）----
 
 test('makeLLMCall posts to {baseURL}/chat/completions with Bearer auth + system/user messages + default max_tokens', async () => {
-  fetchImpl = async () => okResp({ choices: [{ message: { content: 'hello' } }] })
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ])
   const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
   const out = await call('SYS', 'USR')
   expect(out).toBe('hello')
@@ -83,25 +98,27 @@ test('makeLLMCall posts to {baseURL}/chat/completions with Bearer auth + system/
     { role: 'system', content: 'SYS' },
     { role: 'user', content: 'USR' },
   ])
+  expect(body.stream).toBe(true)
   expect(body.max_tokens).toBe(DEFAULT_LLM_MAX_TOKENS)
   expect(body.max_tokens).toBe(8192)
 })
 
 test('makeLLMCall honors opts.maxTokens override', async () => {
-  fetchImpl = async () => okResp({ choices: [{ message: { content: 'x' } }] })
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"x"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ])
   const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
   await call('s', 'u', { maxTokens: 512 })
   const body = JSON.parse(fetchCalls[0]!.init.body as string)
   expect(body.max_tokens).toBe(512)
 })
 
-test('makeLLMCall extracts choices[0].message.content (first of many choices)', async () => {
-  fetchImpl = async () => okResp({
-    choices: [
-      { message: { content: 'first' } },
-      { message: { content: 'second' } },
-    ],
-  })
+test('makeLLMCall 流式累加 choices[0] delta 拼全文', async () => {
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ])
   const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
   const out = await call('s', 'u')
   expect(out).toBe('first')
@@ -127,10 +144,11 @@ test('makeLLMCall throws "OpenAI HTTP <status>" on non-2xx', async () => {
   await expect(call('s', 'u')).rejects.toThrow(/OpenAI HTTP 401/)
 })
 
-test('makeLLMCall throws when response missing choices[0].message.content', async () => {
-  fetchImpl = async () => okResp({ choices: [{ message: {} }] })
+test('makeLLMCall 流式空响应返回空串（不抛 missing content）', async () => {
+  fetchImpl = async () => sseStreamResponse(['data: [DONE]\n\n'])
   const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
-  await expect(call('s', 'u')).rejects.toThrow(/missing choices\[0\]\.message\.content/)
+  const out = await call('s', 'u')
+  expect(out).toBe('')
 })
 
 test('makeLLMCall aborts after timeoutMs when fetch never resolves', async () => {
@@ -176,7 +194,10 @@ test('loadOpenAiUiCreds: UI 为 null -> 回退 env', () => {
 })
 
 test('makeLLMCall 注入 loadUiConfig 时用 UI creds', async () => {
-  fetchImpl = async () => okResp({ choices: [{ message: { content: 'hi' } }] })
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ])
   const call = makeLLMCall({
     loadUiConfig: () => ({ token: 'sk-ui', baseURL: 'https://ui.example.com/v1', model: 'ui-model' }),
   })
@@ -204,4 +225,105 @@ test('testConnection 非 2xx -> {ok:false, error 含状态码}', async () => {
   const r = await testConnection({ token: 'sk', model: 'm' })
   expect(r.ok).toBe(false)
   expect(r.error).toMatch(/OpenAI HTTP 401/)
+})
+
+// ---- makeLLMCall：流式 SSE（spec §3.1 / 2026-08-20 移植自 anthropic 流式）----
+
+test('makeLLMCall 流式：累加 delta.content 拼出全文', async () => {
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":" world"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ])
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  const out = await call('s', 'u')
+  expect(out).toBe('hello world')
+})
+
+test('makeLLMCall 流式：body 含 stream:true', async () => {
+  fetchImpl = async () => sseStreamResponse(['data: {"choices":[{"delta":{"content":"x"}}]}\n\n', 'data: [DONE]\n\n'])
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  await call('s', 'u')
+  const body = JSON.parse(fetchCalls[0]!.init.body as string)
+  expect(body.stream).toBe(true)
+})
+
+test('makeLLMCall 流式：跨 chunk 拆断的 SSE 行正确拼接', async () => {
+  // 一个 data 行被拆成两个 chunk
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{',
+    '"content":"ok"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ])
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  const out = await call('s', 'u')
+  expect(out).toBe('ok')
+})
+
+test('makeLLMCall 流式：心跳行 / 缺 content 的 chunk 跳过不抛', async () => {
+  fetchImpl = async () => sseStreamResponse([
+    ': heartbeat\n\n',
+    'data: {"choices":[{"delta":{}}]}\n\n',          // 无 content
+    'data: {"choices":[{"delta":{"content":"x"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ])
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  const out = await call('s', 'u')
+  expect(out).toBe('x')
+})
+
+test('makeLLMCall 流式：未见 [DONE] 连接关闭也视结束返回已累计文本', async () => {
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"ab"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"c"}}]}\n\n',
+    // 无 [DONE]，stream 直接 close
+  ])
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  const out = await call('s', 'u')
+  expect(out).toBe('abc')
+})
+
+test('makeLLMCall timeoutMs 缺省：源码层文本锁 600_000（防回退 120k）', async () => {
+  // 无法从外部读 AbortController 时长；锁源码缺省值字符串，防 PR 后回退到 120_000。
+  const src = await Bun.file(join(import.meta.dir, '..', 'src', 'openai.ts')).text()
+  expect(src).toContain('600_000')
+  expect(src).not.toContain('120_000')
+})
+
+// ---- makeLLMCall：终审 Important 修复（2026-08-20）----
+// Finding 1：网关忽略 stream:true 返回非 SSE JSON body，旧码静默返回 ''（下游变 opaque aborted）。
+// Finding 2：流式 error 帧（如 Azure content-filter）被静默跳过，截断文本冒充成功。
+// 两条锁回归：非流式响应 / error 帧必须显式抛错，让调用方重试降级路径感知。
+
+test('makeLLMCall 网关忽略 stream:true 返回非 SSE JSON body -> 抛「非流式响应」带原始响应前缀', async () => {
+  const rawBody = '{"choices":[{"message":{"content":"hi"}}]}'
+  fetchImpl = async () => new Response(rawBody, { status: 200, headers: { 'content-type': 'application/json' } })
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  let caught: Error | undefined
+  try { await call('s', 'u') } catch (e) { caught = e as Error }
+  expect(caught).toBeInstanceOf(Error)
+  expect(caught!.message).toMatch(/非流式响应/)
+  expect(caught!.message).toContain('hi') // 原始响应前缀透出，便于诊断
+})
+
+test('makeLLMCall 流式含 error 帧 -> 抛「错误帧」带 error 详情', async () => {
+  fetchImpl = async () => sseStreamResponse([
+    'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+    'data: {"error":{"message":"content filter","code":"content_filter"}}\n\n',
+    'data: [DONE]\n\n',
+  ])
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  let caught: Error | undefined
+  try { await call('s', 'u') } catch (e) { caught = e as Error }
+  expect(caught).toBeInstanceOf(Error)
+  expect(caught!.message).toMatch(/错误帧/)
+  expect(caught!.message).toContain('content filter')
+})
+
+test('makeLLMCall 非流式空响应（body 为空）仍返回空串（不误抛非流式响应）', async () => {
+  fetchImpl = async () => new Response('', { status: 200, headers: { 'content-type': 'application/json' } })
+  const call = makeLLMCall({ loadOpenAiCreds: () => CREDS })
+  const out = await call('s', 'u')
+  expect(out).toBe('')
 })
