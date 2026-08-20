@@ -160,14 +160,14 @@ test('tabTotalCount(trash) = trashCount', () => {
 // --- 2026-08-11 记忆列表筛选（spec web-memory-filters §4.3）---
 
 test('hasActiveFilter: 全空 false，任一维非空 true', () => {
-  expect(hasActiveFilter({ project: '', slug: '', category: '', valueClass: '' })).toBe(false)
-  expect(hasActiveFilter({ project: 'C:/x', slug: '', category: '', valueClass: '' })).toBe(true)
-  expect(hasActiveFilter({ project: '', slug: 's', category: '', valueClass: '' })).toBe(true)
-  expect(hasActiveFilter({ project: '', slug: '', category: 'trap', valueClass: '' })).toBe(true)
-  expect(hasActiveFilter({ project: '', slug: '', category: '', valueClass: 'unevaluated' })).toBe(true)
+  expect(hasActiveFilter({ project: '', slug: '', category: '', valueClass: '', origin: '' })).toBe(false)
+  expect(hasActiveFilter({ project: 'C:/x', slug: '', category: '', valueClass: '', origin: '' })).toBe(true)
+  expect(hasActiveFilter({ project: '', slug: 's', category: '', valueClass: '', origin: '' })).toBe(true)
+  expect(hasActiveFilter({ project: '', slug: '', category: 'trap', valueClass: '', origin: '' })).toBe(true)
+  expect(hasActiveFilter({ project: '', slug: '', category: '', valueClass: 'unevaluated', origin: '' })).toBe(true)
 })
 
-test('EMPTY_MEMORY_FILTER 四维全空且未激活', () => {
-  expect(EMPTY_MEMORY_FILTER).toEqual({ project: '', slug: '', category: '', valueClass: '' })
+test('EMPTY_MEMORY_FILTER 五维全空且未激活', () => {
+  expect(EMPTY_MEMORY_FILTER).toEqual({ project: '', slug: '', category: '', valueClass: '', origin: '' })
   expect(hasActiveFilter(EMPTY_MEMORY_FILTER)).toBe(false)
 })

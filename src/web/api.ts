@@ -361,12 +361,17 @@ export async function getRunDegradations(
 /** valueClass 筛「未评估」的 URL 哨兵值（= value_class IS NULL），与 store 常量同值。 */
 export const UNEVALUATED = 'unevaluated'
 
+/** origin 筛「未标注」的 URL 哨兵值（= origin IS NULL），与 store 常量
+ *  `ORIGIN_UNLABELED` 同值；对齐 UNEVALUATED 的做法（前端不直接依赖 store 层）。 */
+export const ORIGIN_UNLABELED = 'unlabeled'
+
 export interface FacetValue { value: string; count: number }
 export interface Facets {
   projects: FacetValue[]
   categories: FacetValue[]
   slugs: FacetValue[]
   valueClasses: FacetValue[]
+  origins: FacetValue[]
 }
 
 /** 带筛选下拉的四个 tab；GET /api/facets?tab= 的参数（spec per-tab-memory-filters §4.3）。 */
@@ -411,7 +416,7 @@ async function parsePage<T>(res: Response): Promise<PageDto<T>> {
 
 export async function listMemoriesPage(
   fetchFn: FetchLike = fetch,
-  opts: { status: string; project?: string; slug?: string; category?: string; valueClass?: string } & PageOpts = { status: '' },
+  opts: { status: string; project?: string; slug?: string; category?: string; valueClass?: string; origin?: string } & PageOpts = { status: '' },
 ): Promise<PageDto<MemoryItem>> {
   const p = pageParams(opts)
   p.set('status', opts.status)
@@ -424,6 +429,7 @@ export async function listMemoriesPage(
   if (opts.slug) qs.set('slug', opts.slug)
   if (opts.category) qs.set('category', opts.category)
   if (opts.valueClass) qs.set('valueClass', opts.valueClass)
+  if (opts.origin) qs.set('origin', opts.origin)
   return parsePage<MemoryItem>(await fetchFn(`/api/memories?${qs}`))
 }
 
@@ -725,7 +731,7 @@ export async function getTrash(
  * URL.createObjectURL + <a download> 落盘（spec §Web UI §3）。
  */
 export async function exportMemories(
-  opts: { scope: 'selected' | 'filter' | 'all'; ids?: string[]; filter?: { sourceCwd?: string; subjectSlug?: string; category?: string; valueClass?: string }; statuses?: string[]; format: 'json' | 'markdown' },
+  opts: { scope: 'selected' | 'filter' | 'all'; ids?: string[]; filter?: { sourceCwd?: string; subjectSlug?: string; category?: string; valueClass?: string; origin?: string }; statuses?: string[]; format: 'json' | 'markdown' },
   fetchFn: FetchLike = fetch,
 ): Promise<Blob> {
   const res = await fetchFn('/api/memories/export', {

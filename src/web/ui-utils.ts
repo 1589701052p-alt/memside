@@ -118,6 +118,18 @@ export function originBadge(origin: string | null | undefined): { label: string;
 }
 
 /**
+ * origin 下拉措辞的单一事实来源（对齐 valueClassInfo / categoryInfo 的地位）。
+ * 哨兵 `unlabeled` -> 「未标注」（origin IS NULL 老行）；三合法值委托 originBadge 中文名；
+ * 未知值原样返回（向后兼容老数据 / 新旧版本值集变化，不报错不空白）。纯函数，可单测。
+ *
+ * 设计依据：docs/superpowers/specs/2026-08-20-origin-filter-design.md §接口契约 web 层。
+ */
+export function originName(v: string): string {
+  if (v === 'unlabeled') return '未标注'
+  return originBadge(v)?.label ?? v
+}
+
+/**
  * AI 自动拒绝理由中文化（DiscardCard 用）。未知 reason 原样显示（向后兼容老数据）。
  * 四理由对应 spec 的 fleeting 价值判定：公开知识 / 可从代码推导 / 驯化指令 / 一次性·琐事。
  * 纯函数，可单测。
