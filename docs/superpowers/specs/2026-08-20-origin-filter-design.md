@@ -35,7 +35,7 @@ Web UI 筛选条现有四维：源项目 / 分类 / 主题（slug）/ 价值（v
 ### store 层（`src/memory/store.ts`）
 
 - 新常量 `export const ORIGIN_UNLABELED = 'unlabeled'` —— origin 筛「未标注」的哨兵值（=
-  `origin IS NULL`）。六个合法 origin 值里没有这个词，URL/接口层无歧义。
+  `origin IS NULL`）。三个合法 origin 值里没有这个词，URL/接口层无歧义。
 - `MemoryListFilter` 加 `origin?: string`。
 - `memoryFilterConds`：`origin` 三合法值 → `eq(memories.origin, v)`；`=== ORIGIN_UNLABELED` →
   `isNull(memories.origin)`；其余值忽略该条件（白名单宽松，与 valueClass/非法 status 同风格，

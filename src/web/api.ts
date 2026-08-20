@@ -371,6 +371,7 @@ export interface Facets {
   categories: FacetValue[]
   slugs: FacetValue[]
   valueClasses: FacetValue[]
+  /** 老 daemon 不返回该字段，读取处须 ?? [] 兜底。 */
   origins: FacetValue[]
 }
 
