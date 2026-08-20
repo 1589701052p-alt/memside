@@ -107,3 +107,40 @@ test('filterTranscriptForDistill: 噪声剔除后 budget 不再挤掉 assistant 
   // assistant rationale 至少保留一条（噪声不占预算，budget=500 下完整保留）
   expect(out.some((t) => t.role === 'assistant')).toBe(true)
 })
+
+// ---------------------------------------------------------------------------
+// system role 噪声剔除（spec 2026-08-20 §7.2）：捕获层把非人类 user 行重标
+// role:"system"（loop 重放 / 注入记忆 / task 通知 / peer / 无字段行）后，
+// task-notification / compact 噪声以 system 身份抵达，stripNoiseTurns 的
+// role 判断须放宽到 system，否则噪声从新通道漏回蒸馏输入。
+// 非噪声 system 内容（loop 重放 prompt 本体）保留——供 agent-observed 观察。
+// ---------------------------------------------------------------------------
+
+test('stripNoiseTurns: 剔除 system role 的 task-notification 块', () => {
+  const turns: TranscriptTurn[] = [
+    { role: 'system', content: TASK_NOTIFICATION },
+    { role: 'system', content: '检查 Task 5 implementer 是否完成' },
+  ]
+  const out = stripNoiseTurns(turns)
+  expect(out.length).toBe(1)
+  expect(out[0]!.role).toBe('system')
+  expect(out[0]!.content).toBe('检查 Task 5 implementer 是否完成')
+})
+
+test('stripNoiseTurns: 剔除 system role 的 compact 续接块', () => {
+  const turns: TranscriptTurn[] = [
+    { role: 'system', content: COMPACT },
+    { role: 'user', content: 'normal' },
+  ]
+  const out = stripNoiseTurns(turns)
+  expect(out.length).toBe(1)
+  expect(out[0]!.content).toBe('normal')
+})
+
+test('stripNoiseTurns: 非噪声 system 内容保留（供 agent-observed）', () => {
+  const turns: TranscriptTurn[] = [
+    { role: 'system', content: '[1 prior /loop wakeup found nothing actionable; loop is healthy.]' },
+  ]
+  const out = stripNoiseTurns(turns)
+  expect(out.length).toBe(1)
+})

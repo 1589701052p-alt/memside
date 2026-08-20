@@ -42,8 +42,12 @@ function writeJsonl(...lines: unknown[]): string {
 }
 
 test('user string prompt -> {role:"user"}', () => {
+  // 来源归因（spec 2026-08-20 §3.2）：本用例锁的是「真人输入的形状映射」，故补
+  // origin.kind=human + promptSource=typed 使其继续产出 role:"user"（D1/D2 语义）。
   const p = writeJsonl({
     type: 'user',
+    origin: { kind: 'human' },
+    promptSource: 'typed',
     message: { role: 'user', content: 'what is the refund policy?' },
   })
   const turns = parseTranscriptFile(p)
@@ -123,12 +127,13 @@ test('missing file -> []', () => {
 test('malformed lines mixed with valid -> valid extracted, malformed skipped', () => {
   // Interleave garbage with valid JSONL; the parser must not lose the valid
   // rows when one line fails to parse.
+  // 来源归因（spec 2026-08-20 §3.2）：user 行补 human 字段以保持 role:"user" 期望。
   const p = join(dir, 'mixed.jsonl')
   writeFileSync(
     p,
     [
       '{not valid json',
-      JSON.stringify({ type: 'user', message: { role: 'user', content: 'valid turn' } }),
+      JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { role: 'user', content: 'valid turn' } }),
       'this is also not json',
       JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } }),
       '',
@@ -142,10 +147,11 @@ test('malformed lines mixed with valid -> valid extracted, malformed skipped', (
 })
 
 test('order is preserved across user/assistant turns', () => {
+  // 来源归因（spec 2026-08-20 §3.2）：user 行补 human 字段以保持 role:"user" 期望。
   const p = writeJsonl(
-    { type: 'user', message: { role: 'user', content: 'first' } },
+    { type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { role: 'user', content: 'first' } },
     { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'second' }] } },
-    { type: 'user', message: { role: 'user', content: 'third' } },
+    { type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { role: 'user', content: 'third' } },
   )
   const turns = parseTranscriptFile(p)
   expect(turns.map((t) => `${t.role}:${t.content}`)).toEqual([
@@ -158,8 +164,9 @@ test('order is preserved across user/assistant turns', () => {
 test('CRLF line endings parse correctly', () => {
   // Windows transcripts may use \r\n; the trim() per line strips the \r so
   // JSON.parse still succeeds.
+  // 来源归因（spec 2026-08-20 §3.2）：user 行补 human 字段以保持 role:"user" 期望。
   const p = join(dir, 'crlf.jsonl')
-  const line1 = JSON.stringify({ type: 'user', message: { role: 'user', content: 'crlf ok' } })
+  const line1 = JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { role: 'user', content: 'crlf ok' } })
   const line2 = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'yes' }] } })
   writeFileSync(p, `${line1}\r\n${line2}\r\n`)
   const turns = parseTranscriptFile(p)
@@ -518,4 +525,108 @@ test('resolveSubagentTranscript: 源码层文本守卫——取证两字段赋�
   expect(src).toContain('agentTranscriptPathExists: boolean')
   // 第三参数可选（签名含 agentTranscriptPath?）
   expect(src).toMatch(/agentTranscriptPath\?:\s*string\s*\|\s*null/)
+})
+
+// ---------------------------------------------------------------------------
+// 来源归因（spec 2026-08-20 §3.2，D1/D2）：claude transcript 的 user 行带
+// 来源字段（origin.kind / promptSource / isMeta，实测 2.1.235 taxonomy：
+// 真人 = origin.kind=human + promptSource=typed；loop 重放 = promptSource=system
+// + isMeta；task 通知 = origin.kind=task-notification；注入记忆块 = 无字段）。
+// 捕获层此前全部映 role:"user"，导致 loop 重放 prompt 被蒸馏器误标
+// user-stated 后被双重保护锁死（事故候选 01M0EMPV13JY139C35XJDD8JYP）。
+// ---------------------------------------------------------------------------
+
+test('真人行（origin.kind=human + promptSource=typed）→ role:"user"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    origin: { kind: 'human' },
+    promptSource: 'typed',
+    message: { role: 'user', content: 'we only issue refunds within 14 days' },
+  })
+  const turns = parseTranscriptFile(p)
+  expect(turns).toEqual([{ role: 'user', content: 'we only issue refunds within 14 days' }])
+})
+
+test('D2 OR 路径：仅 origin.kind=human（promptSource 缺席）→ role:"user"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    origin: { kind: 'human' },
+    message: { role: 'user', content: 'human words' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('user')
+})
+
+test('D2 OR 路径：仅 promptSource=typed（origin 缺席）→ role:"user"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    promptSource: 'typed',
+    message: { role: 'user', content: 'human words' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('user')
+})
+
+test('loop 重放 prompt（promptSource=system + isMeta）→ role:"system"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    promptSource: 'system',
+    isMeta: true,
+    message: { role: 'user', content: '检查 Task 5 implementer (a11a0f3be1ceeb11c) 是否完成。若完成则处理 report（DONE→生成 review package 派 task reviewer）' },
+  })
+  const turns = parseTranscriptFile(p)
+  expect(turns).toEqual([{ role: 'system', content: '检查 Task 5 implementer (a11a0f3be1ceeb11c) 是否完成。若完成则处理 report（DONE→生成 review package 派 task reviewer）' }])
+})
+
+test('loop 注解（isMeta、无 origin）→ role:"system"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    isMeta: true,
+    message: { role: 'user', content: '[1 prior /loop wakeup found nothing actionable; loop is healthy.]' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('system')
+})
+
+test('task-notification 行（origin.kind=task-notification）→ role:"system"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    origin: { kind: 'task-notification' },
+    promptSource: 'system',
+    message: { role: 'user', content: '<task-notification><task-id>a</task-id></task-notification>' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('system')
+})
+
+test('peer 行（origin.kind=peer）→ role:"system"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    origin: { kind: 'peer', from: 'general-purpose' },
+    promptSource: 'system',
+    isMeta: true,
+    message: { role: 'user', content: '正在修测试红，快好了。' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('system')
+})
+
+test('注入记忆块（无字段、content 含 marker）→ role:"system"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    message: { role: 'user', content: '## Learned context (auto-injected, advisory)\n\n--- BEGIN INJECTED MEMORY ---\n- [x] old memory\n--- END INJECTED MEMORY ---' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('system')
+})
+
+test('D1 保守：无任何来源字段的纯文本 → role:"system"', () => {
+  const p = writeJsonl({
+    type: 'user',
+    message: { role: 'user', content: 'some untagged text' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('system')
+})
+
+test('来源判定永不抛：origin 为畸形值（string）时降级 system', () => {
+  const p = writeJsonl({
+    type: 'user',
+    origin: 'garbage-not-an-object',
+    message: { role: 'user', content: 'text' },
+  })
+  expect(parseTranscriptFile(p)[0]!.role).toBe('system')
 })
