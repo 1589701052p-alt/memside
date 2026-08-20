@@ -18,7 +18,7 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
-      - run: bun run build:exe      # dist/memside.exe（package.json build:exe 内部已含 vite build + gen-manifest + compile）
+      - run: bun run build:exe      # dist/memside-<version>.exe（package.json build:exe 内部已含 vite build + gen-manifest + compile）
       - uses: crazy-max/ghaction-chocolatey@v3
         with:
           args: install nsis -y
@@ -36,14 +36,17 @@ jobs:
           if (-not (Test-Path "$nsisDir\makensis.exe")) { throw "makensis.exe not found: $nsisDir\makensis.exe" }
           Add-Content -Path $env:GITHUB_PATH -Value "$nsisDir"
           Write-Host "EnVar plugin + makensis on PATH: $nsisDir"
-      - run: bun run build:installer  # installer/memside-setup.exe（makensis 读 installer/installer.nsi）
+      - run: bun run build:installer  # installer/memside-setup-<version>.exe（makensis 读 installer/installer.nsi，APP_VERSION 由 script 注入）
         working-directory: ${{ github.workspace }}
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # 产物名带版本号（发版约定 2026-08-20）：memside-<version>.exe /
+          # memside-setup-<version>.exe（版本来自 package.json，经 bun run 注入
+          # $npm_package_version）。dist/installer 均为本次构建干净产物，glob 无旧文件干扰。
           files: |
-            dist/memside.exe
-            installer/memside-setup.exe
+            dist/memside-*.exe
+            installer/memside-setup-*.exe
           generate_release_notes: true
 
   publish-npm:

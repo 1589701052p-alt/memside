@@ -1,4 +1,4 @@
-import { test, expect } from 'bun:test'
+import { test, expect, describe } from 'bun:test'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -57,4 +57,40 @@ test('.github/workflows/release.yml 存在并含两 job', () => {
   expect(src).toMatch(/makensis\.exe/)
   // F3 回归防护：build:exe 已含 vite build，不得再显式跑一遍 bun run build（冗余浪费）。
   expect(src).not.toMatch(/bun run build\s+# vite dist/)
+})
+
+/**
+ * 发版产物名带版本号（2026-08-20 用户约定）：Release 资产必须是
+ * memside-<version>.exe / memside-setup-<version>.exe，不是裸 memside.exe。
+ * 版本号单一来源 package.json：build:exe 经 bun run 注入 $npm_package_version；
+ * build:installer 经 makensis -DAPP_VERSION 注入。安装到用户机器后的文件名
+ * 仍是 memside.exe（/oname= 保持，快捷方式/PATH 不受影响）。任一 token 缺失
+ * 即红——防止后续重构把版本号从产物名里丢掉。
+ */
+describe('发版产物名带版本号', () => {
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8'))
+
+  test('package.json 两个构建脚本注入版本号', () => {
+    expect(pkg.scripts['build:exe']).toContain('dist/memside-$npm_package_version.exe')
+    expect(pkg.scripts['build:installer']).toContain('-DAPP_VERSION=$npm_package_version')
+  })
+
+  test('installer.nsi 产物名按 APP_VERSION 命名且安装后文件名不变', () => {
+    const nsi = readFileSync(join(repoRoot, 'installer', 'installer.nsi'), 'utf-8')
+    // setup 输出带版本号
+    expect(nsi).toContain('OutFile "memside-setup-${APP_VERSION}.exe"')
+    // 打包版本化的构建产物，但装出来仍叫 memside.exe（快捷方式/PATH/MUI_FINISHPAGE_RUN 都指它）
+    expect(nsi).toContain('File /oname=memside.exe "..\\dist\\memside-${APP_VERSION}.exe"')
+    // 手跑 makensis（无 -D）的 fallback 定义存在，避免编译期 !undefined 错
+    expect(nsi).toMatch(/!ifndef APP_VERSION/)
+  })
+
+  test('release.yml 上传版本化产物', () => {
+    const yml = readFileSync(join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf-8')
+    expect(yml).toContain('dist/memside-*.exe')
+    expect(yml).toContain('installer/memside-setup-*.exe')
+    // 反向锁：不得再出现裸产物名上传路径
+    expect(yml).not.toMatch(/dist\/memside\.exe/)
+    expect(yml).not.toMatch(/installer\/memside-setup\.exe/)
+  })
 })
