@@ -19,7 +19,7 @@ import {
   type NotificationItem,
   type TrashItem,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody, SLUG_BADGE_TIP, updateBadge } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, originName, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody, SLUG_BADGE_TIP, updateBadge } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
 import { resolveClaudePath, resolveOpencodePath } from './runtime-paths'
 
@@ -165,7 +165,7 @@ export default function App() {
         const [pg, st, fc] = await Promise.all([
           listMemoriesPage(fetch, {
             status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE,
-            project: f.project, slug: f.slug, category: f.category, valueClass: f.valueClass,
+            project: f.project, slug: f.slug, category: f.category, valueClass: f.valueClass, origin: f.origin,
           }),
           getStatus(),
           getFacets(fetch, target as FacetTab).catch(() => null),
@@ -229,7 +229,7 @@ export default function App() {
       } else {
         const pg = await listMemoriesPage(fetch, {
           status: memoryTabFilter(target as MemoryTabKey), limit: WEB_PAGE_SIZE, before,
-          project: f.project, slug: f.slug, category: f.category, valueClass: f.valueClass,
+          project: f.project, slug: f.slug, category: f.category, valueClass: f.valueClass, origin: f.origin,
         })
         setMemCache((c) => ({
           ...c,
@@ -753,7 +753,9 @@ export default function App() {
           可用；runs/settings 不渲染。选项来自 /api/facets（随 3s 轮询刷新，新 slug/
           项目无静默窗口）；facets 未就绪 -> 下拉禁用 + 灰字，不静默。discards tab
           只渲染有对应列的两维（项目/分类）。
-          2026-08-11 ui-clarity：加标题/说明 + 维度改名 + 分类/价值选项中文化（映射走 ui-utils）。 */}
+          2026-08-11 ui-clarity：加标题/说明 + 维度改名 + 分类/价值选项中文化（映射走 ui-utils）。
+          2026-08-20 五维：加「出处」筛选（spec 2026-08-20-origin-filter），与 slug/价值同在
+          tab !== 'discards' 条件块内（discards 表无 origin 列）。 */}
       {isFilterTab(tab) ? (
         <div style={{ display: 'flex', flexDirection: 'column', marginBottom: 16, padding: 10, border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa' }}>
           <div style={{ fontWeight: 600, fontSize: 13 }}>筛选</div>
@@ -784,6 +786,13 @@ export default function App() {
                     const v = valueClassInfo(p.value === UNEVALUATED ? null : p.value)
                     return { value: p.value, label: `${v.name}${v.priority ? ` · ${v.priority}优先` : ''} (${p.count})` }
                   })} />
+                <FilterSelect label="出处" disabled={facets === null} value={filter.origin}
+                  onChange={(v) => changeFilter({ ...filter, origin: v })}
+                  options={(facets?.origins ?? []).map((p) => ({
+                    value: p.value,
+                    label: `${originName(p.value)} (${p.count})`,
+                    title: p.value,
+                  }))} />
               </>
             ) : null}
             {facets === null ? (
@@ -2134,7 +2143,7 @@ function ExportTrigger({ selectedIds, filter, tab, onDone }: {
       const blob = await exportMemories({
         scope, format,
         ids: scope === 'selected' ? selectedIds : undefined,
-        filter: scope === 'filter' ? { sourceCwd: filter.project, subjectSlug: filter.slug, category: filter.category, valueClass: filter.valueClass } : undefined,
+        filter: scope === 'filter' ? { sourceCwd: filter.project, subjectSlug: filter.slug, category: filter.category, valueClass: filter.valueClass, origin: filter.origin } : undefined,
         statuses: scope === 'filter' ? memoryTabFilter(tab).split(',') : undefined,
       })
       const url = URL.createObjectURL(blob)

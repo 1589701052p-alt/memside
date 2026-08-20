@@ -1,5 +1,13 @@
 # STATE.md - memside 构建状态
 
+## 记忆列表第五维筛选：origin 出处（2026-08-20）
+
+筛选条从四维（源项目/分类/主题/价值）扩到五维，加「出处」：选项 = 用户陈述 / 用户采纳 / agent 观察 / **未标注**（NULL 老行，哨兵 `unlabeled` → `IS NULL`，同 valueClass 的 `unevaluated` 模式）。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-20-origin-filter*`。动机：origin 是审批可信度信号，且 2026-08-20 origin 误标事故后需要按出处筛出待复核项（尤其「agent 观察」与「未标注」老行）。
+
+管线完全同构四维既有模式：`MemoryListFilter.origin`（store 白名单宽松——合法三值 eq / 哨兵 isNull / 非法忽略）→ `/api/memories?origin=` + export `body.filter.origin`（「按当前筛选导出」与 UI 所见一致）→ `/api/facets` 加 `origins`（NULL 归哨兵桶）→ 前端 `MemoryFilter.origin` + 第五个 FilterSelect。数据流闭环五站点（refresh / loadMore / 3s 轮询 / changeFilter / ExportTrigger）origin 透传齐。**discards 与回收站 tab 无 origin 列，不渲染该下拉**（`origins: []`）。
+
+测试：`tests/store-origin-filter.test.ts`（14 用例）+ `tests/server-origin-filter.test.ts`（9 用例）+ `tests/web-origin-filter.test.ts`（纯函数 + App.tsx 文本锚点）；`bun run typecheck && bun test` 1413 pass / 0 fail / 5 skip。
+
 ## 候选记忆合并步（consolidation）：dedup 升级为 merge/keep/drop/update_of 四态（2026-08-19）
 
 把 scheduler「去重」步从二元丢弃（duplicate vs keep）升级为「合并步」：对新蒸馏候选 + 同 scope 既有记忆做四态归约——**merge**（同主题碎片熔合成一条，保留所有独特侧面）/ **keep**（独立候选原样保留）/ **drop**（纯语义重复丢弃）/ **update_of**（对既有 approved 记忆的精炼/补充/纠正，审批时并回 supersede 而非堆叠重复）。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-19-candidate-consolidation*`。根因：旧 dedup 只能丢不能并，同主题碎片（退款窗口 14 天 ×4 种说法）各入库成独立候选，审批队列噪声膨胀；既有记忆的更新版也只能新增独立条目，无法表达「这条取代那条」。

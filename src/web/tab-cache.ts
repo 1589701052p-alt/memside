@@ -116,12 +116,12 @@ export function isListTab(tab: string): boolean {
 
 // --- 记忆列表筛选（spec 2026-08-11-web-memory-filters §4.3）----------------
 
-/** 四维筛选状态；空串 = 不筛该维度。跨 tab 共享（App 单一 state）。 */
-export interface MemoryFilter { project: string; slug: string; category: string; valueClass: string }
+/** 五维筛选状态；空串 = 不筛该维度。跨 tab 共享（App 单一 state）。 */
+export interface MemoryFilter { project: string; slug: string; category: string; valueClass: string; origin: string }
 
-export const EMPTY_MEMORY_FILTER: MemoryFilter = { project: '', slug: '', category: '', valueClass: '' }
+export const EMPTY_MEMORY_FILTER: MemoryFilter = { project: '', slug: '', category: '', valueClass: '', origin: '' }
 
 /** 任一维非空 -> 筛选激活。 */
 export function hasActiveFilter(f: MemoryFilter): boolean {
-  return f.project !== '' || f.slug !== '' || f.category !== '' || f.valueClass !== ''
+  return f.project !== '' || f.slug !== '' || f.category !== '' || f.valueClass !== '' || f.origin !== ''
 }

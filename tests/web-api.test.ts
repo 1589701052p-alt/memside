@@ -340,7 +340,7 @@ test('getFacets: GET /api/facets?tab= 按 tab 圈定', async () => {
   const fetchFn = (async (url: string) => {
     called = url
     return new Response(JSON.stringify({
-      projects: [{ value: 'C:/x', count: 2 }], categories: [], slugs: [], valueClasses: [],
+      projects: [{ value: 'C:/x', count: 2 }], categories: [], slugs: [], valueClasses: [], origins: [],
     }), { status: 200 })
   }) as any
   const f = await getFacets(fetchFn, 'approved')
