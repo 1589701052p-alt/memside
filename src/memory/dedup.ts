@@ -11,6 +11,11 @@ export interface ExistingMemoryForDedup {
   scopeType: MemoryScope
   scopeId: string | null
   status: MemoryStatus
+  /**
+   * 主题归组键（spec §3.3）。合并步 consolidate 渲染 prompt 与 existing slug 清单时读取。
+   * Task 1 先加可选字段（listForDedupByScope 查询尚未带，Task 2 接线）。缺省 = 未分组。
+   */
+  subjectSlug?: string | null
 }
 
 export interface DedupInput {
