@@ -18,8 +18,8 @@
     "dev:web": "vite",
     "build": "vite build",
     "gen-manifest": "bun run scripts/gen-manifest.ts",
-    "build:exe": "bun run build && bun run gen-manifest && bun build --compile --target=bun-windows-x64 --outfile=dist/memside.exe src/exe/launcher.ts",
-    "build:installer": "makensis installer/installer.nsi",
+    "build:exe": "bun run build && bun run gen-manifest && bun build --compile --target=bun-windows-x64 --outfile=dist/memside-$npm_package_version.exe src/exe/launcher.ts",
+    "build:installer": "makensis -DAPP_VERSION=$npm_package_version installer/installer.nsi",
     "prepublishOnly": "bun run build",
     "start": "bun run build && bun run scripts/start.ts",
     "dev": "bun run scripts/dev.ts"

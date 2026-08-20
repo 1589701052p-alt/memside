@@ -31,7 +31,7 @@ AI agent（Claude Code / opencode）的本地记忆 sidecar。它监听你的 AI
 
 ### 方式 A：Windows 安装器（推荐，最省事）
 
-1. 去 [Releases 页](https://github.com/1589701052p-alt/memside/releases) 下载最新的 `memside-setup.exe`。
+1. 去 [Releases 页](https://github.com/1589701052p-alt/memside/releases) 下载最新的 `memside-setup-<版本号>.exe`（如 `memside-setup-0.4.0.exe`）。
 2. 双击安装（per-user，**不需要管理员权限**）。安装器会创建开始菜单和桌面快捷方式，并把 `memside` 加入 PATH。
 3. 双击桌面/开始菜单的 `memside` 快捷方式启动。
 
@@ -40,9 +40,9 @@ AI agent（Claude Code / opencode）的本地记忆 sidecar。它监听你的 AI
 <details>
 <summary>不想装安装器？直接用便携 exe</summary>
 
-Releases 页另有一个 `memside.exe`，是内嵌 Bun 运行时 + 前端 + opencode 插件的**单文件绿色二进制**，不写 PATH、不动注册表、不留卸载项。
+Releases 页另有一个 `memside-<版本号>.exe`（如 `memside-0.4.0.exe`），是内嵌 Bun 运行时 + 前端 + opencode 插件的**单文件绿色二进制**，不写 PATH、不动注册表、不留卸载项。
 
-1. 去 [Releases 页](https://github.com/1589701052p-alt/memside/releases) 下载 `memside.exe`，放任意目录（桌面、U 盘都行）。
+1. 去 [Releases 页](https://github.com/1589701052p-alt/memside/releases) 下载 `memside-<版本号>.exe`，放任意目录（桌面、U 盘都行；下载后随意改名，不影响使用）。
 2. 双击运行。它等价于 `start-and-install`：自动启动 daemon **并** 装 claude code hooks **并** 装 opencode 插件——一次搞定。
 3. 看到 `memside on http://127.0.0.1:7777 ...` 就说明在跑了。**保持那个窗口开着**，daemon 跟着窗口活；关窗即停。
 
@@ -244,7 +244,7 @@ bun run typecheck     # tsc --noEmit
 
 代码库 TDD 驱动，每个 fix 都带回归测试。构建状态见 `STATE.md`。
 
-**发版**：打 `v*` tag 推送触发 GitHub Actions（`.github/workflows/release.yml`）——windows job 产 `memside.exe` + `memside-setup.exe` 挂 GitHub Release，ubuntu job `npm publish`。发版前先在 `package.json` 改版本号。
+**发版**：改 `package.json` 版本号 → 走 PR 合入 master → 打 `v*` tag 推送触发 GitHub Actions（`.github/workflows/release.yml`）——windows job 产 `memside-<版本号>.exe` + `memside-setup-<版本号>.exe`（版本号取自 `package.json`，产物名自动带上）挂 GitHub Release，ubuntu job `npm publish`。
 
 ## 已知限制
 

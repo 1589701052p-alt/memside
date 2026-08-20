@@ -5,7 +5,15 @@
 !include "MUI2.nsh"
 
 Name "memside"
-OutFile "memside-setup.exe"
+; 产物名带版本号（发版约定 2026-08-20）：setup 输出与打包的 exe 均按
+; `-DAPP_VERSION=<version>`（package.json build:installer 注入）命名，如
+; memside-setup-0.4.0.exe / 打包 dist\memside-0.4.0.exe。装到用户机器后
+; 仍是 $INSTDIR\memside.exe（安装后文件名不带版本，PATH/快捷方式不受影响）。
+; 直接手跑 makensis（无 -D）时 fallback unversioned，产物名为 memside-setup-unversioned.exe。
+!ifndef APP_VERSION
+  !define APP_VERSION "unversioned"
+!endif
+OutFile "memside-setup-${APP_VERSION}.exe"
 Unicode True
 RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\memside"
@@ -32,8 +40,9 @@ InstallDir "$LOCALAPPDATA\memside"
 Section "memside" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
-  ; 主程序（从构建产物拷入；CI build:installer 前先 build:exe）
-  File "..\dist\memside.exe"
+  ; 主程序（从构建产物拷入；CI build:installer 前先 build:exe；产物名带版本号，
+  ; /oname= 保持装到用户机器后仍叫 memside.exe——快捷方式/PATH/MUI_FINISHPAGE_RUN 都指它）
+  File /oname=memside.exe "..\dist\memside-${APP_VERSION}.exe"
   ; 开始菜单 + 桌面快捷方式
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\memside.lnk" "$INSTDIR\${APP_EXE}"
