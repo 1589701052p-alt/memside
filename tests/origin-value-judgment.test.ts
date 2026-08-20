@@ -20,8 +20,8 @@ import { memories, memoryDiscards, memoryDistillJobs } from '@/db/schema'
 // 复用 tests/scheduler.test.ts 的 tick harness：openDb(tmp) -> enqueueDistillJob ->
 // nextRunAt=0 -> tick(db, deps)。deps.createCandidate 用真实 store.createCandidate
 // （非 mock），才能断言入库行。callLLM 按 system prompt 内容分发（distiller/dedup/
-// value-judge 三选一）：1 候选 + 无 existing -> dedup 短路（src/memory/dedup.ts:100，
-// judgeDuplicates 不调 LLM），仅 distill + judgeValue 两路触发。
+// value-judge 三选一）：1 候选 + 无 existing -> dedup 短路（src/memory/consolidate.ts:227，
+// consolidateCandidates 不调 LLM），仅 distill + judgeValue 两路触发。
 
 const root = join(import.meta.dir, '.tmp-ovj')
 let dir = ''
@@ -72,7 +72,7 @@ test('门禁：user-confirmed 候选被 judge 误判 derivable -> 仍入库 valu
         // 代码兜底必须改判 keep+decision。
         return JSON.stringify({ verdicts: [{ index: 0, category: 'derivable' }] })
       }
-      // dedup：1 候选 + 无 existing -> judgeDuplicates 短路不调 LLM，此分支不会触发；
+      // dedup：1 候选 + 无 existing -> consolidateCandidates 短路不调 LLM，此分支不会触发；
       // 兜底返回 keep，万一条数变化导致 dedup 调用也不误丢。
       return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: false }] })
     },

@@ -16,9 +16,10 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { enqueueDistillJob, tick } from '@/scheduler'
+import { enqueueDistillJob, tick, consolidateBatch } from '@/scheduler'
 import { createCandidate as realCreateCandidate } from '@/memory/store'
 import { memories, memoryDiscards, memoryDistillJobs } from '@/db/schema'
+import type { DistillCandidate } from '@/memory/distiller'
 
 const ECONOMY = { mode: 'economy', maxRounds: 30, timeBudgetS: 300 } as const
 
@@ -143,4 +144,14 @@ test('update_of 产出候选携带 distillAction=update_of + supersedesId=target
   expect(rows.length).toBe(1)
   expect(rows[0]!.distillAction).toBe('update_of')
   expect(rows[0]!.supersedesId).toBe(ex.id)
+})
+
+test('consolidateBatch bubbles listForDedupByScope DB errors (spec §8)', async () => {
+  // 回归补偿（Task 4 清理旧 dedupCandidates 直接测试后）：合并步 consolidateBatch 与
+  // 旧 dedupCandidates 同走 listForDedupByScope 查询，基础设施 DB 错误必须冒泡到
+  // tick 的 catch（job 退避重试），不得被吞——LLM 调用前查询已抛错。
+  const db2 = openDb(join(dir, 't2.db'))
+  db2.$client.close()
+  const cand: DistillCandidate = { title: '[category:x] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
+  await expect(consolidateBatch(db2, async () => 'x', [cand], '/r')).rejects.toThrow()
 })

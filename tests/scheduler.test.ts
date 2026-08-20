@@ -3,7 +3,7 @@ import { rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
-import { enqueueDistillJob, tick, dedupCandidates, DISTILL_DEBOUNCE_MS } from '@/scheduler'
+import { enqueueDistillJob, tick, DISTILL_DEBOUNCE_MS } from '@/scheduler'
 import { createCandidate, createCandidate as realCreateCandidate, promoteCandidate } from '@/memory/store'
 import { memoryDistillJobs, memoryDistillEvents, memories, memoryDiscards, memorySessionOffsets, memoryDistillInputs, memoryDistillRuns, notifications } from '@/db/schema'
 import type { DistillCandidate } from '@/memory/distiller'
@@ -202,67 +202,6 @@ test('tick keeps sourceCwd/distillAction in createCandidate input after dedup', 
 })
 
 // ---------------------------------------------------------------------------
-// Direct dedupCandidates tests (Fix 1 + Fix 2 from final branch review).
-// These exercise the grouping + globalIndex mapping + cross-scope isolation
-// + spec §8 DB-error bubbling directly, with real DB prepositioning and real
-// listForDedupByScope - only callLLM is mocked.
-// ---------------------------------------------------------------------------
-
-test('dedupCandidates keeps non-duplicate and drops duplicate in a multi-candidate group', async () => {
-  const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'existing', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
-  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()
-  const cand0: DistillCandidate = { title: '[category:x] dup-of-existing', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
-  const cand1: DistillCandidate = { title: '[category:y] genuinely-new', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
-  // Verdict index 0 = duplicate, index 1 = new. Exercises globalIndex mapping:
-  // index 1 must be kept (not index 0).
-  const keep = await dedupCandidates(db, async () => JSON.stringify({
-    verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: ex.id }, { index: 1, isDuplicate: false }],
-  }), [cand0, cand1], '/r')
-  if ('failed' in keep) throw new Error(`dedup failed: ${keep.reasons.join(' | ')}`)  // Task 7 union 收敛
-  expect(keep.length).toBe(1)
-  expect(keep[0]!.title).toBe(cand1.title)
-})
-
-test('dedupCandidates groups by scope and compares each only against same-scope existing', async () => {
-  const projEx = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'project-existing-title', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
-  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, projEx.id)).run()
-  const globEx = await realCreateCandidate(db, { scopeType: 'global', scopeId: null, title: 'global-existing-title', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null })
-  await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, globEx.id)).run()
-  const projectCand: DistillCandidate = { title: '[category:x] proj-cand', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
-  const globalCand: DistillCandidate = { title: '[category:y] glob-cand', bodyMd: 'b', scopeType: 'global', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
-  const prompts: string[] = []
-  let callCount = 0
-  const keep = await dedupCandidates(db, async (_sys, user) => {
-    callCount++
-    prompts.push(user)
-    // Return a verdict whose duplicateOfId matches whichever existing id
-    // appears in THIS call's prompt (i.e. the in-scope existing).
-    const inScopeId = user.includes(projEx.id) ? projEx.id : globEx.id
-    return JSON.stringify({ verdicts: [{ index: 0, isDuplicate: true, duplicateOfId: inScopeId }] })
-  }, [projectCand, globalCand], '/r')
-  if ('failed' in keep) throw new Error(`dedup failed: ${keep.reasons.join(' | ')}`)  // Task 7 union 收敛
-  expect(keep.length).toBe(0)
-  expect(callCount).toBe(2)
-  // Each call's prompt contains only its own scope's existing title (cross-scope isolation).
-  const projPrompt = prompts.find((p) => p.includes(projEx.id))!
-  const globPrompt = prompts.find((p) => p.includes(globEx.id))!
-  expect(projPrompt).toContain('project-existing-title')
-  expect(projPrompt).not.toContain('global-existing-title')
-  expect(globPrompt).toContain('global-existing-title')
-  expect(globPrompt).not.toContain('project-existing-title')
-})
-
-test('dedupCandidates bubbles listForDedupByScope DB errors (spec §8)', async () => {
-  // Open a second db then close its raw handle so any query throws. judgeDuplicates
-  // is never reached because listForDedupByScope throws first. Per spec §8 this
-  // bubbles to tick's catch (infrastructure fault -> job retry), NOT swallowed.
-  const db2 = openDb(join(dir, 't2.db'))
-  db2.$client.close()
-  const cand: DistillCandidate = { title: '[category:x] x', bodyMd: 'b', scopeType: 'project', runtime: null, distillAction: 'new', origin: 'agent-observed', evidence: null, subjectSlug: null }
-  await expect(dedupCandidates(db2, async () => 'x', [cand], '/r')).rejects.toThrow()
-})
-
-// ---------------------------------------------------------------------------
 // Value-filter integration: tick runs dedup BEFORE judgeValue, so judgeValue +
 // logDiscards only see dedup survivors. judgeValue classifies each survivor
 // (rules 1-6); public-knowledge/derivable => discard (audit-logged to
@@ -367,7 +306,7 @@ test('tick: judgeValue LLM 报错 → step 失败回 pending，候选不丢不�
 
 test('tick runs dedup before judgeValue (3-phase call order)', async () => {
   // Pre-position an existing memory so dedup actually calls the LLM (without
-  // existing memories, judgeDuplicates short-circuits and the 3rd phase is
+  // existing memories, consolidateCandidates short-circuits and the 3rd phase is
   // never reached, making the call-order assertion untestable).
   const ex = await realCreateCandidate(db, { scopeType: 'project', scopeId: '/r', title: 'existing', bodyMd: 'b', tags: [], sourceKind: 'manual', runtime: null, sourceCwd: '/r' })
   await db.update(memories).set({ status: 'approved' }).where(eq(memories.id, ex.id)).run()

@@ -13,7 +13,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "test:live": "cross-env MEMSIDE_RUN_LIVE=1 bun test tests/live-distill.test.ts tests/live-dedup.test.ts tests/live-judge.test.ts tests/live-llm-failure-resume.test.ts",
+    "test:live": "cross-env MEMSIDE_RUN_LIVE=1 bun test tests/live-distill.test.ts tests/live-judge.test.ts tests/live-llm-failure-resume.test.ts",
     "typecheck": "tsc --noEmit",
     "dev:web": "vite",
     "build": "vite build",

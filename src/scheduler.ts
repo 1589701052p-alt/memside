@@ -15,7 +15,6 @@ import {
 } from '@/memory/store'
 import { advanceStep, nextStep, type DistillStep } from '@/memory/stepState'
 import { exactDedupCandidates } from '@/memory/exactDedup'
-import { judgeDuplicates } from '@/memory/dedup'
 import { consolidateCandidates, type ConsolidatedCandidate } from '@/memory/consolidate'
 import { judgeValue, type ValueClass, type ValueVerdict, type JudgeSessionOpts } from '@/memory/valueFilter'
 import { judgeValueAgentic } from '@/memory/agentJudge'
@@ -117,52 +116,6 @@ export interface TickDeps {
  */
 function resolveScopeId(scopeType: DistillCandidate['scopeType'], cwd: string | null): string | null {
   return scopeType === 'project' ? (cwd ?? 'unknown') : null
-}
-
-/**
- * Filter semantic duplicates out of a distill batch. Groups candidates by
- * (scopeType, scopeId) - scopeId derived the same way createCandidate does
- * (project -> jobCwd, global -> null) - and for each group asks judgeDuplicates
- * to compare against same-scope existing memories. Returns the subset to keep,
- * or `{failed:true,reasons}` when任一 scope 组的 dedup 会话失败（Task 7：不再
- * 保守全保留吞错，spec P1——由 tick 走 step 失败分支）。
- *
- * judgeDuplicates handles per-verdict hallucination fallback (invalid
- * duplicateOfId -> keep) WITHIN a successful response. listForDedupByScope DB
- * errors DO bubble to tick's catch (infrastructure fault -> job retry), per spec §8.
- */
-export async function dedupCandidates(
-  db: DbClient,
-  callLLM: LLMCall,
-  candidates: DistillCandidate[],
-  jobCwd: string | null,
-  session?: JudgeSessionOpts,
-): Promise<DistillCandidate[] | { failed: true; reasons: string[] }> {
-  if (candidates.length === 0) return []
-  const groups = new Map<string, { scopeType: DistillCandidate['scopeType']; scopeId: string | null; items: { c: DistillCandidate; globalIndex: number }[] }>()
-  candidates.forEach((c, i) => {
-    const scopeId = resolveScopeId(c.scopeType, jobCwd)
-    const key = `${c.scopeType}:${scopeId ?? ''}`
-    if (!groups.has(key)) groups.set(key, { scopeType: c.scopeType, scopeId, items: [] })
-    groups.get(key)!.items.push({ c, globalIndex: i })
-  })
-  const keepFlags = new Array(candidates.length).fill(false)
-  for (const g of groups.values()) {
-    const existing = await listForDedupByScope(db, { scopeType: g.scopeType, scopeId: g.scopeId })
-    const verdicts = await judgeDuplicates({
-      newCandidates: g.items.map((it) => it.c),
-      existing,
-      callLLM,
-      jobId: session?.jobId,
-      persistRound: session?.persistRound,
-      loadHistory: session?.loadHistory,
-    })
-    if ('failed' in verdicts) return verdicts
-    for (const v of verdicts) {
-      if (!v.duplicate) keepFlags[g.items[v.index]!.globalIndex] = true
-    }
-  }
-  return candidates.filter((_, i) => keepFlags[i])
 }
 
 /**
