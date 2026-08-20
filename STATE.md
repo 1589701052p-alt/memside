@@ -1,5 +1,52 @@
 # STATE.md - memside 构建状态
 
+## 候选记忆合并步（consolidation）：dedup 升级为 merge/keep/drop/update_of 四态（2026-08-19）
+
+把 scheduler「去重」步从二元丢弃（duplicate vs keep）升级为「合并步」：对新蒸馏候选 + 同 scope 既有记忆做四态归约——**merge**（同主题碎片熔合成一条，保留所有独特侧面）/ **keep**（独立候选原样保留）/ **drop**（纯语义重复丢弃）/ **update_of**（对既有 approved 记忆的精炼/补充/纠正，审批时并回 supersede 而非堆叠重复）。设计 spec / 计划见 `docs/superpowers/specs|plans/2026-08-19-candidate-consolidation*`。根因：旧 dedup 只能丢不能并，同主题碎片（退款窗口 14 天 ×4 种说法）各入库成独立候选，审批队列噪声膨胀；既有记忆的更新版也只能新增独立条目，无法表达「这条取代那条」。
+
+### 四态与关键不变量
+
+| 态 | 语义 | 入库动作 | origin |
+|---|---|---|---|
+| merge | 同主题碎片熔合 | 1 条合并候选（distillAction='new'） | 强制 agent-observed（综合产物按观察处理，无例外） |
+| keep | 独立候选 | 原样入库（distillAction='new'） | 保留原始 origin（不降级） |
+| drop | 纯语义重复 | 走 logDiscards reason='duplicate'（审计表） | — |
+| update_of | 既有 approved 的精炼/纠正 | 1 条候选带 distillAction='update_of' + supersedesId=targetId | 强制 agent-observed |
+
+**update_of 闭环**：入库候选带 `supersedesId`；用户审批时走 `promoteCandidate(id, {action:'approve_and_supersede', supersedeIds:[targetId]})` → target 标 `superseded` + `supersededById` 回填，candidate 升 `approved` + `version` 递增（接管而非新增独立 approved 条目，approved 计数前后不变）。约束：target 必须 `status='approved'` 且同 scope（candidate 不可作 target；跨 scope 拒绝）。
+
+**slug 预筛解除 50 盲区**：`listForDedupByScope` 改为按 `subjectSlug` 预筛 existing——只拉本批候选 slug ∪ 既有 slug 命中的记忆，而非旧 LIMIT 50 全量盲拉。同主题跨批记忆不再因 50 条截断漏出合并步视野。
+
+### 改动文件清单
+
+| 文件 | 改动 |
+|---|---|
+| `src/memory/consolidate.ts`（新） | 合并步纯逻辑：`consolidateCandidates`（走 `runLlmSession` step='dedup'，断点续跑历史兼容）+ `parseConsolidate`（幻觉兜底：非法 member id / 非法 targetId / 缺 mergedTitle → 该组 fallback keep）+ `consolidateShouldRetry`（含 mergedSlug 校验，裁决 #1：targetId 必须在 approvedIds 内）。origin 一律降级 agent-observed。 |
+| `src/memory/dedup.ts` | 删除被合并步取代的语义去重代码（`dedupCandidates` / dedup prompt / parse）；保留 `ExistingMemoryForDedup` type（合并步复用）。 |
+| `src/memory/store.ts` | `listForDedupByScope` 按 subjectSlug 预筛（新 slugs 参数）；`createCandidate` 透传 `distillAction`/`supersedesId`。 |
+| `src/scheduler.ts` | dedup 步调 `consolidateBatch`（按 scope 分组 → 各组调 `consolidateCandidates`）；dropIndices 走 `logDiscards(reason='duplicate')`；入库透传 `k.cand.distillAction`/`supersedesId`。 |
+| `src/web/{App,api,ui-utils}.tsx` | update_of 候选紫色「更新」徽标（提示对既有记忆的精炼）。 |
+| `tests/consolidate.test.ts`（新）/ `store-consolidation-query.test.ts`（新）/ `scheduler-consolidation.test.ts`（新，含本任务 e2e） | 合并步纯逻辑 / slug 预筛查询 / scheduler 端到端（drop→discards / merge origin 降级 / update_of 入库 / e2e 碎片熔合 / e2e update_of 全闭环）。 |
+
+### 测试数
+
+`bun run typecheck && bun test` **1325 pass / 5 skip / 0 fail**（3754 expects，121 文件）。新增合并步相关测试：`consolidate.test.ts`（纯逻辑：parse 四态 + 幻觉兜底 + origin 降级 + shouldRetry mergedSlug）+ `store-consolidation-query.test.ts`（slug 预筛）+ `scheduler-consolidation.test.ts`（6 用例：4 单步断言 + 2 e2e 闭环）。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. **每会话产出候选数对比**：合并步上线前后，同类型会话产出候选数应下降（同主题碎片熔合为 1 条而非 N 条）；不损产出质量（merge 保留所有独特侧面）。
+2. **同 slug 并存数**：同 `subject_slug` 的候选/approved 并存条数下降——update_of 接管而非堆叠。
+3. **无 slug 占比**：合并步强制 merge/update_of 给出 mergedSlug，新入库候选无 slug 占比应下降。
+4. **update_of 采纳率**：update_of 候选占总量比例 + 审批时 approve_and_supersede 的使用率（vs 普通 approve）——衡量用户是否理解「更新」语义。
+5. **误并抽样**：merge 组人工抽检——是否出现「为减量丢事实」（不同规则/主题被误并）。合并步 prompt 已加 HARD RULE「宁可多留不可误并」，但仍需 dogfood 验证。
+6. **合并步失败率**：`memory_distill_runs` 中 step='dedup' 的 llm_error 计数（断点续跑 3 轮后 paused）；合并步 prompt 比 dedup 更复杂，关注 LLM 输出形状突变率。
+
+### deferred minor（非阻塞，已 triage）
+
+1. update_of 的 target 在 `parseConsolidate` 已收紧为 approvedIds（裁决 #1），但 consolidateBatch 的 `listForDedupByScope` 仍返回 approved + candidate——candidate 不可作 target 由 parseConsolidate 守卫，非查询层。
+2. slug 预筛的 slugs 集合来自本批候选 + 既有；若候选与既有 slug 都为 null（未分组），预筛退化为全量（与旧行为一致，不回退盲区）。
+3. 合并步 origin 强制降级是硬编码（merge/update_of → agent-observed）；若未来要区分「用户陈述的合并」需独立 spec。
+
 ## 蒸馏输入膨胀根治：剔除 thinking turn（2026-08-19，数据驱动）
 
 用户反馈「喂 AI 的输入文本太大，Bash 脚本显示过多无用」。先做数据驱动根因分析再动手——**推翻用户假设**：Bash 不是主因。
