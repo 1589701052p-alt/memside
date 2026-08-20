@@ -309,19 +309,22 @@ const TASK_NOTIFICATION_MARKER = '<task-notification>'
 const COMPACT_CONTINUATION_PREFIX = 'This session is being continued from a previous conversation'
 
 /**
- * 剔除 distiller 输入里的两类 user-role 噪声（spec 2026-08-17 §1.1）：
+ * 剔除 distiller 输入里的两类 user / system-role 噪声（spec 2026-08-17 §1.1）：
  *   1. task-notification 块：content 含 `<task-notification>` XML（harness 后台 task 回调，零记忆价值）。
  *   2. compact 续接块：content 以 `This session is being continued from a previous conversation` 开头
  *      （历史压缩摘要，非本会话原话，作 evidence 出处不可靠；distiller 的 priorContext 段已单独提供背景）。
  *
- * 纯函数 + 永不抛：任何异常降级为返回原 turns（保守保留）。只识别 user role。
+ * role 判断放宽到 user 与 system（system 为 2026-08-20 捕获层重标引入的新通道：
+ * loop 重放 / 注入记忆 / task 通知 / peer / 无字段行被重标为 system 后，同款噪声
+ * 不再从新通道漏回蒸馏输入）；非噪声 system 内容（如 loop 重放 prompt 本体）保留。
+ * assistant / thinking / tool 永不误伤。纯函数 + 永不抛：任何异常降级为返回原 turns（保守保留）。
  * 在 filterTranscriptForDistill 的 compact/budget 之前执行。
  */
 export function stripNoiseTurns(turns: readonly TranscriptTurn[]): TranscriptTurn[] {
   if (!Array.isArray(turns)) return []
   try {
     return turns.filter((t) => {
-      if (t.role !== 'user') return true
+      if (t.role !== 'user' && t.role !== 'system') return true
       const c = t.content
       if (typeof c !== 'string') return true
       if (c.includes(TASK_NOTIFICATION_MARKER)) return false
