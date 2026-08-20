@@ -175,3 +175,25 @@ describe('hook 检测间隔 30s（spec 2026-08-19 显眼化 §3.1）', () => {
     expect(src).toMatch(/HOOK_CHECK_INTERVAL_MS\s*=\s*30\s*\*\s*1000/)
   })
 })
+
+// spec 2026-08-19-candidate-consolidation §6.3 + Task 5
+// 前端兜底面（CLAUDE.md 最低要求）：update_of 候选紫色「更新」徽标接线。
+// App.tsx 无法在 bun test 渲染，靠源码层文本断言锁 updateBadge 渲染 + 文案存在。
+describe('update_of 候选紫色「更新」徽标（spec 2026-08-19-candidate-consolidation §6.3）', () => {
+  const utilsPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'web', 'ui-utils.ts')
+
+  it('ui-utils 导出 updateBadge + 「更新 #」文案', () => {
+    const src = readFileSync(utilsPath, 'utf-8')
+    expect(src).toContain('export function updateBadge')
+    // label 格式串在 ui-utils（单一事实来源，非 App.tsx 内联）
+    expect(src).toContain('更新 #')
+  })
+
+  it('App.tsx MemoryCard 渲染 updateBadge + 紫色 #a855f7', () => {
+    const src = readFileSync(appPath, 'utf-8')
+    // import + 渲染接线存在
+    expect(src).toContain('updateBadge')
+    // 紫色 #a855f7（spec §6.3 紫色徽标）
+    expect(src).toContain('#a855f7')
+  })
+})

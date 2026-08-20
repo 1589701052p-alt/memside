@@ -19,7 +19,7 @@ import {
   type NotificationItem,
   type TrashItem,
 } from './api'
-import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody, SLUG_BADGE_TIP } from './ui-utils'
+import { formatMemoryTime, sortCandidatesByTime, formatSourceTurn, formatOutcome, formatRunCounts, llmSourceLabel, originBadge, discardReasonLabel, rescanPercent, degradationKindLabel, formatToolCall, projectDisplayName, categoryInfo, categoryFromTitle, stripCategoryPrefix, valueClassInfo, scopeInfo, runtimeLabel, runtimeTip, phaseLabel, formatElapsed, formatPhaseStat, notificationTitle, truncateAlertBody, SLUG_BADGE_TIP, updateBadge } from './ui-utils'
 import { memoryTabFilter, shouldShowLoading, mergeAppend, mergeRefreshPage, nextCursorAfter, tabTotalCount, isListTab, hasActiveFilter, EMPTY_MEMORY_FILTER, type MemoryTabKey, type MemoryFilter } from './tab-cache'
 import { resolveClaudePath, resolveOpencodePath } from './runtime-paths'
 
@@ -1583,6 +1583,9 @@ function MemoryCard({
             ) })()}
             {(() => { const ob = originBadge(m.origin); return ob ? (
               <span title={ob.tip} style={{ ...CHIP_STYLE, color: ob.color }}>出处：{ob.label}</span>
+            ) : null })()}
+            {(() => { const ub = updateBadge({ distillAction: m.distillAction ?? null, supersedesId: m.supersedesId ?? null }); return ub ? (
+              <span title={ub.tip} style={{ ...CHIP_STYLE, background: '#a855f7', color: '#fff' }}>{ub.label}</span>
             ) : null })()}
             {m.subjectSlug ? (
               <span title={SLUG_BADGE_TIP} style={{ ...CHIP_STYLE, color: '#36c' }}>主题：{m.subjectSlug}</span>
