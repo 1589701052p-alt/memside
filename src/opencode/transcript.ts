@@ -1,5 +1,5 @@
 import type { TranscriptTurn } from '@/memory/pure'
-import { captureToolCall } from '@/memory/pure'
+import { captureToolCall, isInjectedMemoryBlock } from '@/memory/pure'
 
 /** opencode message（PluginInput.client.session.messages 返回项的子集）。 */
 export interface OpencodeMessage {
@@ -20,6 +20,8 @@ export type OpencodePart =
  * - ToolPart 按 callID 配对，tool result error -> isError；output 作为 tool turn content
  * - tool_use.input 经序列化截断作 toolCall 落 tool turn（spec §4.1）
  * - reasoning -> thinking turn（spec 2026-08-09 §4.1）；subtask/step/patch/snapshot/... 一律过滤
+ * - user text part 含注入记忆块 marker -> role:"system"（spec 2026-08-20 §3.4）：opencode 无来源字段，
+ *   marker 是唯一识别信号；防蒸馏器把已注入旧记忆当真人新规则重复提炼（自我复读）。assistant 不受影响。
  * 纯函数，malformed part 跳过不抛。入参非数组或单条 message 缺 parts 也跳过不抛（final-review Important #1）：
  * 真实 opencode 版本的 message 形态是文档化验证空缺，畸形 payload 不得让 capture 路由 500。
  */
@@ -42,7 +44,11 @@ export function parseOpencodeMessages(messages: OpencodeMessage[]): TranscriptTu
     if (!Array.isArray(m.parts)) continue
     for (const p of m.parts) {
       if (p.type === 'text') {
-        turns.push({ role: m.info.role, content: (p as any).text ?? '' })
+        const text = (p as any).text ?? ''
+        // 注入记忆块 → system（spec 2026-08-20 §3.4）：opencode 无来源字段，
+        // marker 是唯一识别信号；防自我复读。assistant 文本不受影响。
+        const role = m.info.role === 'user' && isInjectedMemoryBlock(text) ? 'system' : m.info.role
+        turns.push({ role, content: text })
       } else if (p.type === 'reasoning') {
         const rp = p as { text?: unknown }
         if (typeof rp.text === 'string') turns.push({ role: 'thinking', content: rp.text })
