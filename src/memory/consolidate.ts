@@ -206,13 +206,20 @@ export function consolidateShouldRetry(approvedIds: Set<string>): (parsed: unkno
   }
 }
 
-function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingMemoryForDedup[], existingSlugs: string[]): string {
-  const exLines = existing.length > 0
-    ? existing.map((e) => `id=${e.id} | slug=${e.subjectSlug ?? '(none)'} | ${e.title}\n${e.bodyMd}`).join('\n')
-    : '(none)'
+export function renderUserPrompt(newCandidates: DistillCandidate[], existing: ExistingMemoryForDedup[], existingSlugs: string[]): string {
+  // 分区渲染（spec 2026-08-20）：approved 与 candidate 分开列出，update_of 合法
+  // target 只限 APPROVED 区——旧版混排无 status 标记，模型指向 candidate 必挂。
+  const approved = existing.filter((e) => e.status === 'approved')
+  const candidate = existing.filter((e) => e.status !== 'approved')
+  const line = (e: ExistingMemoryForDedup) => `id=${e.id} | slug=${e.subjectSlug ?? '(none)'} | ${e.title}\n${e.bodyMd}`
+  const approvedBlock = approved.length > 0 ? approved.map(line).join('\n') : '(none)'
+  const candidateBlock = candidate.length > 0 ? candidate.map(line).join('\n') : '(none)'
+  const noApprovedNote = approved.length === 0
+    ? 'NOTE: no approved memories exist — update_of is NOT available in this batch.\n\n'
+    : ''
   const newLines = newCandidates.map((c, i) => `id=new-${i} | slug=${c.subjectSlug ?? '(none)'} | ${c.title}\n${c.bodyMd}${c.evidence ? `\n出处: ${c.evidence}` : ''}`).join('\n---\n')
   const slugs = existingSlugs.length > 0 ? existingSlugs.join(', ') : '(none)'
-  return `Existing subject slugs (reuse these): ${slugs}\n\nExisting memories (same scope):\n${exLines}\n\nNew candidates:\n${newLines}\n\nReturn JSON per the system instructions. Every new-<i> must be covered by exactly one group.`
+  return `Existing subject slugs (reuse these): ${slugs}\n\nExisting APPROVED memories (ONLY ids in this section are valid update_of targetId):\n${approvedBlock}\n\n${noApprovedNote}Existing CANDIDATE memories (pending approval; NOT valid update_of targets — use only as context for drop/merge):\n${candidateBlock}\n\nNew candidates:\n${newLines}\n\nReturn JSON per the system instructions. Every new-<i> must be covered by exactly one group.`
 }
 
 /**

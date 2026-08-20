@@ -13,7 +13,7 @@
 //    非 candidate id。parseConsolidate 与 consolidateShouldRetry 均按此过滤。
 // #2 新增用例：update_of targetId 指向 candidate（非 approved）→ 该组无效，members 兜底 keep。
 import { describe, it, expect } from 'bun:test'
-import { parseConsolidate, consolidateShouldRetry, CONSOLIDATE_SYSTEM_PROMPT } from '@/memory/consolidate'
+import { parseConsolidate, consolidateShouldRetry, CONSOLIDATE_SYSTEM_PROMPT, renderUserPrompt } from '@/memory/consolidate'
 import type { ExistingMemoryForDedup } from '@/memory/dedup'
 
 const existing: ExistingMemoryForDedup[] = [
@@ -146,5 +146,40 @@ describe('CONSOLIDATE_SYSTEM_PROMPT', () => {
     expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('宁可多留不可误并')
     expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('update_of 仅当')
     expect(CONSOLIDATE_SYSTEM_PROMPT).toContain('approved')
+  })
+})
+
+// 回归锁（spec 2026-08-20-consolidate-update-of-target-prompt）：
+// 旧 renderUserPrompt 把 approved+candidate 混排且不带 status，模型无从区分，
+// update_of 指向 candidate 时 3 轮重试同错必挂。分区渲染让规则可执行。
+describe('renderUserPrompt 分区渲染', () => {
+  it('approved 与 candidate 各归其区，id 不串区', () => {
+    const p = renderUserPrompt(news, existing, ['refund'])
+    const approvedIdx = p.indexOf('Existing APPROVED memories')
+    const candidateIdx = p.indexOf('Existing CANDIDATE memories')
+    const newIdx = p.indexOf('New candidates:')
+    expect(approvedIdx).toBeGreaterThanOrEqual(0)
+    expect(candidateIdx).toBeGreaterThan(approvedIdx)
+    expect(newIdx).toBeGreaterThan(candidateIdx)
+    const approvedSection = p.slice(approvedIdx, candidateIdx)
+    const candidateSection = p.slice(candidateIdx, newIdx)
+    expect(approvedSection).toContain('id=A')       // A 是 approved 夹具
+    expect(approvedSection).not.toContain('id=C')
+    expect(candidateSection).toContain('id=C')      // C 是 candidate 夹具
+    expect(candidateSection).not.toContain('id=A')
+  })
+  it('approved 为空 → 明示 update_of 不可用 + candidate 仍列出', () => {
+    const p = renderUserPrompt(news, [existing[1]!], ['refund'])  // 仅 candidate C
+    expect(p).toContain('update_of is NOT available')
+    expect(p).toContain('id=C')
+    expect(p.slice(p.indexOf('Existing APPROVED'), p.indexOf('Existing CANDIDATE'))).toContain('(none)')
+  })
+  it('existing 为空 → 两区均 (none)', () => {
+    const p = renderUserPrompt(news, [], [])
+    expect(p).toContain('New candidates:')
+    const approvedSection = p.slice(p.indexOf('Existing APPROVED'), p.indexOf('Existing CANDIDATE'))
+    const candidateSection = p.slice(p.indexOf('Existing CANDIDATE'), p.indexOf('New candidates:'))
+    expect(approvedSection).toContain('(none)')
+    expect(candidateSection).toContain('(none)')
   })
 })
