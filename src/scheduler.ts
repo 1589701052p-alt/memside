@@ -760,6 +760,10 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
           } catch (e) { console.warn('memside: saveDistillRun failed', e) }
           await markJobPaused(db, job.id, failStep)  // 落 pausedStep（run 行已写）
           await logStepFailureNotification(db, { jobId: job.id, step: failStep, reasons })
+          // spec 2026-08-20 §3.3(a)：任意步骤暂停都存输入快照（之前仅 judge 步存，
+          // distill/dedup 暂停是黑盒）。best-effort：失败只 warn 不阻塞。
+          try { await saveSourceInput(db, job.id, filterTranscriptForDistill(newTurns)) }
+          catch (e) { console.warn('memside: saveSourceInput failed', e) }
           if (failStep === 'judge' && deduped && deduped.length > 0) {
             // judge 暂停期间候选标 pending_review（spec §6.4）：不进审批队列（非
             // candidate）、不丢弃（不进 discards）；重试成功后自动退役，暂停期间
@@ -790,9 +794,7 @@ export async function tick(db: DbClient, deps: TickDeps): Promise<number> {
                 await db.update(memories).set({ status: 'pending_review' }).where(eq(memories.id, m.id)).run()
               } catch (e) { console.warn('memside: pending_review insert failed', e) }
             }
-            // 暂停也保留 source-input 快照（用户能在 UI 看到模型看到了什么）。
-            try { await saveSourceInput(db, job.id, filterTranscriptForDistill(newTurns)) }
-            catch (e) { console.warn('memside: saveSourceInput failed', e) }
+            // saveSourceInput 已上提到任意步骤，此处不再重复调用。
           }
         } else {
           // 未到 3 次：断点留当前步骤 + 计数，回 pending + 指数退避（下次接续跑）。

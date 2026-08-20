@@ -46,6 +46,35 @@
 1. update_of 的 target 在 `parseConsolidate` 已收紧为 approvedIds（裁决 #1），但 consolidateBatch 的 `listForDedupByScope` 仍返回 approved + candidate——candidate 不可作 target 由 parseConsolidate 守卫，非查询层。
 2. slug 预筛的 slugs 集合来自本批候选 + 既有；若候选与既有 slug 都为 null（未分组），预筛退化为全量（与旧行为一致，不回退盲区）。
 3. 合并步 origin 强制降级是硬编码（merge/update_of → agent-observed）；若未来要区分「用户陈述的合并」需独立 spec。
+## origin 误标根治：捕获层来源归因 + 蒸馏器兜底（2026-08-20，三层防线）
+
+### 事故根因
+
+`/loop`（动态自调度）会话里 loop 框架在每次 ScheduleWakeup 唤醒时把同一条 loop prompt 机械重放成 user 行（`promptSource=system` + `isMeta`），捕获层 `parseTranscriptFile` 旧代码对每个 `type:"user"` 行无脑映 `role:"user"`，把 claude code 自带的来源字段（`origin.kind` / `promptSource` / `isMeta`）全丢。蒸馏器看到 `[user] 检查 Task 5 implementer...`，合理地判 `user-stated`，贴金防护只验 evidence 非空（确实在 user 行里逐字存在）也通过——它没失职，本就只验非空不验说话人。最终 valueFilter 双重保护（derivable 免疫 + LLM 失败/幻觉 `keep+decision` 兜底）把 skill 派生 / 会话物流内容永久锁死删不掉。事故实证：live DB 候选 `01M0EMPV13JY139C35XJDD8JYP`「子代理任务报告的处理分支：DONE/DONE_WITH_CONCERNS/NEEDS_CONTEXT/BLOCKED」，`origin=user-stated`、`value_class=user-rule`，来自 distill job `01M0EKC0AGBAENJQ8KWS3E4PDQ`。
+
+### 三层根治
+
+1. **捕获层来源归因**（`src/claude/transcript.ts`，Task 3 / commit 8a5ddef）：`parseTranscriptFile` 的 user 字符串行按来源字段判 role——真人（`origin.kind=human` / `promptSource=typed`，**D2 OR 语义**）→ `user`；其余（loop 重放 `promptSource=system`、`isMeta`、注入记忆块 marker、task-notification、peer、无字段）→ `system`。opencode 侧用注入块 marker 兜底识别（无官方来源字段）。
+2. **蒸馏器 prompt 硬规则**（`src/memory/distiller.ts`，Task 5 / commit 282c680）：`DISTILLER_SYSTEM_PROMPT` 加 origin discipline——`user-stated` 只能锚定 `[user]`（真人陈述）行原话；`[system]` 内容至多 `agent-observed`；`--- BEGIN INJECTED MEMORY ---` 块不得当新规则重复提炼、不得作 evidence 出处。
+3. **无真人行强制降级兜底**（`src/memory/distiller.ts`，Task 5）：`parseDistillCandidates` 第三参 `hasHumanUserTurn`——以 `input.turns`（过滤前原始 turns，不受预算裁剪影响）判会话里有没有真人发言过；无则强制把所有候选降级 `agent-observed`（无论 LLM 标了什么）。专治纯 loop 会话（本次 bug 场景：真人早已离场，turns 全是 `[system]`）。
+
+### 关键决策
+
+- **D1**：无来源字段的 user 行保守判 `system`。方向性权衡——**误降级（agent-observed 仍可留为候选，仅失双重保护，可丢）优于误升级（机器行错误享受删不掉保护，锁死，正是本次事故）**。注入记忆块恰好无字段（实测），loop 重放有 `promptSource:system`，真人陈述必有 `origin.kind=human`+`promptSource:typed`，「无字段 = 机器生成」与实测一致。
+- **D2**：规则用 OR（`origin.kind=human` 或 `promptSource=typed`）而非 AND。实测两字段同现于真人行、机器行两字段皆非，OR 与 AND 在现有数据上分类一致；OR 对字段演进更鲁棒——未来版本若只带其中一个字段，真人行不会因单字段缺席被误降级。
+
+### 执行方式
+
+brainstorming → 设计 spec（`docs/superpowers/specs/2026-08-20-origin-misattribution-root-fix-design.md`）→ 任务计划 → subagent-driven 6 任务各带 task review（捕获层 marker 纯函数 / claude 来源判定 / opencode 侧 / prompt 硬规则 + 兜底降级 / e2e 事故复现回归锁 + STATE 收尾）。零 DB 迁移、零新依赖、`valueFilter.ts` 零改动（origin 一旦准确，双重保护就指向正确对象）。存量 2 条误标候选（task-report-triage ×2，`candidate` 状态）不回填——用户已裁定在 Web UI 手动清，本次只修前向。
+
+`bun run typecheck && bun test`：1344 pass / 6 skip / 0 fail（基线 1315 pass / 6 skip → +29 净：三层防线纯函数 + prompt 硬规则文本锁 + e2e 事故复现全链路回归锁）。
+
+### 上线后观测（硬要求，结论回填本节）
+
+1. 新会话产出的候选 origin 分布：`user-stated`/`user-confirmed` 是否只锚定真人陈述，loop 会话不再产出 `user-stated` 标的 skill 派生 / 会话物流候选。
+2. 注入记忆块不再被当新规则重复提炼（候选标题与既有记忆重复率下降）。
+3. derivable 丢弃里有无真人陈述误伤（D1 保守判定代价观测）。
+4. 与本次事故同形态（/loop 驱动、`promptSource=system`）的新会话，候选 origin 是否正确降级 `agent-observed`。
 
 ## 蒸馏输入膨胀根治：剔除 thinking turn（2026-08-19，数据驱动）
 

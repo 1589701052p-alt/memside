@@ -95,9 +95,14 @@ export async function judgeValueAgentic(
     const final = loop.final as { verdicts?: unknown } | null
     if (!final || !Array.isArray(final.verdicts)) {
       // 预算耗尽 / LLM 报错 / final 形状不对 -> 失败标识（不再 keepAll 冒充成功）。
-      // Task 7 接 scheduler 暂停逻辑；loop.stopReason 进 reasons 备查（trace 暂丢弃，
-      // 与 brief 的 failed 变体对齐——Task 7 若需落盘 agentTrace 再扩 failed 变体）。
-      return { failed: true, reasons: [`agent loop ended without final: ${loop.stopReason}`] }
+      // spec 2026-08-20 §3.2：reasons 优先透出 trace 末条真实原因（Task 3 catch 路径
+      // 透出 aborted:/llm-error:），trace 为空回退 stopReason 文案。failed 标识不变，
+      // scheduler 暂停 + pending_review 逻辑不动。
+      const lastTrace = loop.trace.length > 0 ? loop.trace[loop.trace.length - 1]!.text : null
+      const reasons = lastTrace
+        ? [lastTrace]
+        : [`agent loop ended without final: ${loop.stopReason}`]
+      return { failed: true, reasons }
     }
     const entries = (final.verdicts as unknown[]).filter(
       (v): v is { index: number; category: string } =>

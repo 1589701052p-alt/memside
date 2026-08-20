@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { openDb } from '@/db/client'
 import { enqueueDistillJob, tick } from '@/scheduler'
-import { createCandidate, getSessionOffset, getJobCheckpoint, listLlmRounds } from '@/memory/store'
+import { createCandidate, getSessionOffset, getJobCheckpoint, getSourceInput, listLlmRounds } from '@/memory/store'
 import { memoryDistillJobs, memories, notifications } from '@/db/schema'
 
 // 钉经济模式：单发 judgeValue 可控（quality 默认走 agent 判定器）；digest 阶段
@@ -291,4 +291,21 @@ test('final-fix-1: judge 成功后崩溃于 checkpoint 前 → 重跑不产生�
   const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
   expect(rows[0]!.status).toBe('done')
   expect(await getSessionOffset(db, 's-fix1')).toBe(3)
+})
+
+test('distill 3 次失败暂停: 存 source-input 快照（之前 distill 暂停无快照是黑盒）', async () => {
+  const jobId = await seedDueJob('s-res-distill-pause')
+  // distill 每轮都抛 abort -> 3 次暂停
+  const callLLM = async () => { throw new Error('the operation was aborted') }
+  for (let i = 0; i < 3; i++) {
+    await tick(db, { loadTranscript: () => loadTranscript('some real input content'), callLLM, createCandidate: fakeCreate as never, loadJudgeConfig: () => ECONOMY })
+    if (i < 2) await forceDue(jobId)
+  }
+  const rows = await db.select().from(memoryDistillJobs).where(eq(memoryDistillJobs.id, jobId))
+  expect(rows[0]!.status).toBe('paused')
+  expect(rows[0]!.stepError).toBe('distill')
+  // 核心：distill 暂停也存了输入快照（spec §3.3(a)）
+  const snap = await getSourceInput(db, jobId)
+  expect(snap).not.toBeNull()
+  expect(snap!.turnCount).toBeGreaterThan(0)
 })

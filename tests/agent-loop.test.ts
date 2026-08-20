@@ -96,3 +96,30 @@ test('工具执行出错:错误文本塞回对话,循环继续', async () => {
   expect(r.stopReason).toBe('final')
   expect(seenUsers[1]).toContain('未知工具')
 })
+
+// ---- 失败分类：spec 2026-08-20 §3.2，judge(agentLoop) catch 不再笼统丢原因 ----
+
+test('callLLM 抛 AbortError: trace 末条含 aborted:，stopReason 仍 llm-error', async () => {
+  const r = await runAgentLoop({
+    callLLM: async () => {
+      const e = new Error('The operation was aborted')
+      e.name = 'AbortError'
+      throw e
+    },
+    system: 'sys', user: '材料', tools: fakeTools(), maxRounds: 5, timeBudgetMs: 60_000,
+  })
+  expect(r.stopReason).toBe('llm-error')
+  expect(r.final).toBeNull()
+  expect(r.trace.length).toBeGreaterThan(0)
+  expect(r.trace[r.trace.length - 1]!.text).toContain('aborted:')
+})
+
+test('callLLM 抛普通 Error: trace 末条含 llm-error:', async () => {
+  const r = await runAgentLoop({
+    callLLM: async () => { throw new Error('HTTP 502 bad gateway') },
+    system: 'sys', user: '材料', tools: fakeTools(), maxRounds: 5, timeBudgetMs: 60_000,
+  })
+  expect(r.stopReason).toBe('llm-error')
+  expect(r.trace[r.trace.length - 1]!.text).toContain('llm-error:')
+  expect(r.trace[r.trace.length - 1]!.text).toContain('HTTP 502 bad gateway')
+})
