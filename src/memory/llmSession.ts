@@ -10,6 +10,13 @@ export interface RoundRecord {
   request: string
   response: string
   result: StepAttemptResult
+  /**
+   * shouldRetry 返回的引导串（spec 2026-08-20-consolidate-update-of-target-prompt final-fix C1）。
+   * 生产 dedup 路径恒带 loadHistory，单 tick 单轮失败后，带 detail 的 conversation 被丢弃；
+   * 真实重试在下一 tick 走恢复路径 buildFollowupPrompt(last.result.reason, last.response, step, last.detail)。
+   * 不落盘 detail → 恢复路径无法把引导传给模型，3 轮同错必挂。
+   */
+  detail?: string
 }
 
 export interface LlmSessionOpts {
@@ -42,7 +49,7 @@ export async function runLlmSession(opts: LlmSessionOpts): Promise<LlmSessionRes
   if (history.length > 0) {
     const last = history[history.length - 1]!
     if (!last.result.ok) {
-      conversation = opts.initialUser + buildFollowupPrompt(last.result.reason, last.response, opts.step)
+      conversation = opts.initialUser + buildFollowupPrompt(last.result.reason, last.response, opts.step, last.detail)
     } else {
       // Task 7（spec §3.3 不变量 3 / P3 断点续跑）：末轮已成功的会话不重发 LLM——
       // 直接复用落盘的成功响应。覆盖「round 落库后、断点推进前」的崩溃窗口：
@@ -80,8 +87,8 @@ export async function runLlmSession(opts: LlmSessionOpts): Promise<LlmSessionRes
       }
       result = { ok: false, reason: 'format' as StepFailReason }
       reasons.push(`format:${retryErr}`)
-      await opts.persistRound?.({ round, request: conversation, response: raw, result })
-      conversation = opts.initialUser + buildFollowupPrompt('format', raw, opts.step)
+      await opts.persistRound?.({ round, request: conversation, response: raw, result, detail: retryErr })
+      conversation = opts.initialUser + buildFollowupPrompt('format', raw, opts.step, retryErr)
     } catch (e) {
       // 裁决 #2：catch 块 response 传 null，避免 aborted 被 partial raw 遮蔽
       const reason = classifyFailure(e, null)
